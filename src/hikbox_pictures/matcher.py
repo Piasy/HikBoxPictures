@@ -68,9 +68,8 @@ def evaluate_candidate_photo(
     if tolerance is not None:
         distance_threshold = tolerance
 
-    face_engine = engine if engine is not None else _get_cached_matcher_engine()
-
     try:
+        face_engine = engine if engine is not None else _get_cached_matcher_engine()
         faces = face_engine.detect_faces(photo.path)
     except Exception as exc:  # pragma: no cover
         raise CandidateDecodeError(f"Failed to decode {photo.path}: {exc}") from exc

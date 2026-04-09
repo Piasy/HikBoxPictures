@@ -149,6 +149,18 @@ def test_evaluate_candidate_photo_wraps_inference_errors(monkeypatch, tmp_path) 
         evaluate_candidate_photo(photo, [[0.1]], [[0.2]])
 
 
+def test_evaluate_candidate_photo_wraps_cached_engine_init_errors(monkeypatch, tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "init-fail.jpg")
+
+    def fake_cached_engine():
+        raise RuntimeError("engine init boom")
+
+    monkeypatch.setattr("hikbox_pictures.matcher._get_cached_matcher_engine", fake_cached_engine)
+
+    with pytest.raises(CandidateDecodeError, match="engine init boom"):
+        evaluate_candidate_photo(photo, [[0.1]], [[0.2]])
+
+
 def test_evaluate_candidate_photo_accepts_numpy_reference_embeddings(monkeypatch, tmp_path) -> None:
     photo = CandidatePhoto(path=tmp_path / "numpy-reference.jpg")
 
