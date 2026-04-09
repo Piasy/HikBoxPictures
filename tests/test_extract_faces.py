@@ -70,6 +70,7 @@ def test_main_uses_insightface_and_keeps_output_rules(monkeypatch, tmp_path, cap
     assert "输出人脸数: 2" in output
     assert "无人脸图片数: 0" in output
     assert "解码失败数: 0" in output
+    assert "检测失败数: 0" in output
 
     with Image.open(first_output) as image:
         assert image.size == (64, 64)
@@ -151,3 +152,104 @@ def test_main_counts_decode_failures_and_no_face(monkeypatch, tmp_path, capsys) 
     assert "输出人脸数: 0" in stdout
     assert "无人脸图片数: 1" in stdout
     assert "解码失败数: 1" in stdout
+    assert "检测失败数: 0" in stdout
+
+
+def test_main_counts_detect_failures_separately(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+
+    detect_fail = input_dir / "detect-fail.jpg"
+    Image.new("RGB", (12, 12), color=(255, 255, 255)).save(detect_fail)
+
+    class FakeEngine:
+        def detect_faces(self, _image_path: Path):
+            raise RuntimeError("detect error")
+
+    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: FakeEngine())
+    monkeypatch.setattr(script, "load_rgb_image", lambda _path: np.full((12, 12, 3), 120, dtype=np.uint8))
+
+    exit_code = script.main([
+        "--input",
+        str(input_dir),
+        "--output",
+        str(output_dir),
+    ])
+
+    stdout = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "扫描图片数: 1" in stdout
+    assert "输出人脸数: 0" in stdout
+    assert "无人脸图片数: 0" in stdout
+    assert "解码失败数: 0" in stdout
+    assert "检测失败数: 1" in stdout
+
+
+def test_main_avoids_overwrite_when_output_name_collides(monkeypatch, tmp_path) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+
+    source_jpg = input_dir / "same.jpg"
+    source_png = input_dir / "same.png"
+    Image.new("RGB", (20, 20), color=(50, 60, 70)).save(source_jpg)
+    Image.new("RGB", (20, 20), color=(80, 90, 100)).save(source_png)
+
+    class FakeEngine:
+        def detect_faces(self, _image_path: Path):
+            return [SimpleNamespace(bbox=(2, 12, 14, 0))]
+
+    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: FakeEngine())
+    monkeypatch.setattr(script, "load_rgb_image", lambda _path: np.full((20, 20, 3), 180, dtype=np.uint8))
+
+    exit_code = script.main([
+        "--input",
+        str(input_dir),
+        "--output",
+        str(output_dir),
+        "--size",
+        "32",
+    ])
+
+    assert exit_code == 0
+    produced = sorted(output_dir.glob("*.png"))
+    assert len(produced) == 2
+    assert produced[0].name == "same__face_01.png"
+    assert produced[1].name.startswith("same__face_01__")
+    assert produced[1].suffix == ".png"
+
+
+def test_main_returns_2_when_output_path_is_file(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    output_file = tmp_path / "output-file"
+    input_dir.mkdir()
+    output_file.write_text("not a dir", encoding="utf-8")
+
+    create_calls: list[bool] = []
+
+    def fake_create():
+        create_calls.append(True)
+        return object()
+
+    monkeypatch.setattr(script.InsightFaceEngine, "create", fake_create)
+
+    exit_code = script.main([
+        "--input",
+        str(input_dir),
+        "--output",
+        str(output_file),
+    ])
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 2
+    assert not create_calls
+    assert f"输出路径不是目录: {output_file}" in stderr

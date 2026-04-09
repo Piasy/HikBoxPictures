@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from hashlib import sha1
 from pathlib import Path
 from typing import Iterator
 
@@ -126,7 +127,25 @@ def _build_output_path(
     else:
         relative_parent = source_path.relative_to(input_path).parent
 
-    return output_path / relative_parent / f"{source_path.stem}__face_{face_index:02d}.png"
+    preferred = output_path / relative_parent / f"{source_path.stem}__face_{face_index:02d}.png"
+    if not preferred.exists():
+        return preferred
+
+    collision_suffix = sha1(str(source_path).encode("utf-8")).hexdigest()[:10]
+    candidate = output_path / relative_parent / f"{source_path.stem}__face_{face_index:02d}__{collision_suffix}.png"
+    if not candidate.exists():
+        return candidate
+
+    retry_index = 1
+    while True:
+        retry_candidate = (
+            output_path
+            / relative_parent
+            / f"{source_path.stem}__face_{face_index:02d}__{collision_suffix}_{retry_index}.png"
+        )
+        if not retry_candidate.exists():
+            return retry_candidate
+        retry_index += 1
 
 
 def _save_face_crop(
@@ -156,12 +175,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.size <= 0:
         print("--size 必须大于 0", file=sys.stderr)
         return 2
+    if args.output.exists() and not args.output.is_dir():
+        print(f"输出路径不是目录: {args.output}", file=sys.stderr)
+        return 2
 
     args.output.mkdir(parents=True, exist_ok=True)
 
     scanned_files = 0
     no_face_files = 0
-    decode_errors = 0
+    decode_failures = 0
+    detect_failures = 0
     written_faces = 0
 
     print(f"输入路径: {args.input}")
@@ -182,14 +205,14 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 image = load_rgb_image(image_path)
             except Exception as exc:
-                decode_errors += 1
+                decode_failures += 1
                 print(f"解码失败: {image_path} ({exc})", file=sys.stderr)
                 continue
 
             try:
                 locations = [tuple(face.bbox) for face in engine.detect_faces(image_path)]
             except Exception as exc:
-                decode_errors += 1
+                detect_failures += 1
                 print(f"检测失败: {image_path} ({exc})", file=sys.stderr)
                 continue
 
@@ -221,7 +244,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"扫描图片数: {scanned_files}")
     print(f"输出人脸数: {written_faces}")
     print(f"无人脸图片数: {no_face_files}")
-    print(f"解码失败数: {decode_errors}")
+    print(f"解码失败数: {decode_failures}")
+    print(f"检测失败数: {detect_failures}")
     return 0
 
 
