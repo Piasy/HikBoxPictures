@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from hashlib import sha1
 from pathlib import Path
 from typing import Iterator
 
@@ -126,26 +125,7 @@ def _build_output_path(
         relative_parent = Path()
     else:
         relative_parent = source_path.relative_to(input_path).parent
-
-    preferred = output_path / relative_parent / f"{source_path.stem}__face_{face_index:02d}.png"
-    if not preferred.exists():
-        return preferred
-
-    collision_suffix = sha1(str(source_path).encode("utf-8")).hexdigest()[:10]
-    candidate = output_path / relative_parent / f"{source_path.stem}__face_{face_index:02d}__{collision_suffix}.png"
-    if not candidate.exists():
-        return candidate
-
-    retry_index = 1
-    while True:
-        retry_candidate = (
-            output_path
-            / relative_parent
-            / f"{source_path.stem}__face_{face_index:02d}__{collision_suffix}_{retry_index}.png"
-        )
-        if not retry_candidate.exists():
-            return retry_candidate
-        retry_index += 1
+    return output_path / relative_parent / f"{source_path.stem}__face_{face_index:02d}.png"
 
 
 def _save_face_crop(

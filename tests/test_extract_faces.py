@@ -189,7 +189,7 @@ def test_main_counts_detect_failures_separately(monkeypatch, tmp_path, capsys) -
     assert "检测失败数: 1" in stdout
 
 
-def test_main_avoids_overwrite_when_output_name_collides(monkeypatch, tmp_path) -> None:
+def test_main_keeps_fixed_name_rule_when_output_name_collides(monkeypatch, tmp_path) -> None:
     script = _load_script_module()
 
     input_dir = tmp_path / "input"
@@ -219,11 +219,9 @@ def test_main_avoids_overwrite_when_output_name_collides(monkeypatch, tmp_path) 
     ])
 
     assert exit_code == 0
-    produced = sorted(output_dir.glob("*.png"))
-    assert len(produced) == 2
+    produced = list(output_dir.glob("*.png"))
+    assert len(produced) == 1
     assert produced[0].name == "same__face_01.png"
-    assert produced[1].name.startswith("same__face_01__")
-    assert produced[1].suffix == ".png"
 
 
 def test_main_returns_2_when_output_path_is_file(monkeypatch, tmp_path, capsys) -> None:
