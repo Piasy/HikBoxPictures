@@ -27,7 +27,7 @@ def _get_cached_matcher_engine() -> InsightFaceEngine:
 def _normalize_reference_embeddings(
     reference_embeddings: Sequence[Sequence[float]] | Sequence[float],
 ) -> list[Sequence[float]]:
-    if not reference_embeddings:
+    if len(reference_embeddings) == 0:
         return []
     first_item = reference_embeddings[0]
     if isinstance(first_item, Real):
@@ -62,7 +62,11 @@ def evaluate_candidate_photo(
     person_b_embeddings: Sequence[Sequence[float]] | Sequence[float],
     *,
     distance_threshold: float = DEFAULT_DISTANCE_THRESHOLD,
+    tolerance: float | None = None,
 ) -> PhotoEvaluation:
+    if tolerance is not None:
+        distance_threshold = tolerance
+
     try:
         faces = _get_cached_matcher_engine().detect_faces(photo.path)
     except Exception as exc:  # pragma: no cover

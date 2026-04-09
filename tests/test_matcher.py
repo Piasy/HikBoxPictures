@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from hikbox_pictures.matcher import (
@@ -146,3 +147,50 @@ def test_evaluate_candidate_photo_wraps_inference_errors(monkeypatch, tmp_path) 
 
     with pytest.raises(CandidateDecodeError, match="inference boom"):
         evaluate_candidate_photo(photo, [[0.1]], [[0.2]])
+
+
+def test_evaluate_candidate_photo_accepts_numpy_reference_embeddings(monkeypatch, tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "numpy-reference.jpg")
+
+    class FakeEngine:
+        def detect_faces(self, image_path):
+            assert image_path == photo.path
+            return [
+                SimpleNamespace(embedding=np.array([0.1, 0.1])),
+                SimpleNamespace(embedding=np.array([0.9, 0.9])),
+            ]
+
+    monkeypatch.setattr("hikbox_pictures.matcher._get_cached_matcher_engine", lambda: FakeEngine())
+
+    evaluation = evaluate_candidate_photo(
+        photo,
+        np.array([[0.0, 0.0], [0.2, 0.2]]),
+        np.array([[1.0, 1.0]]),
+    )
+
+    assert evaluation.detected_face_count == 2
+    assert evaluation.bucket is MatchBucket.ONLY_TWO
+
+
+def test_evaluate_candidate_photo_accepts_legacy_tolerance_alias(monkeypatch, tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "legacy-tolerance.jpg")
+
+    class FakeEngine:
+        def detect_faces(self, image_path):
+            assert image_path == photo.path
+            return [
+                SimpleNamespace(embedding=[0.08, 0.0]),
+                SimpleNamespace(embedding=[1.08, 0.0]),
+            ]
+
+    monkeypatch.setattr("hikbox_pictures.matcher._get_cached_matcher_engine", lambda: FakeEngine())
+
+    evaluation = evaluate_candidate_photo(
+        photo,
+        [[0.0, 0.0]],
+        [[1.0, 0.0]],
+        tolerance=DEFAULT_DISTANCE_THRESHOLD / 10,
+    )
+
+    assert evaluation.bucket is None
+    assert evaluation.detected_face_count == 2
