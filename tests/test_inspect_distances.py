@@ -199,3 +199,80 @@ def test_main_skips_output_directory_by_default(monkeypatch, tmp_path, capsys) -
     assert exit_code == 0
     assert f"文件: {candidate_path}" in output
     assert f"文件: {skipped_path}" not in output
+
+
+def test_main_prints_effective_tolerance_from_argument(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_dir = tmp_path / "ref-b"
+    input_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_dir.mkdir()
+
+    candidate_path = input_dir / "candidate.jpg"
+    ref_a = ref_a_dir / "a.jpg"
+    ref_b = ref_b_dir / "b.jpg"
+    for path in (candidate_path, ref_a, ref_b):
+        Image.new("RGB", (24, 24), color="white").save(path)
+
+    fake_engine = object()
+    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: fake_engine)
+    monkeypatch.setattr(
+        script,
+        "load_reference_embeddings",
+        lambda path, engine: (([[0.1]], [ref_a]) if path == ref_a_dir else ([[0.2]], [ref_b])),
+    )
+    monkeypatch.setattr(script, "iter_candidate_photos", lambda root: iter([CandidatePhoto(path=candidate_path)]))
+    monkeypatch.setattr(
+        script,
+        "_load_candidate_face_encodings",
+        lambda path, engine: ([(2, 20, 20, 4)], [[0.1]]),
+    )
+    monkeypatch.setattr(script, "compute_min_distances", lambda encodings, refs: [0.1234], raising=False)
+
+    exit_code = script.main(
+        [
+            "--input",
+            str(input_dir),
+            "--ref-a-dir",
+            str(ref_a_dir),
+            "--ref-b-dir",
+            str(ref_b_dir),
+            "--tolerance",
+            "0.42",
+        ]
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "匹配阈值: 0.42" in output
+
+
+def test_main_reports_non_directory_reference_path(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_file = tmp_path / "ref-b.jpg"
+    input_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_file.write_text("not a directory")
+
+    exit_code = script.main(
+        [
+            "--input",
+            str(input_dir),
+            "--ref-a-dir",
+            str(ref_a_dir),
+            "--ref-b-dir",
+            str(ref_b_file),
+        ]
+    )
+
+    error_output = capsys.readouterr().err
+
+    assert exit_code == 2
+    assert f"路径不是目录: {ref_b_file}" in error_output

@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--ref-a-dir", required=True, type=Path)
     parser.add_argument("--ref-b-dir", required=True, type=Path)
+    parser.add_argument("--tolerance", type=float, default=DEFAULT_DISTANCE_THRESHOLD)
     parser.add_argument("--annotated-dir", type=Path)
     return parser
 
@@ -168,10 +169,16 @@ def main(argv: list[str] | None = None) -> int:
     if not args.input.exists():
         print(f"路径不存在: {args.input}", file=sys.stderr)
         return 2
+    if not args.input.is_dir():
+        print(f"路径不是目录: {args.input}", file=sys.stderr)
+        return 2
 
     for path in (args.ref_a_dir, args.ref_b_dir):
-        if not path.exists() or not path.is_dir():
+        if not path.exists():
             print(f"路径不存在: {path}", file=sys.stderr)
+            return 2
+        if not path.is_dir():
+            print(f"路径不是目录: {path}", file=sys.stderr)
             return 2
 
     try:
@@ -185,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"输入目录: {args.input}")
     print(f"参考图目录 A: {args.ref_a_dir}")
     print(f"参考图目录 B: {args.ref_b_dir}")
-    print(f"匹配阈值: {DEFAULT_DISTANCE_THRESHOLD:.2f}")
+    print(f"匹配阈值: {args.tolerance:.2f}")
     if args.annotated_dir is not None:
         print(f"标注输出目录: {args.annotated_dir}")
 
