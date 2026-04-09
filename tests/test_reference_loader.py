@@ -11,6 +11,11 @@ from hikbox_pictures.reference_loader import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _reset_cached_reference_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("hikbox_pictures.reference_loader._CACHED_REFERENCE_ENGINE", None)
+
+
 class FakeInsightFaceEngine:
     def __init__(self, faces_by_path: dict[Path, list[DetectedFace]]) -> None:
         self.faces_by_path = faces_by_path
@@ -116,3 +121,43 @@ def test_load_reference_encoding_is_backward_compatible(tmp_path: Path, monkeypa
     encoding = load_reference_encoding(photo)
 
     assert encoding == [0.4, 0.5]
+
+
+def test_load_reference_encoding_reuses_engine_instance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    photo_a = tmp_path / "legacy-a.jpg"
+    photo_b = tmp_path / "legacy-b.jpg"
+    photo_a.write_bytes(b"img")
+    photo_b.write_bytes(b"img")
+    create_calls = 0
+
+    class _CompatEngine:
+        def detect_faces(self, image_path: Path) -> list[DetectedFace]:
+            if image_path == photo_a:
+                return [_make_face([0.1])]
+            if image_path == photo_b:
+                return [_make_face([0.2])]
+            raise AssertionError(f"unexpected path: {image_path}")
+
+    def _create_engine() -> _CompatEngine:
+        nonlocal create_calls
+        create_calls += 1
+        return _CompatEngine()
+
+    monkeypatch.setattr("hikbox_pictures.reference_loader.InsightFaceEngine.create", _create_engine)
+
+    assert load_reference_encoding(photo_a) == [0.1]
+    assert load_reference_encoding(photo_b) == [0.2]
+    assert create_calls == 1
+
+
+def test_load_reference_encoding_wraps_create_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    photo = tmp_path / "legacy-create-failed.jpg"
+    photo.write_bytes(b"img")
+
+    def _raise_create_error() -> object:
+        raise RuntimeError("init failed")
+
+    monkeypatch.setattr("hikbox_pictures.reference_loader.InsightFaceEngine.create", _raise_create_error)
+
+    with pytest.raises(ReferenceImageError, match="legacy-create-failed.jpg"):
+        load_reference_encoding(photo)
