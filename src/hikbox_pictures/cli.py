@@ -34,15 +34,12 @@ def _print_summary(summary: RunSummary) -> None:
 
 
 def _evaluate_with_engine(candidate, person_a_embeddings, person_b_embeddings, engine):
-    try:
-        return evaluate_candidate_photo(
-            candidate,
-            person_a_embeddings,
-            person_b_embeddings,
-            engine=engine,
-        )
-    except TypeError:
-        return evaluate_candidate_photo(candidate, person_a_embeddings, person_b_embeddings)
+    return evaluate_candidate_photo(
+        candidate,
+        person_a_embeddings,
+        person_b_embeddings,
+        engine=engine,
+    )
 
 
 def _validate_reference_directory(path: Path) -> bool:
