@@ -26,7 +26,9 @@ def test_sample_files_exist_as_placeholder_assets() -> None:
 def test_readme_mentions_macos_dependencies() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "macOS" in readme
-    assert "face_recognition" in readme
+    assert "insightface" in readme
+    assert "onnxruntime" in readme
+    assert "face_recognition" not in readme
     assert "## 依赖要求" in readme
     assert "## 安装" in readme
     assert "## 用法" in readme
@@ -36,6 +38,12 @@ def test_readme_mentions_macos_dependencies() -> None:
     assert "Xcode Command Line Tools" in readme
     assert "./scripts/install.sh" in readme
     assert "hikbox-pictures --input" in readme
+    assert "--ref-a-dir" in readme
+    assert "--ref-b-dir" in readme
     assert "only-two/YYYY-MM" in readme
     assert "group/YYYY-MM" in readme
+    assert "首次运行会自动下载模型" in readme
+    assert "需联网" in readme
+    assert "首次会稍慢" in readme
+    assert "非商业研究用途" in readme
     assert "工具只扫描图片文件，不分析视频内容。" in readme

@@ -22,30 +22,29 @@ fi
 
 source "${VENV_DIR}/bin/activate"
 
-echo "[hikbox-pictures] 升级 pip 并安装兼容版本 setuptools"
-python3 -m pip install --upgrade pip 'setuptools<81'
+echo "[hikbox-pictures] 升级 pip"
+python3 -m pip install --upgrade pip
 
-echo "[hikbox-pictures] 安装项目及开发依赖"
+echo "[hikbox-pictures] 安装项目及开发依赖（包含 insightface、onnxruntime）"
 if ! python3 -m pip install -e '.[dev]'; then
-  cat >&2 <<'EOF'
+  cat >&2 <<'ERR'
 安装失败。
 
-如果错误发生在 dlib 构建阶段，请先执行：
-  xcode-select --install
-
-然后重新运行：
+请确认网络可用（首次安装 insightface 模型下载需联网），然后重新运行：
   ./scripts/install.sh
-EOF
+ERR
   exit 1
 fi
 
-cat <<EOF
+cat <<DONE
 
 安装完成。
+
+提示：首次运行会自动下载 insightface 预训练模型，需联网且速度会稍慢。
 
 激活虚拟环境：
   source "${VENV_DIR}/bin/activate"
 
 运行测试：
   PYTHONPATH=src python3 -m pytest -q
-EOF
+DONE

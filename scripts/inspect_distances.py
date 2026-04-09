@@ -5,30 +5,32 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Any
-
-import face_recognition
+from typing import Any, Sequence
 from PIL import Image, ImageDraw, ImageFont
 
-from hikbox_pictures.image_io import load_rgb_image
-from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_encoding
+from hikbox_pictures.insightface_engine import InsightFaceEngine, InsightFaceInitError
+from hikbox_pictures.matcher import DEFAULT_DISTANCE_THRESHOLD, compute_min_distances
+from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_embeddings
 from hikbox_pictures.scanner import iter_candidate_photos
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="inspect_distances")
     parser.add_argument("--input", required=True, type=Path)
-    parser.add_argument("--ref-a", required=True, type=Path)
-    parser.add_argument("--ref-b", required=True, type=Path)
-    parser.add_argument("--tolerance", type=float, default=0.5)
+    parser.add_argument("--ref-a-dir", required=True, type=Path)
+    parser.add_argument("--ref-b-dir", required=True, type=Path)
+    parser.add_argument("--tolerance", type=float, default=DEFAULT_DISTANCE_THRESHOLD)
     parser.add_argument("--annotated-dir", type=Path)
     return parser
 
 
-def _load_candidate_face_encodings(path: Path) -> tuple[list[tuple[int, int, int, int]], list[list[float]]]:
-    image = load_rgb_image(path)
-    locations = face_recognition.face_locations(image)
-    encodings = face_recognition.face_encodings(image, known_face_locations=locations)
+def _load_candidate_face_encodings(
+    path: Path,
+    engine: InsightFaceEngine,
+) -> tuple[list[tuple[int, int, int, int]], list[Sequence[float]]]:
+    faces = engine.detect_faces(path)
+    locations = [face.bbox for face in faces]
+    encodings = [face.embedding for face in faces]
     return locations, encodings
 
 
@@ -53,12 +55,13 @@ def _should_skip_candidate(
     candidate_path: Path,
     *,
     input_root: Path,
-    ref_paths: set[Path],
+    ref_dirs: set[Path],
     annotated_dir: Path | None,
 ) -> bool:
     resolved_candidate_path = candidate_path.resolve()
-    if resolved_candidate_path in ref_paths:
-        return True
+    for ref_dir in ref_dirs:
+        if _is_relative_to(resolved_candidate_path, ref_dir):
+            return True
     if annotated_dir is not None and _is_relative_to(resolved_candidate_path, annotated_dir):
         return True
 
@@ -163,34 +166,45 @@ def _write_annotated_image(
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    for path in (args.input, args.ref_a, args.ref_b):
+    if not args.input.exists():
+        print(f"路径不存在: {args.input}", file=sys.stderr)
+        return 2
+    if not args.input.is_dir():
+        print(f"路径不是目录: {args.input}", file=sys.stderr)
+        return 2
+
+    for path in (args.ref_a_dir, args.ref_b_dir):
         if not path.exists():
             print(f"路径不存在: {path}", file=sys.stderr)
             return 2
+        if not path.is_dir():
+            print(f"路径不是目录: {path}", file=sys.stderr)
+            return 2
 
     try:
-        ref_a_encoding = load_reference_encoding(args.ref_a)
-        ref_b_encoding = load_reference_encoding(args.ref_b)
-    except ReferenceImageError as exc:
+        engine = InsightFaceEngine.create()
+        ref_a_embeddings, _ = load_reference_embeddings(args.ref_a_dir, engine)
+        ref_b_embeddings, _ = load_reference_embeddings(args.ref_b_dir, engine)
+    except (InsightFaceInitError, ReferenceImageError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
     print(f"输入目录: {args.input}")
-    print(f"参考图 A: {args.ref_a}")
-    print(f"参考图 B: {args.ref_b}")
+    print(f"参考图目录 A: {args.ref_a_dir}")
+    print(f"参考图目录 B: {args.ref_b_dir}")
     print(f"匹配阈值: {args.tolerance:.2f}")
     if args.annotated_dir is not None:
         print(f"标注输出目录: {args.annotated_dir}")
 
     resolved_input_root = args.input.resolve()
-    resolved_ref_paths = {args.ref_a.resolve(), args.ref_b.resolve()}
+    resolved_ref_dirs = {args.ref_a_dir.resolve(), args.ref_b_dir.resolve()}
     resolved_annotated_dir = args.annotated_dir.resolve() if args.annotated_dir is not None else None
 
     for candidate in iter_candidate_photos(args.input):
         if _should_skip_candidate(
             candidate.path,
             input_root=resolved_input_root,
-            ref_paths=resolved_ref_paths,
+            ref_dirs=resolved_ref_dirs,
             annotated_dir=resolved_annotated_dir,
         ):
             continue
@@ -198,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print(f"文件: {candidate.path}")
         try:
-            locations, encodings = _load_candidate_face_encodings(candidate.path)
+            locations, encodings = _load_candidate_face_encodings(candidate.path, engine)
         except Exception as exc:
             print(f"  解码失败: {exc}")
             continue
@@ -207,8 +221,8 @@ def main(argv: list[str] | None = None) -> int:
         if not encodings:
             continue
 
-        distances_a = [float(value) for value in face_recognition.face_distance(encodings, ref_a_encoding)]
-        distances_b = [float(value) for value in face_recognition.face_distance(encodings, ref_b_encoding)]
+        distances_a = [float(value) for value in compute_min_distances(encodings, ref_a_embeddings)]
+        distances_b = [float(value) for value in compute_min_distances(encodings, ref_b_embeddings)]
 
         for index, location in enumerate(locations):
             distance_a = distances_a[index]
