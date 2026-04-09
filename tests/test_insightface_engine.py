@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from hikbox_pictures.insightface_engine import (
@@ -76,7 +77,10 @@ def test_detect_faces_maps_bbox_and_returns_embedding(monkeypatch, tmp_path: Pat
             )
         ]
     )
-    monkeypatch.setattr("hikbox_pictures.insightface_engine.load_rgb_image", lambda _: "rgb")
+    monkeypatch.setattr(
+        "hikbox_pictures.insightface_engine.load_rgb_image",
+        lambda _: np.array([[[1, 2, 3]]], dtype=np.uint8),
+    )
     engine = InsightFaceEngine(analyzer=analyzer)
 
     faces = engine.detect_faces(image_path)
@@ -87,6 +91,26 @@ def test_detect_faces_maps_bbox_and_returns_embedding(monkeypatch, tmp_path: Pat
             embedding=[0.1, 0.2, 0.3],
         )
     ]
+
+
+def test_detect_faces_converts_rgb_to_bgr_before_inference(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.jpg"
+    image_path.write_bytes(b"image")
+
+    rgb_image = np.array([[[1, 2, 3], [4, 5, 6]]], dtype=np.uint8)
+    analyzer_input: dict[str, np.ndarray] = {}
+
+    def fake_get(image: np.ndarray):
+        analyzer_input["image"] = image
+        return []
+
+    monkeypatch.setattr("hikbox_pictures.insightface_engine.load_rgb_image", lambda _: rgb_image)
+    engine = InsightFaceEngine(analyzer=SimpleNamespace(get=fake_get))
+
+    faces = engine.detect_faces(image_path)
+
+    assert faces == []
+    np.testing.assert_array_equal(analyzer_input["image"], rgb_image[:, :, ::-1])
 
 
 def test_create_wraps_init_errors(monkeypatch) -> None:
@@ -110,7 +134,10 @@ def test_detect_faces_wraps_inference_errors(monkeypatch, tmp_path: Path) -> Non
     image_path = tmp_path / "broken.jpg"
     image_path.write_bytes(b"image")
 
-    monkeypatch.setattr("hikbox_pictures.insightface_engine.load_rgb_image", lambda _: "rgb")
+    monkeypatch.setattr(
+        "hikbox_pictures.insightface_engine.load_rgb_image",
+        lambda _: np.array([[[1, 2, 3]]], dtype=np.uint8),
+    )
     analyzer = SimpleNamespace(get=lambda _image: (_ for _ in ()).throw(RuntimeError("infer failed")))
     engine = InsightFaceEngine(analyzer=analyzer)
 

@@ -54,8 +54,9 @@ class InsightFaceEngine:
 
     def detect_faces(self, image_path: Path) -> list[DetectedFace]:
         try:
-            image = load_rgb_image(image_path)
-            faces = self.analyzer.get(image)
+            rgb_image = load_rgb_image(image_path)
+            bgr_image = rgb_image[:, :, ::-1]
+            faces = self.analyzer.get(bgr_image)
             return [
                 DetectedFace(
                     bbox=(int(face.bbox[1]), int(face.bbox[2]), int(face.bbox[3]), int(face.bbox[0])),
