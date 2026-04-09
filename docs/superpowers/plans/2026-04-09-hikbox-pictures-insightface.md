@@ -1,6 +1,6 @@
 # HikBox Pictures InsightFace 迁移 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 将当前基于 `face_recognition` 的单参考图流程迁移到 `InsightFace + ArcFace` 的双目录多参考图流程，并保持输出目录结构、Live Photo `MOV` 复制与时间元数据行为不变。
 
@@ -43,7 +43,7 @@
 - Create: `src/hikbox_pictures/insightface_engine.py`
 - Test: `tests/test_insightface_engine.py`
 
-- [ ] **Step 1: 先写失败测试**
+- [x] **Step 1: 先写失败测试**
 
 ```python
 from __future__ import annotations
@@ -119,12 +119,12 @@ def test_detect_faces_wraps_infer_error(monkeypatch, tmp_path: Path) -> None:
         InsightFaceEngine(FakeAnalyzer()).detect_faces(tmp_path / 'sample.jpg')
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_insightface_engine.py -v`
 Expected: FAIL，`ModuleNotFoundError`
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 ```python
 from __future__ import annotations
@@ -192,12 +192,12 @@ class InsightFaceEngine:
         return faces
 ```
 
-- [ ] **Step 4: 再跑测试确认通过**
+- [x] **Step 4: 再跑测试确认通过**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_insightface_engine.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/hikbox_pictures/insightface_engine.py tests/test_insightface_engine.py
@@ -212,7 +212,7 @@ git commit -m 'feat: add insightface engine boundary'
 - Modify: `src/hikbox_pictures/reference_loader.py`
 - Test: `tests/test_reference_loader.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 from __future__ import annotations
@@ -280,12 +280,12 @@ def test_load_reference_embeddings_rejects_not_single_face(tmp_path) -> None:
         load_reference_embeddings(ref_dir, FakeEngine({one: []}))
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_reference_loader.py -v`
 Expected: FAIL，旧接口不满足目录语义
 
-- [ ] **Step 3: 实现目录加载**
+- [x] **Step 3: 实现目录加载**
 
 ```python
 from __future__ import annotations
@@ -328,12 +328,12 @@ def load_reference_embeddings(ref_dir: Path, engine: InsightFaceEngine) -> tuple
     return embeddings, sources
 ```
 
-- [ ] **Step 4: 再跑测试**
+- [x] **Step 4: 再跑测试**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_reference_loader.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/hikbox_pictures/reference_loader.py tests/test_reference_loader.py
@@ -348,7 +348,7 @@ git commit -m 'feat: load references from directories'
 - Modify: `src/hikbox_pictures/matcher.py`
 - Test: `tests/test_matcher.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 from __future__ import annotations
@@ -401,12 +401,12 @@ def test_evaluate_candidate_photo_requires_distinct_faces(tmp_path) -> None:
     assert evaluation.bucket is MatchBucket.ONLY_TWO
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_matcher.py -v`
 Expected: FAIL，旧签名和旧行为
 
-- [ ] **Step 3: 实现最小距离匹配器**
+- [x] **Step 3: 实现最小距离匹配器**
 
 ```python
 from __future__ import annotations
@@ -469,12 +469,12 @@ def evaluate_candidate_photo(
     return PhotoEvaluation(candidate=photo, detected_face_count=len(faces), bucket=bucket)
 ```
 
-- [ ] **Step 4: 再跑测试**
+- [x] **Step 4: 再跑测试**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_matcher.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/hikbox_pictures/matcher.py tests/test_matcher.py
@@ -489,7 +489,7 @@ git commit -m 'feat: switch matcher to min distance'
 - Modify: `src/hikbox_pictures/cli.py`
 - Test: `tests/test_cli.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 def _build_argv(input_dir, ref_a_dir, ref_b_dir, output_dir) -> list[str]:
@@ -522,12 +522,12 @@ def test_main_fails_when_reference_is_not_directory(tmp_path, capsys) -> None:
     assert '参考路径必须是目录' in capsys.readouterr().err
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_cli.py -v`
 Expected: FAIL，旧参数仍是 `--ref-a` / `--ref-b`
 
-- [ ] **Step 3: 实现 CLI 改造**
+- [x] **Step 3: 实现 CLI 改造**
 
 ```python
 from hikbox_pictures.insightface_engine import InsightFaceEngine, InsightFaceInitError
@@ -561,12 +561,12 @@ def _validate_input_paths(input_path: Path, ref_a_dir: Path, ref_b_dir: Path) ->
 # 4) evaluate_candidate_photo(candidate, engine, person_a_embeddings, person_b_embeddings)
 ```
 
-- [ ] **Step 4: 再跑测试**
+- [x] **Step 4: 再跑测试**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_cli.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add src/hikbox_pictures/cli.py tests/test_cli.py
@@ -581,7 +581,7 @@ git commit -m 'feat: migrate CLI to directory references'
 - Modify: `scripts/inspect_distances.py`
 - Test: `tests/test_inspect_distances.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 exit_code = script.main(
@@ -602,12 +602,12 @@ assert 'dist_a=' in output
 assert 'dist_b=' in output
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_inspect_distances.py -v`
 Expected: FAIL，脚本仍使用旧参数
 
-- [ ] **Step 3: 实现脚本改造**
+- [x] **Step 3: 实现脚本改造**
 
 ```python
 from hikbox_pictures.insightface_engine import InsightFaceEngine
@@ -633,12 +633,12 @@ def build_parser() -> argparse.ArgumentParser:
 # 5) distances = compute_min_distances(faces, ref_a_embeddings, ref_b_embeddings)
 ```
 
-- [ ] **Step 4: 再跑测试**
+- [x] **Step 4: 再跑测试**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_inspect_distances.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add scripts/inspect_distances.py tests/test_inspect_distances.py
@@ -653,7 +653,7 @@ git commit -m 'feat: migrate distance inspector to directory refs'
 - Modify: `scripts/extract_faces.py`
 - Create: `tests/test_extract_faces.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 from __future__ import annotations
@@ -700,12 +700,12 @@ def test_main_uses_engine_detect_faces(monkeypatch, tmp_path, capsys) -> None:
     assert (output_dir / 'a__face_01.png').is_file()
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_extract_faces.py -v`
 Expected: FAIL，旧脚本未使用新引擎
 
-- [ ] **Step 3: 实现脚本改造**
+- [x] **Step 3: 实现脚本改造**
 
 ```python
 from hikbox_pictures.insightface_engine import InsightFaceEngine, InsightFaceInitError
@@ -724,12 +724,12 @@ except InsightFaceInitError as exc:
 # 其余裁剪逻辑保持不变
 ```
 
-- [ ] **Step 4: 再跑测试**
+- [x] **Step 4: 再跑测试**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_extract_faces.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add scripts/extract_faces.py tests/test_extract_faces.py
@@ -747,7 +747,7 @@ git commit -m 'feat: migrate extract_faces to insightface detection'
 - Modify: `tests/test_repo_samples.py`
 - Modify: `tests/test_smoke.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 ```python
 readme = Path('README.md').read_text(encoding='utf-8')
@@ -766,12 +766,12 @@ assert 'onnxruntime' in pyproject
 assert 'face_recognition' not in pyproject
 ```
 
-- [ ] **Step 2: 运行确认失败**
+- [x] **Step 2: 运行确认失败**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_repo_samples.py tests/test_smoke.py -v`
 Expected: FAIL
 
-- [ ] **Step 3: 更新文档和依赖**
+- [x] **Step 3: 更新文档和依赖**
 
 ```toml
 [project]
@@ -810,12 +810,12 @@ hikbox-pictures \
 InsightFace 官方预训练模型包仅允许非商业研究用途。
 ```
 
-- [ ] **Step 4: 再跑测试**
+- [x] **Step 4: 再跑测试**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_repo_samples.py tests/test_smoke.py -v`
 Expected: PASS
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add pyproject.toml scripts/install.sh README.md tests/test_repo_samples.py tests/test_smoke.py
@@ -831,7 +831,7 @@ git commit -m 'chore: migrate deps and docs to insightface'
 - Modify: `tests/test_exporter.py`
 - Modify: `tests/test_metadata.py`
 
-- [ ] **Step 1: 补齐回归断言**
+- [x] **Step 1: 补齐回归断言**
 
 ```python
 assert 'Scanned files:' in captured.out
@@ -851,22 +851,22 @@ assert (tmp_path / 'output' / 'only-two' / '2025-04' / 'IMG_0001.HEIC').is_file(
 assert resolve_capture_datetime(photo) == expected
 ```
 
-- [ ] **Step 2: 运行受影响测试集**
+- [x] **Step 2: 运行受影响测试集**
 
 Run: `PYTHONPATH=src python3 -m pytest tests/test_insightface_engine.py tests/test_reference_loader.py tests/test_matcher.py tests/test_cli.py tests/test_inspect_distances.py tests/test_extract_faces.py -q`
 Expected: PASS
 
-- [ ] **Step 3: 运行全量测试**
+- [x] **Step 3: 运行全量测试**
 
 Run: `PYTHONPATH=src python3 -m pytest -q`
 Expected: PASS
 
-- [ ] **Step 4: 手工冒烟 CLI 参数**
+- [x] **Step 4: 手工冒烟 CLI 参数**
 
 Run: `PYTHONPATH=src python3 -m hikbox_pictures.cli --input test --ref-a-dir test/piasy --ref-b-dir test/penny --output test/output`
 Expected: 参考目录不存在时给出明确错误；目录存在时输出摘要
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git add tests/test_cli.py tests/test_exporter.py tests/test_metadata.py

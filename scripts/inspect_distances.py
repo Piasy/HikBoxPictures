@@ -38,39 +38,9 @@ def _format_distance(value: float) -> str:
     return f"{value:.4f}"
 
 
-def _is_relative_to(path: Path, other: Path) -> bool:
-    try:
-        path.relative_to(other)
-        return True
-    except ValueError:
-        return False
-
-
 def _annotated_output_path(candidate_path: Path, *, input_root: Path, annotated_dir: Path) -> Path:
     relative_path = candidate_path.relative_to(input_root)
     return annotated_dir / relative_path.parent / f"{candidate_path.stem}__annotated.png"
-
-
-def _should_skip_candidate(
-    candidate_path: Path,
-    *,
-    input_root: Path,
-    ref_dirs: set[Path],
-    annotated_dir: Path | None,
-) -> bool:
-    resolved_candidate_path = candidate_path.resolve()
-    for ref_dir in ref_dirs:
-        if _is_relative_to(resolved_candidate_path, ref_dir):
-            return True
-    if annotated_dir is not None and _is_relative_to(resolved_candidate_path, annotated_dir):
-        return True
-
-    try:
-        relative_path = resolved_candidate_path.relative_to(input_root.resolve())
-    except ValueError:
-        return False
-
-    return relative_path.parts[:1] == ("output",)
 
 
 def _load_annotation_font(*, size: int) -> Any:
@@ -196,19 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.annotated_dir is not None:
         print(f"标注输出目录: {args.annotated_dir}")
 
-    resolved_input_root = args.input.resolve()
-    resolved_ref_dirs = {args.ref_a_dir.resolve(), args.ref_b_dir.resolve()}
-    resolved_annotated_dir = args.annotated_dir.resolve() if args.annotated_dir is not None else None
-
     for candidate in iter_candidate_photos(args.input):
-        if _should_skip_candidate(
-            candidate.path,
-            input_root=resolved_input_root,
-            ref_dirs=resolved_ref_dirs,
-            annotated_dir=resolved_annotated_dir,
-        ):
-            continue
-
         print()
         print(f"文件: {candidate.path}")
         try:
@@ -227,11 +185,15 @@ def main(argv: list[str] | None = None) -> int:
         for index, location in enumerate(locations):
             distance_a = distances_a[index]
             distance_b = distances_b[index]
+            match_a = "Y" if distance_a <= args.tolerance else "N"
+            match_b = "Y" if distance_b <= args.tolerance else "N"
             print(
                 "  "
                 f"face[{index}] location={location} "
                 f"dist_a={_format_distance(distance_a)} "
-                f"dist_b={_format_distance(distance_b)}"
+                f"dist_b={_format_distance(distance_b)} "
+                f"match_a={match_a} "
+                f"match_b={match_b}"
             )
 
         if args.annotated_dir is not None:

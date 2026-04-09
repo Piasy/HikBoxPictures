@@ -63,6 +63,23 @@ def test_load_reference_embeddings_recurses_and_filters_extensions(tmp_path: Pat
     assert engine.detected_paths == [img_deeper, img_nested, img_root]
 
 
+def test_load_reference_embeddings_uses_engine_default_det_size(tmp_path: Path) -> None:
+    photo = tmp_path / "person-a.jpg"
+    photo.write_bytes(b"img")
+    seen_calls: list[tuple[Path, tuple[int, int] | None]] = []
+
+    class Engine:
+        def detect_faces(self, image_path: Path, *, det_size=None):
+            seen_calls.append((image_path, det_size))
+            return [_make_face([0.1])]
+
+    embeddings, sources = load_reference_embeddings(tmp_path, Engine())
+
+    assert embeddings == [[0.1]]
+    assert sources == [photo]
+    assert seen_calls == [(photo, None)]
+
+
 def test_load_reference_embeddings_rejects_empty_directory(tmp_path: Path) -> None:
     engine = FakeInsightFaceEngine({})
 

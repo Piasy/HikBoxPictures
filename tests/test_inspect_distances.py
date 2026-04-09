@@ -93,8 +93,8 @@ def test_main_writes_annotated_image_when_directory_is_provided(monkeypatch, tmp
     assert f"标注图: {generated}" in output
     assert "dist_a=0.1234" in output
     assert "dist_b=0.5678" in output
-    assert "match_a" not in output
-    assert "match_b" not in output
+    assert "match_a=Y" in output
+    assert "match_b=N" in output
     assert load_calls == [(ref_a_dir, fake_engine), (ref_b_dir, fake_engine)]
     assert candidate_detect_engines == [fake_engine]
 
@@ -143,7 +143,7 @@ def test_write_annotated_image_uses_three_times_larger_font(monkeypatch, tmp_pat
     assert loaded_sizes == [30]
 
 
-def test_main_skips_output_directory_by_default(monkeypatch, tmp_path, capsys) -> None:
+def test_main_processes_all_candidates_without_skip_logic(monkeypatch, tmp_path, capsys) -> None:
     script = _load_script_module()
 
     input_dir = tmp_path / "input"
@@ -198,7 +198,7 @@ def test_main_skips_output_directory_by_default(monkeypatch, tmp_path, capsys) -
 
     assert exit_code == 0
     assert f"文件: {candidate_path}" in output
-    assert f"文件: {skipped_path}" not in output
+    assert f"文件: {skipped_path}" in output
 
 
 def test_main_prints_effective_tolerance_from_argument(monkeypatch, tmp_path, capsys) -> None:
@@ -249,6 +249,64 @@ def test_main_prints_effective_tolerance_from_argument(monkeypatch, tmp_path, ca
 
     assert exit_code == 0
     assert "匹配阈值: 0.42" in output
+    assert "match_a=Y" in output
+
+
+def test_main_marks_match_flags_based_on_tolerance(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_dir = tmp_path / "ref-b"
+    input_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_dir.mkdir()
+
+    candidate_path = input_dir / "candidate.jpg"
+    ref_a = ref_a_dir / "a.jpg"
+    ref_b = ref_b_dir / "b.jpg"
+    for path in (candidate_path, ref_a, ref_b):
+        Image.new("RGB", (24, 24), color="white").save(path)
+
+    fake_engine = object()
+    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: fake_engine)
+    monkeypatch.setattr(
+        script,
+        "load_reference_embeddings",
+        lambda path, engine: (([[0.1]], [ref_a]) if path == ref_a_dir else ([[0.2]], [ref_b])),
+    )
+    monkeypatch.setattr(script, "iter_candidate_photos", lambda root: iter([CandidatePhoto(path=candidate_path)]))
+    monkeypatch.setattr(
+        script,
+        "_load_candidate_face_encodings",
+        lambda path, engine: ([(2, 20, 20, 4)], [[0.1]]),
+    )
+
+    def fake_compute_min_distances(_encodings, ref_embeddings):
+        return [0.55] if ref_embeddings == [[0.1]] else [0.35]
+
+    monkeypatch.setattr(script, "compute_min_distances", fake_compute_min_distances, raising=False)
+
+    exit_code = script.main(
+        [
+            "--input",
+            str(input_dir),
+            "--ref-a-dir",
+            str(ref_a_dir),
+            "--ref-b-dir",
+            str(ref_b_dir),
+            "--tolerance",
+            "0.50",
+        ]
+    )
+
+    output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "dist_a=0.5500" in output
+    assert "dist_b=0.3500" in output
+    assert "match_a=N" in output
+    assert "match_b=Y" in output
 
 
 def test_main_reports_non_directory_reference_path(monkeypatch, tmp_path, capsys) -> None:

@@ -44,6 +44,30 @@ def test_evaluate_candidate_photo_classifies_only_two(monkeypatch, tmp_path) -> 
     assert evaluation.bucket is MatchBucket.ONLY_TWO
 
 
+def test_evaluate_candidate_photo_uses_insightface_default_threshold(monkeypatch, tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "insightface-default-threshold.jpg")
+
+    class FakeEngine:
+        def detect_faces(self, image_path):
+            assert image_path == photo.path
+            return [
+                SimpleNamespace(embedding=[6.0]),
+                SimpleNamespace(embedding=[106.0]),
+            ]
+
+    monkeypatch.setattr("hikbox_pictures.matcher._get_cached_matcher_engine", lambda: FakeEngine())
+
+    evaluation = evaluate_candidate_photo(
+        photo,
+        [[0.0]],
+        [[100.0]],
+    )
+
+    assert DEFAULT_DISTANCE_THRESHOLD == 10.0
+    assert evaluation.detected_face_count == 2
+    assert evaluation.bucket is MatchBucket.ONLY_TWO
+
+
 def test_evaluate_candidate_photo_classifies_group(monkeypatch, tmp_path) -> None:
     photo = CandidatePhoto(path=tmp_path / "group.jpg")
 
@@ -51,9 +75,9 @@ def test_evaluate_candidate_photo_classifies_group(monkeypatch, tmp_path) -> Non
         def detect_faces(self, image_path):
             assert image_path == photo.path
             return [
-                SimpleNamespace(embedding=[0.1, 0.1]),
-                SimpleNamespace(embedding=[0.9, 0.9]),
-                SimpleNamespace(embedding=[3.0, 3.0]),
+                SimpleNamespace(embedding=[0.1, 0.1], bbox=(0, 10, 10, 0)),
+                SimpleNamespace(embedding=[0.9, 0.9], bbox=(0, 10, 10, 0)),
+                SimpleNamespace(embedding=[3.0, 3.0], bbox=(0, 6, 5, 0)),
             ]
 
     monkeypatch.setattr("hikbox_pictures.matcher._get_cached_matcher_engine", lambda: FakeEngine())
@@ -66,6 +90,55 @@ def test_evaluate_candidate_photo_classifies_group(monkeypatch, tmp_path) -> Non
 
     assert evaluation.detected_face_count == 3
     assert evaluation.bucket is MatchBucket.GROUP
+
+
+def test_evaluate_candidate_photo_ignores_small_extra_face(monkeypatch, tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "small-extra.jpg")
+
+    class FakeEngine:
+        def detect_faces(self, image_path):
+            assert image_path == photo.path
+            return [
+                SimpleNamespace(embedding=[0.1, 0.1], bbox=(0, 10, 10, 0)),
+                SimpleNamespace(embedding=[0.9, 0.9], bbox=(0, 8, 10, 0)),
+                SimpleNamespace(embedding=[3.0, 3.0], bbox=(0, 5, 2, 0)),
+            ]
+
+    monkeypatch.setattr("hikbox_pictures.matcher._get_cached_matcher_engine", lambda: FakeEngine())
+
+    evaluation = evaluate_candidate_photo(
+        photo,
+        [[0.0, 0.0]],
+        [[1.0, 1.0]],
+    )
+
+    assert evaluation.detected_face_count == 3
+    assert evaluation.bucket is MatchBucket.ONLY_TWO
+
+
+def test_evaluate_candidate_photo_uses_largest_matching_pair_for_extra_face_baseline(monkeypatch, tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "largest-pair.jpg")
+
+    class FakeEngine:
+        def detect_faces(self, image_path):
+            assert image_path == photo.path
+            return [
+                SimpleNamespace(embedding=[0.1, 0.1], bbox=(0, 10, 10, 0)),
+                SimpleNamespace(embedding=[0.9, 0.9], bbox=(0, 10, 10, 0)),
+                SimpleNamespace(embedding=[0.2, 0.2], bbox=(0, 4, 4, 0)),
+                SimpleNamespace(embedding=[3.0, 3.0], bbox=(0, 5, 4, 0)),
+            ]
+
+    monkeypatch.setattr("hikbox_pictures.matcher._get_cached_matcher_engine", lambda: FakeEngine())
+
+    evaluation = evaluate_candidate_photo(
+        photo,
+        [[0.0, 0.0], [0.3, 0.3]],
+        [[1.0, 1.0]],
+    )
+
+    assert evaluation.detected_face_count == 4
+    assert evaluation.bucket is MatchBucket.ONLY_TWO
 
 
 def test_evaluate_candidate_photo_requires_both_people(monkeypatch, tmp_path) -> None:
@@ -84,7 +157,7 @@ def test_evaluate_candidate_photo_requires_both_people(monkeypatch, tmp_path) ->
     evaluation = evaluate_candidate_photo(
         photo,
         [[0.0, 0.0]],
-        [[2.0, 2.0]],
+        [[20.0, 20.0]],
     )
 
     assert evaluation.bucket is None
@@ -128,7 +201,7 @@ def test_evaluate_candidate_photo_uses_custom_distance_threshold(monkeypatch, tm
         photo,
         [[0.0, 0.0]],
         [[1.0, 0.0]],
-        distance_threshold=DEFAULT_DISTANCE_THRESHOLD / 10,
+        distance_threshold=0.05,
     )
 
     assert evaluation.bucket is None
@@ -201,7 +274,7 @@ def test_evaluate_candidate_photo_accepts_legacy_tolerance_alias(monkeypatch, tm
         photo,
         [[0.0, 0.0]],
         [[1.0, 0.0]],
-        tolerance=DEFAULT_DISTANCE_THRESHOLD / 10,
+        tolerance=0.05,
     )
 
     assert evaluation.bucket is None

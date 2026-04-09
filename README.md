@@ -74,7 +74,7 @@ PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir tes
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --tolerance 0.6
+PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --tolerance 10.0
 ```
 
 ## 输出结构
