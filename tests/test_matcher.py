@@ -194,3 +194,33 @@ def test_evaluate_candidate_photo_accepts_legacy_tolerance_alias(monkeypatch, tm
 
     assert evaluation.bucket is None
     assert evaluation.detected_face_count == 2
+
+
+def test_evaluate_candidate_photo_prefers_explicit_engine_over_cached(monkeypatch, tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "explicit-engine.jpg")
+
+    explicit_calls = []
+
+    class ExplicitEngine:
+        def detect_faces(self, image_path):
+            explicit_calls.append(image_path)
+            return [
+                SimpleNamespace(embedding=[0.1, 0.1]),
+                SimpleNamespace(embedding=[0.9, 0.9]),
+            ]
+
+    monkeypatch.setattr(
+        "hikbox_pictures.matcher._get_cached_matcher_engine",
+        lambda: pytest.fail("传入显式 engine 时不应回退到缓存引擎"),
+    )
+
+    evaluation = evaluate_candidate_photo(
+        photo,
+        [[0.0, 0.0]],
+        [[1.0, 1.0]],
+        engine=ExplicitEngine(),
+    )
+
+    assert explicit_calls == [photo.path]
+    assert evaluation.detected_face_count == 2
+    assert evaluation.bucket is MatchBucket.ONLY_TWO

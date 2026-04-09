@@ -61,14 +61,17 @@ def evaluate_candidate_photo(
     person_a_embeddings: Sequence[Sequence[float]] | Sequence[float],
     person_b_embeddings: Sequence[Sequence[float]] | Sequence[float],
     *,
+    engine: InsightFaceEngine | None = None,
     distance_threshold: float = DEFAULT_DISTANCE_THRESHOLD,
     tolerance: float | None = None,
 ) -> PhotoEvaluation:
     if tolerance is not None:
         distance_threshold = tolerance
 
+    face_engine = engine if engine is not None else _get_cached_matcher_engine()
+
     try:
-        faces = _get_cached_matcher_engine().detect_faces(photo.path)
+        faces = face_engine.detect_faces(photo.path)
     except Exception as exc:  # pragma: no cover
         raise CandidateDecodeError(f"Failed to decode {photo.path}: {exc}") from exc
 

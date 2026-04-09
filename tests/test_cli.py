@@ -175,7 +175,7 @@ def test_main_exits_nonzero_when_engine_init_fails(monkeypatch, tmp_path, capsys
     assert "init boom" in stderr
 
 
-def test_main_does_not_fallback_when_evaluate_rejects_engine(monkeypatch, tmp_path) -> None:
+def test_main_executes_without_fallback_when_evaluate_accepts_engine(monkeypatch, tmp_path, capsys) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
     ref_a_dir = tmp_path / "ref-a"
@@ -196,13 +196,26 @@ def test_main_does_not_fallback_when_evaluate_rejects_engine(monkeypatch, tmp_pa
     )
     monkeypatch.setattr("hikbox_pictures.cli.iter_candidate_photos", lambda path: iter([candidate]))
 
-    def fake_evaluate(candidate, person_a_embeddings, person_b_embeddings):
+    seen_engines = []
+
+    def fake_evaluate(candidate, person_a_embeddings, person_b_embeddings, *, engine):
+        seen_engines.append(engine)
         return PhotoEvaluation(candidate=candidate, detected_face_count=2, bucket=MatchBucket.ONLY_TWO)
 
     monkeypatch.setattr("hikbox_pictures.cli.evaluate_candidate_photo", fake_evaluate)
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.resolve_capture_datetime",
+        lambda path: datetime(2025, 4, 3, 10, 30),
+    )
+    monkeypatch.setattr("hikbox_pictures.cli.export_match", lambda evaluation, output_root, capture_datetime: None)
 
-    with pytest.raises(TypeError):
-        main(_build_argv(input_dir, ref_a_dir, ref_b_dir, output_dir))
+    exit_code = main(_build_argv(input_dir, ref_a_dir, ref_b_dir, output_dir))
+
+    stdout = capsys.readouterr().out
+    assert exit_code == 0
+    assert seen_engines == [fake_engine]
+    assert "Scanned files: 1" in stdout
+    assert "only-two matches: 1" in stdout
 
 
 def test_main_counts_decode_errors_and_missing_live_photo_videos(monkeypatch, tmp_path, capsys) -> None:
