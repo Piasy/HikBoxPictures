@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 from hikbox_pictures import __version__
 from hikbox_pictures.cli import main
@@ -35,8 +36,19 @@ def test_project_metadata_points_to_existing_files() -> None:
 
     assert "./scripts/install.sh" in readme
     assert "python3 scripts/inspect_distances.py" in readme
-    assert "pip install --upgrade pip 'setuptools<81'" in install_script
+    assert "setuptools<81" not in install_script
+    assert "insightface" in install_script
+    assert "onnxruntime" in install_script
 
     gitignore = Path(".gitignore").read_text(encoding="utf-8")
     assert ".worktrees/\n" in gitignore
     assert "test\n" not in gitignore
+
+
+def test_pyproject_dependencies_use_insightface_runtime() -> None:
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"]["dependencies"]
+
+    assert any(dep.startswith("insightface") for dep in dependencies)
+    assert any(dep.startswith("onnxruntime") for dep in dependencies)
+    assert all(not dep.startswith("face_recognition") for dep in dependencies)
