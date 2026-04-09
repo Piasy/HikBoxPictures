@@ -25,47 +25,59 @@ def test_main_writes_annotated_image_when_directory_is_provided(monkeypatch, tmp
 
     input_dir = tmp_path / "input"
     annotated_dir = tmp_path / "annotated"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_dir = tmp_path / "ref-b"
     input_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_dir.mkdir()
 
     candidate_path = input_dir / "candidate.jpg"
-    ref_a = tmp_path / "ref-a.jpg"
-    ref_b = tmp_path / "ref-b.jpg"
+    ref_a = ref_a_dir / "a.jpg"
+    ref_b = ref_b_dir / "b.jpg"
     Image.new("RGB", (24, 24), color="white").save(candidate_path)
     Image.new("RGB", (24, 24), color="white").save(ref_a)
     Image.new("RGB", (24, 24), color="white").save(ref_b)
 
-    ref_a_encoding = object()
-    ref_b_encoding = object()
+    fake_engine = object()
+
+    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: fake_engine)
+
+    load_calls: list[tuple[Path, object]] = []
 
     monkeypatch.setattr(
         script,
-        "load_reference_encoding",
-        lambda path: ref_a_encoding if path == ref_a else ref_b_encoding,
+        "load_reference_embeddings",
+        lambda path, engine: load_calls.append((path, engine))
+        or (([[0.1]], [ref_a]) if path == ref_a_dir else ([[0.2]], [ref_b])),
     )
     monkeypatch.setattr(
         script,
         "iter_candidate_photos",
         lambda root: iter([CandidatePhoto(path=candidate_path)]),
     )
+
+    candidate_detect_engines: list[object] = []
+
     monkeypatch.setattr(
         script,
         "_load_candidate_face_encodings",
-        lambda path: ([(2, 20, 20, 4)], [[0.1]]),
+        lambda path, engine: candidate_detect_engines.append(engine) or ([(2, 20, 20, 4)], [[0.1]]),
     )
 
-    def fake_face_distance(encodings, ref_encoding):
-        return [0.1234] if ref_encoding is ref_a_encoding else [0.5678]
+    def fake_compute_min_distances(_encodings, ref_embeddings):
+        return [0.1234] if ref_embeddings == [[0.1]] else [0.5678]
 
-    monkeypatch.setattr(script.face_recognition, "face_distance", fake_face_distance)
+    monkeypatch.setattr(script, "compute_min_distances", fake_compute_min_distances, raising=False)
+    monkeypatch.setattr(script, "DEFAULT_DISTANCE_THRESHOLD", 0.5, raising=False)
 
     exit_code = script.main(
         [
             "--input",
             str(input_dir),
-            "--ref-a",
-            str(ref_a),
-            "--ref-b",
-            str(ref_b),
+            "--ref-a-dir",
+            str(ref_a_dir),
+            "--ref-b-dir",
+            str(ref_b_dir),
             "--annotated-dir",
             str(annotated_dir),
         ]
@@ -77,9 +89,14 @@ def test_main_writes_annotated_image_when_directory_is_provided(monkeypatch, tmp
     assert exit_code == 0
     assert generated.is_file()
     assert "标注输出目录" in output
+    assert f"匹配阈值: {script.DEFAULT_DISTANCE_THRESHOLD:.2f}" in output
     assert f"标注图: {generated}" in output
+    assert "dist_a=0.1234" in output
+    assert "dist_b=0.5678" in output
     assert "match_a" not in output
     assert "match_b" not in output
+    assert load_calls == [(ref_a_dir, fake_engine), (ref_b_dir, fake_engine)]
+    assert candidate_detect_engines == [fake_engine]
 
     with Image.open(generated) as image:
         assert image.size == (24, 24)
@@ -131,23 +148,27 @@ def test_main_skips_output_directory_by_default(monkeypatch, tmp_path, capsys) -
 
     input_dir = tmp_path / "input"
     output_dir = input_dir / "output"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_dir = tmp_path / "ref-b"
     input_dir.mkdir()
     output_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_dir.mkdir()
 
     candidate_path = input_dir / "candidate.jpg"
     skipped_path = output_dir / "skipped.jpg"
-    ref_a = tmp_path / "ref-a.jpg"
-    ref_b = tmp_path / "ref-b.jpg"
+    ref_a = ref_a_dir / "a.jpg"
+    ref_b = ref_b_dir / "b.jpg"
     for path in (candidate_path, skipped_path, ref_a, ref_b):
         Image.new("RGB", (24, 24), color="white").save(path)
 
-    ref_a_encoding = object()
-    ref_b_encoding = object()
+    fake_engine = object()
+    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: fake_engine)
 
     monkeypatch.setattr(
         script,
-        "load_reference_encoding",
-        lambda path: ref_a_encoding if path == ref_a else ref_b_encoding,
+        "load_reference_embeddings",
+        lambda path, engine: (([[0.1]], [ref_a]) if path == ref_a_dir else ([[0.2]], [ref_b])),
     )
     monkeypatch.setattr(
         script,
@@ -157,18 +178,19 @@ def test_main_skips_output_directory_by_default(monkeypatch, tmp_path, capsys) -
     monkeypatch.setattr(
         script,
         "_load_candidate_face_encodings",
-        lambda path: ([(2, 20, 20, 4)], [[0.1]]),
+        lambda path, engine: ([(2, 20, 20, 4)], [[0.1]]),
     )
-    monkeypatch.setattr(script.face_recognition, "face_distance", lambda encodings, ref_encoding: [0.1234])
+    monkeypatch.setattr(script, "compute_min_distances", lambda encodings, refs: [0.1234], raising=False)
+    monkeypatch.setattr(script, "DEFAULT_DISTANCE_THRESHOLD", 0.5, raising=False)
 
     exit_code = script.main(
         [
             "--input",
             str(input_dir),
-            "--ref-a",
-            str(ref_a),
-            "--ref-b",
-            str(ref_b),
+            "--ref-a-dir",
+            str(ref_a_dir),
+            "--ref-b-dir",
+            str(ref_b_dir),
         ]
     )
 
