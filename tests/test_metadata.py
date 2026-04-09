@@ -2,15 +2,27 @@ import os
 import time
 from datetime import datetime, timezone
 
-from hikbox_pictures.metadata import format_year_month, resolve_capture_datetime
+from PIL import Image
+
+from hikbox_pictures.metadata import format_year_month, read_exif_datetime, resolve_capture_datetime
 
 
-def test_resolve_capture_datetime_prefers_content_creation_date(monkeypatch, tmp_path) -> None:
+def test_read_exif_datetime_reads_datetime_original(tmp_path) -> None:
+    photo = tmp_path / "photo.jpg"
+    exif = Image.Exif()
+    exif[36867] = "2025:04:03 10:30:00"
+
+    Image.new("RGB", (1, 1), color="white").save(photo, exif=exif)
+
+    assert read_exif_datetime(photo) == datetime(2025, 4, 3, 10, 30).astimezone()
+
+
+def test_resolve_capture_datetime_prefers_exif_datetime(monkeypatch, tmp_path) -> None:
     photo = tmp_path / "photo.jpg"
     photo.write_bytes(b"image")
     expected = datetime(2025, 4, 3, 10, 30, tzinfo=timezone.utc)
 
-    monkeypatch.setattr("hikbox_pictures.metadata.read_content_creation_datetime", lambda _: expected)
+    monkeypatch.setattr("hikbox_pictures.metadata.read_exif_datetime", lambda _: expected)
     monkeypatch.setattr("hikbox_pictures.metadata.read_birthtime_datetime", lambda _: None)
     monkeypatch.setattr(
         "hikbox_pictures.metadata.read_modification_datetime",
@@ -26,7 +38,7 @@ def test_resolve_capture_datetime_falls_back_to_birthtime_then_mtime(monkeypatch
     birthtime = datetime(2025, 2, 1, 8, 0, tzinfo=timezone.utc)
     mtime = datetime(2025, 2, 2, 8, 0, tzinfo=timezone.utc)
 
-    monkeypatch.setattr("hikbox_pictures.metadata.read_content_creation_datetime", lambda _: None)
+    monkeypatch.setattr("hikbox_pictures.metadata.read_exif_datetime", lambda _: None)
     monkeypatch.setattr("hikbox_pictures.metadata.read_birthtime_datetime", lambda _: birthtime)
     monkeypatch.setattr("hikbox_pictures.metadata.read_modification_datetime", lambda _: mtime)
     assert resolve_capture_datetime(photo) == birthtime
@@ -35,9 +47,7 @@ def test_resolve_capture_datetime_falls_back_to_birthtime_then_mtime(monkeypatch
     assert resolve_capture_datetime(photo) == mtime
 
 
-def test_resolve_capture_datetime_falls_back_when_content_creation_date_is_invalid(
-    monkeypatch, tmp_path
-) -> None:
+def test_resolve_capture_datetime_falls_back_when_exif_datetime_is_invalid(monkeypatch, tmp_path) -> None:
     photo = tmp_path / "photo.jpg"
     photo.write_bytes(b"image")
     birthtime = datetime(2025, 3, 1, 8, 0, tzinfo=timezone.utc)
@@ -45,7 +55,7 @@ def test_resolve_capture_datetime_falls_back_when_content_creation_date_is_inval
     def raise_invalid_datetime(_):
         raise ValueError("invalid date")
 
-    monkeypatch.setattr("hikbox_pictures.metadata.read_content_creation_datetime", raise_invalid_datetime)
+    monkeypatch.setattr("hikbox_pictures.metadata.read_exif_datetime", raise_invalid_datetime)
     monkeypatch.setattr("hikbox_pictures.metadata.read_birthtime_datetime", lambda _: birthtime)
     monkeypatch.setattr(
         "hikbox_pictures.metadata.read_modification_datetime",

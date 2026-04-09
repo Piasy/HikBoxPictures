@@ -34,7 +34,7 @@ def test_readme_mentions_macos_dependencies() -> None:
     assert "## 限制" in readme
     assert "Python 3.13+" in readme
     assert "Xcode Command Line Tools" in readme
-    assert "python3 -m venv .venv" in readme
+    assert "./scripts/install.sh" in readme
     assert "hikbox-pictures --input" in readme
     assert "only-two/YYYY-MM" in readme
     assert "group/YYYY-MM" in readme

@@ -2,30 +2,30 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-import subprocess
 
-MDLS_DATE_FORMAT = "%Y-%m-%d %H:%M:%S %z"
+from PIL import Image
 
-
-def _read_mdls_value(path: Path, attribute: str) -> str | None:
-    result = subprocess.run(
-        ["mdls", "-raw", "-name", attribute, str(path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if result.returncode != 0:
-        return None
-
-    value = result.stdout.strip()
-    if value in {"", "(null)", "<nil>"}:
-        return None
-    return value
+EXIF_DATETIME_FORMAT = "%Y:%m:%d %H:%M:%S"
+EXIF_DATETIME_TAG_IDS = (36867, 36868, 306)
 
 
-def read_content_creation_datetime(path: Path) -> datetime | None:
-    value = _read_mdls_value(path, "kMDItemContentCreationDate")
-    return datetime.strptime(value, MDLS_DATE_FORMAT) if value else None
+def _normalize_datetime(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.astimezone()
+
+
+def read_exif_datetime(path: Path) -> datetime | None:
+    with Image.open(path) as image:
+        exif = image.getexif()
+
+    for tag_id in EXIF_DATETIME_TAG_IDS:
+        raw_value = exif.get(tag_id)
+        if not raw_value:
+            continue
+
+        parsed = datetime.strptime(str(raw_value), EXIF_DATETIME_FORMAT)
+        return _normalize_datetime(parsed)
+
+    return None
 
 
 def read_birthtime_datetime(path: Path) -> datetime | None:
@@ -41,13 +41,13 @@ def read_modification_datetime(path: Path) -> datetime:
 
 def resolve_capture_datetime(path: Path) -> datetime:
     for reader in (
-        read_content_creation_datetime,
+        read_exif_datetime,
         read_birthtime_datetime,
         read_modification_datetime,
     ):
         try:
             value = reader(path)
-        except ValueError:
+        except (OSError, ValueError):
             continue
         if value is not None:
             return value
