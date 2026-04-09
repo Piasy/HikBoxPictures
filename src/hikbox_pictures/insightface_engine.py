@@ -2,16 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, TypeAlias
 
 from hikbox_pictures.image_io import load_rgb_image
 
 try:
     from insightface.app import FaceAnalysis as _InsightFaceAnalysis
-except Exception:  # pragma: no cover
+except ImportError:  # pragma: no cover
     _InsightFaceAnalysis = None
 
 FaceAnalysis = _InsightFaceAnalysis
+
+BBoxTLBR: TypeAlias = tuple[int, int, int, int]
 
 
 class InsightFaceInitError(RuntimeError):
@@ -24,8 +26,9 @@ class InsightFaceInferenceError(RuntimeError):
 
 @dataclass(frozen=True)
 class DetectedFace:
-    bbox: tuple[int, int, int, int]
-    embedding: Sequence[float]
+    # (top, right, bottom, left)
+    bbox: BBoxTLBR
+    embedding: Any
 
 
 @dataclass
@@ -39,7 +42,7 @@ class InsightFaceEngine:
         model_name: str = "antelopev2",
         providers: list[str] | None = None,
     ) -> InsightFaceEngine:
-        selected_providers = providers or ["CPUExecutionProvider"]
+        selected_providers = ["CPUExecutionProvider"] if providers is None else providers
         try:
             if FaceAnalysis is None:
                 raise RuntimeError("insightface 未安装或不可用")

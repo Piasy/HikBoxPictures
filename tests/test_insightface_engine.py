@@ -38,6 +38,32 @@ def test_create_uses_default_model_and_cpu_provider(monkeypatch) -> None:
     }
 
 
+def test_create_keeps_explicit_empty_providers(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeAnalyzer:
+        def __init__(self, *, name, providers):
+            captured["name"] = name
+            captured["providers"] = providers
+
+        def prepare(self, *, ctx_id, det_size) -> None:
+            captured["ctx_id"] = ctx_id
+            captured["det_size"] = det_size
+
+    monkeypatch.setattr("hikbox_pictures.insightface_engine.FaceAnalysis", FakeAnalyzer)
+
+    InsightFaceEngine.create(providers=[])
+
+    assert captured["name"] == "antelopev2"
+    assert captured["providers"] == []
+    assert captured["ctx_id"] == 0
+    assert captured["det_size"] == (640, 640)
+
+
+def test_detected_face_bbox_uses_named_tlbr_alias() -> None:
+    assert DetectedFace.__annotations__["bbox"] == "BBoxTLBR"
+
+
 def test_detect_faces_maps_bbox_and_returns_embedding(monkeypatch, tmp_path: Path) -> None:
     image_path = tmp_path / "sample.jpg"
     image_path.write_bytes(b"image")
@@ -70,6 +96,13 @@ def test_create_wraps_init_errors(monkeypatch) -> None:
     monkeypatch.setattr("hikbox_pictures.insightface_engine.FaceAnalysis", raise_init_error)
 
     with pytest.raises(InsightFaceInitError, match="init failed"):
+        InsightFaceEngine.create()
+
+
+def test_create_wraps_missing_insightface_dependency(monkeypatch) -> None:
+    monkeypatch.setattr("hikbox_pictures.insightface_engine.FaceAnalysis", None)
+
+    with pytest.raises(InsightFaceInitError, match="insightface 未安装或不可用"):
         InsightFaceEngine.create()
 
 
