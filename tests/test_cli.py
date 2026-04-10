@@ -1,3 +1,4 @@
+import ast
 from datetime import datetime
 from pathlib import Path
 
@@ -7,6 +8,49 @@ from hikbox_pictures import cli as cli_module
 from hikbox_pictures.cli import main
 from hikbox_pictures.matcher import CandidateDecodeError
 from hikbox_pictures.models import CandidatePhoto, MatchBucket, PhotoEvaluation
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _is_legacy_insightface_module(module_name: str) -> bool:
+    return (
+        module_name == "insightface"
+        or module_name.startswith("insightface.")
+        or module_name == "hikbox_pictures.insightface_engine"
+    )
+
+
+def _is_import_module_call(node: ast.Call) -> bool:
+    function = node.func
+    if isinstance(function, ast.Name):
+        return function.id in {"__import__", "import_module"}
+    if isinstance(function, ast.Attribute):
+        return function.attr == "import_module"
+    return False
+
+
+def _find_legacy_insightface_imports(paths: list[Path]) -> list[tuple[Path, int, str]]:
+    matches: list[tuple[Path, int, str]] = []
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if _is_legacy_insightface_module(alias.name):
+                        matches.append((path, node.lineno, alias.name))
+            elif isinstance(node, ast.ImportFrom):
+                module_name = node.module or ""
+                if _is_legacy_insightface_module(module_name):
+                    matches.append((path, node.lineno, module_name))
+            elif isinstance(node, ast.Call) and _is_import_module_call(node):
+                if not node.args:
+                    continue
+                first_arg = node.args[0]
+                if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+                    if _is_legacy_insightface_module(first_arg.value):
+                        matches.append((path, node.lineno, first_arg.value))
+    return matches
 
 
 def _build_argv(input_dir: Path, ref_a_dir: Path, ref_b_dir: Path, output_dir: Path) -> list[str]:
@@ -26,24 +70,54 @@ def test_main_returns_zero_when_called_without_argv() -> None:
     assert main() == 0
 
 
-def test_codebase_no_longer_references_insightface_imports() -> None:
-    import subprocess
-
-    result = subprocess.run(
-        [
-            "rg",
-            "insightface_engine|InsightFaceEngine",
-            "src",
-            "scripts",
-            "tests",
-            "--glob",
-            "!tests/test_cli.py",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_path: Path) -> None:
+    sample = tmp_path / "legacy_sample.py"
+    sample.write_text(
+        "\n".join(
+            [
+                "import insightface",
+                "from insightface.app import FaceAnalysis",
+                "from hikbox_pictures.insightface_engine import InsightFaceEngine",
+                "import importlib",
+                'importlib.import_module("hikbox_pictures.insightface_engine")',
+            ]
+        ),
+        encoding="utf-8",
     )
-    assert result.returncode == 1
+
+    matches = _find_legacy_insightface_imports([sample])
+
+    assert [(lineno, module_name) for _, lineno, module_name in matches] == [
+        (1, "insightface"),
+        (2, "insightface.app"),
+        (3, "hikbox_pictures.insightface_engine"),
+        (5, "hikbox_pictures.insightface_engine"),
+    ]
+
+
+def test_find_legacy_insightface_imports_ignores_plain_strings(tmp_path: Path) -> None:
+    sample = tmp_path / "clean_sample.py"
+    sample.write_text(
+        "\n".join(
+            [
+                'message = "insightface should not appear in README"',
+                'assert "insightface" not in message',
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert _find_legacy_insightface_imports([sample]) == []
+
+
+def test_codebase_no_longer_references_insightface_imports() -> None:
+    python_files = [
+        *sorted((REPO_ROOT / "src").rglob("*.py")),
+        *sorted((REPO_ROOT / "scripts").rglob("*.py")),
+        *sorted((REPO_ROOT / "tests").rglob("*.py")),
+    ]
+
+    assert _find_legacy_insightface_imports(python_files) == []
 
 
 def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys) -> None:
