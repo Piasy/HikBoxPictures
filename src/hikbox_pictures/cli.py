@@ -4,8 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from hikbox_pictures.deepface_engine import DeepFaceEngine, DeepFaceInitError
 from hikbox_pictures.exporter import export_match
-from hikbox_pictures.insightface_engine import InsightFaceEngine, InsightFaceInitError
 from hikbox_pictures.matcher import CandidateDecodeError, evaluate_candidate_photo
 from hikbox_pictures.metadata import resolve_capture_datetime
 from hikbox_pictures.models import MatchBucket, RunSummary
@@ -19,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ref-a-dir", required=True, type=Path)
     parser.add_argument("--ref-b-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--model-name", default="ArcFace")
+    parser.add_argument("--detector-backend", default="retinaface")
+    parser.add_argument("--distance-metric", default="cosine")
+    parser.add_argument("--distance-threshold", type=float)
+    parser.add_argument("--align", dest="align", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
 
@@ -62,10 +67,16 @@ def main(argv: list[str] | None = None) -> int:
     args.output.mkdir(parents=True, exist_ok=True)
 
     try:
-        engine = InsightFaceEngine.create()
+        engine = DeepFaceEngine.create(
+            model_name=args.model_name,
+            detector_backend=args.detector_backend,
+            distance_metric=args.distance_metric,
+            align=args.align,
+            distance_threshold=args.distance_threshold,
+        )
         person_a_embeddings, _ = load_reference_embeddings(args.ref_a_dir, engine)
         person_b_embeddings, _ = load_reference_embeddings(args.ref_b_dir, engine)
-    except (InsightFaceInitError, ReferenceImageError) as exc:
+    except (DeepFaceInitError, ReferenceImageError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 

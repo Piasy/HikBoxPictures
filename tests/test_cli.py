@@ -44,11 +44,11 @@ def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys
     fake_engine = object()
     engine_create_calls = []
 
-    def fake_create_engine():
-        engine_create_calls.append(1)
+    def fake_create_engine(**kwargs):
+        engine_create_calls.append(kwargs)
         return fake_engine
 
-    monkeypatch.setattr(cli_module.InsightFaceEngine, "create", fake_create_engine)
+    monkeypatch.setattr(cli_module.DeepFaceEngine, "create", fake_create_engine)
 
     def fake_load_reference_embeddings(path, engine):
         assert engine is fake_engine
@@ -89,7 +89,15 @@ def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys
 
     stdout = capsys.readouterr().out
     assert exit_code == 0
-    assert len(engine_create_calls) == 1
+    assert engine_create_calls == [
+        {
+            "model_name": "ArcFace",
+            "detector_backend": "retinaface",
+            "distance_metric": "cosine",
+            "align": True,
+            "distance_threshold": None,
+        }
+    ]
     assert seen_reference_args == [
         ([[0.1], [0.11]], [[0.2]]),
         ([[0.1], [0.11]], [[0.2]]),
@@ -112,7 +120,7 @@ def test_main_exits_nonzero_when_reference_dir_loading_fails(monkeypatch, tmp_pa
 
     from hikbox_pictures.reference_loader import ReferenceImageError
 
-    monkeypatch.setattr(cli_module.InsightFaceEngine, "create", lambda: object())
+    monkeypatch.setattr(cli_module.DeepFaceEngine, "create", lambda **kwargs: object())
 
     def raise_reference_error(path, engine):
         raise ReferenceImageError(f"bad ref dir: {path.name}")
@@ -161,12 +169,12 @@ def test_main_exits_nonzero_when_engine_init_fails(monkeypatch, tmp_path, capsys
     ref_a_dir.mkdir()
     ref_b_dir.mkdir()
 
-    from hikbox_pictures.insightface_engine import InsightFaceInitError
+    from hikbox_pictures.deepface_engine import DeepFaceInitError
 
-    def raise_init_error():
-        raise InsightFaceInitError("init boom")
+    def raise_init_error(**kwargs):
+        raise DeepFaceInitError("init boom")
 
-    monkeypatch.setattr(cli_module.InsightFaceEngine, "create", raise_init_error)
+    monkeypatch.setattr(cli_module.DeepFaceEngine, "create", raise_init_error)
 
     exit_code = main(_build_argv(input_dir, ref_a_dir, ref_b_dir, output_dir))
 
@@ -189,7 +197,7 @@ def test_main_executes_without_fallback_when_evaluate_accepts_engine(monkeypatch
     candidate.path.write_bytes(b"pair")
 
     fake_engine = object()
-    monkeypatch.setattr(cli_module.InsightFaceEngine, "create", lambda: fake_engine)
+    monkeypatch.setattr(cli_module.DeepFaceEngine, "create", lambda **kwargs: fake_engine)
     monkeypatch.setattr(
         "hikbox_pictures.cli.load_reference_embeddings",
         lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
@@ -234,7 +242,7 @@ def test_main_counts_decode_errors_and_missing_live_photo_videos(monkeypatch, tm
     candidate_broken.path.write_bytes(b"broken")
 
     fake_engine = object()
-    monkeypatch.setattr(cli_module.InsightFaceEngine, "create", lambda: fake_engine)
+    monkeypatch.setattr(cli_module.DeepFaceEngine, "create", lambda **kwargs: fake_engine)
     monkeypatch.setattr(
         "hikbox_pictures.cli.load_reference_embeddings",
         lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
@@ -288,7 +296,7 @@ def test_main_counts_no_face_photos(monkeypatch, tmp_path, capsys) -> None:
     candidate.path.write_bytes(b"noface")
 
     fake_engine = object()
-    monkeypatch.setattr(cli_module.InsightFaceEngine, "create", lambda: fake_engine)
+    monkeypatch.setattr(cli_module.DeepFaceEngine, "create", lambda **kwargs: fake_engine)
     monkeypatch.setattr(
         "hikbox_pictures.cli.load_reference_embeddings",
         lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
@@ -325,3 +333,51 @@ def test_cli_entry_uses_process_argv(monkeypatch) -> None:
 
     assert cli_entry() == 7
     assert captured["argv"] == ["--help"]
+
+
+def test_main_passes_deepface_tuning_options_to_engine(monkeypatch, tmp_path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_dir = tmp_path / "ref-b"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_dir.mkdir()
+
+    create_kwargs = []
+
+    def fake_create_engine(**kwargs):
+        create_kwargs.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(cli_module.DeepFaceEngine, "create", fake_create_engine)
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.load_reference_embeddings",
+        lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
+    )
+    monkeypatch.setattr("hikbox_pictures.cli.iter_candidate_photos", lambda path: iter([]))
+
+    argv = _build_argv(input_dir, ref_a_dir, ref_b_dir, output_dir) + [
+        "--model-name",
+        "Facenet512",
+        "--detector-backend",
+        "mtcnn",
+        "--distance-metric",
+        "euclidean_l2",
+        "--distance-threshold",
+        "0.42",
+        "--no-align",
+    ]
+    exit_code = main(argv)
+
+    assert exit_code == 0
+    assert create_kwargs == [
+        {
+            "model_name": "Facenet512",
+            "detector_backend": "mtcnn",
+            "distance_metric": "euclidean_l2",
+            "align": False,
+            "distance_threshold": 0.42,
+        }
+    ]
