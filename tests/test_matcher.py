@@ -4,7 +4,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hikbox_pictures.matcher import CandidateDecodeError, DEFAULT_DISTANCE_THRESHOLD, evaluate_candidate_photo
+from hikbox_pictures.matcher import (
+    CandidateDecodeError,
+    DEFAULT_DISTANCE_THRESHOLD,
+    _select_largest_matching_pair,
+    evaluate_candidate_photo,
+)
 from hikbox_pictures.models import CandidatePhoto, MatchBucket, ReferenceSample, ReferenceTemplate
 
 
@@ -240,6 +245,23 @@ def test_evaluate_candidate_photo_wraps_detection_errors(tmp_path) -> None:
         evaluate_candidate_photo(photo, template_a, template_b, engine=FakeEngine())
 
 
+def test_evaluate_candidate_photo_wraps_missing_embedding_errors(tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "missing-embedding.jpg")
+    template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.2)
+    template_b = _make_template(tmp_path, name="B", sample_label=20, threshold=0.2)
+
+    class FakeEngine:
+        def detect_faces(self, image_path):
+            assert image_path == photo.path
+            return [SimpleNamespace(bbox=(0, 10, 10, 0))]
+
+        def distance(self, lhs, rhs):
+            return 0.1
+
+    with pytest.raises(CandidateDecodeError, match="Failed to decode"):
+        evaluate_candidate_photo(photo, template_a, template_b, engine=FakeEngine())
+
+
 def test_evaluate_candidate_photo_wraps_distance_errors(tmp_path) -> None:
     photo = CandidatePhoto(path=tmp_path / "distance-broken.jpg")
     template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.2)
@@ -321,3 +343,20 @@ def test_evaluate_candidate_photo_prefers_explicit_engine_over_cached(monkeypatc
     assert evaluation.bucket is MatchBucket.ONLY_TWO
     assert evaluation.joint_distance == pytest.approx(0.1)
     assert evaluation.best_match_pair == (0, 1)
+
+
+def test_select_largest_matching_pair_uses_stable_tie_break() -> None:
+    class OrderedIndexSet(set):
+        def __init__(self, values, order):
+            super().__init__(values)
+            self._order = tuple(order)
+
+        def __iter__(self):
+            return iter(self._order)
+
+    matches_a = OrderedIndexSet({0, 1}, [0, 1])
+    matches_b = OrderedIndexSet({0, 2}, [2, 0])
+    face_areas = [1, 2, 1]
+
+    # 面积和相同时，先比较较小面积，再按索引稳定选择 (1, 0)。
+    assert _select_largest_matching_pair(matches_a, matches_b, face_areas) == (1, 0)

@@ -108,7 +108,15 @@ def _select_largest_matching_pair(
     if not candidate_pairs:
         return None
 
-    return max(candidate_pairs, key=lambda pair: face_areas[pair[0]] + face_areas[pair[1]])
+    return max(
+        candidate_pairs,
+        key=lambda pair: (
+            face_areas[pair[0]] + face_areas[pair[1]],
+            min(face_areas[pair[0]], face_areas[pair[1]]),
+            -pair[0],
+            -pair[1],
+        ),
+    )
 
 
 def _has_large_extra_face(
@@ -170,7 +178,10 @@ def evaluate_candidate_photo(
     if not faces:
         return PhotoEvaluation(candidate=photo, detected_face_count=0, bucket=None)
 
-    candidate_embeddings = [face.embedding for face in faces]
+    try:
+        candidate_embeddings = [face.embedding for face in faces]
+    except Exception as exc:
+        raise CandidateDecodeError(f"Failed to decode {photo.path}: {exc}") from exc
 
     try:
         match_results_to_a = [
