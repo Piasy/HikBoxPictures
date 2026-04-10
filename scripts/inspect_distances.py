@@ -12,6 +12,11 @@ from PIL import Image, ImageDraw, ImageFont
 from hikbox_pictures.deepface_engine import DeepFaceEngine, DeepFaceInitError
 from hikbox_pictures.image_io import load_rgb_image
 from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_embeddings
+from hikbox_pictures.reference_template import (
+    build_reference_samples_from_embeddings,
+    build_reference_template,
+    compute_template_match,
+)
 from hikbox_pictures.scanner import iter_candidate_photos
 
 ANNOTATION_TEXT_COLOR = (64, 128, 255)
@@ -26,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--detector-backend", default="retinaface")
     parser.add_argument("--distance-metric", default="cosine")
     parser.add_argument("--distance-threshold", type=float)
+    parser.add_argument("--distance-threshold-a", type=float)
+    parser.add_argument("--distance-threshold-b", type=float)
     parser.add_argument("--align", dest="align", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--annotated-dir", type=Path)
     return parser
@@ -43,6 +50,16 @@ def _load_candidate_face_encodings(
 
 def _format_distance(value: float) -> str:
     return f"{value:.4f}"
+
+
+def _best_joint_distance(matches_a, matches_b):
+    joint_distances = [
+        max(match_a.template_distance, match_b.template_distance)
+        for index_a, match_a in enumerate(matches_a)
+        for index_b, match_b in enumerate(matches_b)
+        if index_a != index_b and match_a.matched and match_b.matched
+    ]
+    return min(joint_distances) if joint_distances else None
 
 
 def _annotated_output_path(candidate_path: Path, *, input_root: Path, annotated_dir: Path) -> Path:
@@ -103,8 +120,10 @@ def _write_annotated_image(
     input_root: Path,
     annotated_dir: Path,
     locations: list[tuple[int, int, int, int]],
-    distances_a: list[float],
-    distances_b: list[float],
+    template_distances_a: list[float],
+    template_distances_b: list[float],
+    centroid_distances_a: list[float],
+    centroid_distances_b: list[float],
 ) -> Path:
     image_array = load_rgb_image(candidate_path)
     image = Image.fromarray(image_array)
@@ -121,7 +140,11 @@ def _write_annotated_image(
             font=font,
             left=left,
             top=top,
-            lines=[f"face[{index}]", f"A {_format_distance(distances_a[index])}", f"B {_format_distance(distances_b[index])}"],
+            lines=[
+                f"face[{index}]",
+                f"A {_format_distance(template_distances_a[index])}/{_format_distance(centroid_distances_a[index])}",
+                f"B {_format_distance(template_distances_b[index])}/{_format_distance(centroid_distances_b[index])}",
+            ],
             image_width=image.width,
             image_height=image.height,
         )
@@ -161,8 +184,26 @@ def main(argv: list[str] | None = None) -> int:
             align=args.align,
             distance_threshold=args.distance_threshold,
         )
-        ref_a_embeddings, _ = load_reference_embeddings(args.ref_a_dir, engine)
-        ref_b_embeddings, _ = load_reference_embeddings(args.ref_b_dir, engine)
+        ref_a_embeddings, ref_a_paths = load_reference_embeddings(args.ref_a_dir, engine)
+        ref_b_embeddings, ref_b_paths = load_reference_embeddings(args.ref_b_dir, engine)
+        ref_a_samples = build_reference_samples_from_embeddings(ref_a_paths, ref_a_embeddings, engine=engine)
+        ref_b_samples = build_reference_samples_from_embeddings(ref_b_paths, ref_b_embeddings, engine=engine)
+        template_a = build_reference_template(
+            "A",
+            ref_a_samples,
+            engine=engine,
+            default_threshold=engine.distance_threshold,
+            override_threshold=args.distance_threshold_a,
+            fallback_threshold=args.distance_threshold,
+        )
+        template_b = build_reference_template(
+            "B",
+            ref_b_samples,
+            engine=engine,
+            default_threshold=engine.distance_threshold,
+            override_threshold=args.distance_threshold_b,
+            fallback_threshold=args.distance_threshold,
+        )
     except (DeepFaceInitError, ReferenceImageError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -178,6 +219,13 @@ def main(argv: list[str] | None = None) -> int:
         f"align={engine.align} "
         f"distance_threshold={_format_distance(engine.distance_threshold)} "
         f"threshold_source={engine.threshold_source}"
+    )
+    print(
+        "模板配置: "
+        f"template_threshold_a={_format_distance(template_a.match_threshold)} "
+        f"template_threshold_b={_format_distance(template_b.match_threshold)} "
+        f"top_k_a={template_a.top_k} "
+        f"top_k_b={template_b.top_k}"
     )
     if args.annotated_dir is not None:
         print(f"标注输出目录: {args.annotated_dir}")
@@ -195,22 +243,31 @@ def main(argv: list[str] | None = None) -> int:
         if not encodings:
             continue
 
-        distances_a = [float(engine.min_distance(encoding, ref_a_embeddings)) for encoding in encodings]
-        distances_b = [float(engine.min_distance(encoding, ref_b_embeddings)) for encoding in encodings]
+        matches_a = [compute_template_match(encoding, template_a, engine=engine) for encoding in encodings]
+        matches_b = [compute_template_match(encoding, template_b, engine=engine) for encoding in encodings]
+        joint_distance = _best_joint_distance(matches_a, matches_b)
+
+        template_distances_a = [match.template_distance for match in matches_a]
+        template_distances_b = [match.template_distance for match in matches_b]
+        centroid_distances_a = [match.centroid_distance for match in matches_a]
+        centroid_distances_b = [match.centroid_distance for match in matches_b]
 
         for index, location in enumerate(locations):
-            distance_a = distances_a[index]
-            distance_b = distances_b[index]
-            match_a = "Y" if engine.is_match(distance_a) else "N"
-            match_b = "Y" if engine.is_match(distance_b) else "N"
+            match_a = matches_a[index]
+            match_b = matches_b[index]
             print(
                 "  "
                 f"face[{index}] location={location} "
-                f"dist_a={_format_distance(distance_a)} "
-                f"dist_b={_format_distance(distance_b)} "
-                f"match_a={match_a} "
-                f"match_b={match_b}"
+                f"template_dist_a={_format_distance(match_a.template_distance)} "
+                f"template_dist_b={_format_distance(match_b.template_distance)} "
+                f"centroid_dist_a={_format_distance(match_a.centroid_distance)} "
+                f"centroid_dist_b={_format_distance(match_b.centroid_distance)} "
+                f"match_a={'Y' if match_a.matched else 'N'} "
+                f"match_b={'Y' if match_b.matched else 'N'}"
             )
+
+        if joint_distance is not None:
+            print(f"  joint_distance={_format_distance(joint_distance)}")
 
         if args.annotated_dir is not None:
             try:
@@ -219,8 +276,10 @@ def main(argv: list[str] | None = None) -> int:
                     input_root=args.input,
                     annotated_dir=args.annotated_dir,
                     locations=locations,
-                    distances_a=distances_a,
-                    distances_b=distances_b,
+                    template_distances_a=template_distances_a,
+                    template_distances_b=template_distances_b,
+                    centroid_distances_a=centroid_distances_a,
+                    centroid_distances_b=centroid_distances_b,
                 )
                 print(f"  标注图: {output_path}")
             except Exception as exc:

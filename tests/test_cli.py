@@ -3,12 +3,13 @@ from datetime import datetime
 from importlib.util import resolve_name
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from hikbox_pictures import cli as cli_module
 from hikbox_pictures.cli import main
 from hikbox_pictures.matcher import CandidateDecodeError
-from hikbox_pictures.models import CandidatePhoto, MatchBucket, PhotoEvaluation
+from hikbox_pictures.models import CandidatePhoto, MatchBucket, PhotoEvaluation, ReferenceSample
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -137,6 +138,120 @@ def test_main_returns_zero_when_called_without_argv() -> None:
     assert main() == 0
 
 
+def test_main_builds_templates_and_passes_person_thresholds(monkeypatch, tmp_path, capsys) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_dir = tmp_path / "ref-b"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_dir.mkdir()
+
+    candidate = CandidatePhoto(path=input_dir / "pair.jpg")
+    candidate.path.write_bytes(b"pair")
+
+    fake_engine = type("FakeEngine", (), {"distance_threshold": 0.4})()
+    monkeypatch.setattr("hikbox_pictures.cli.DeepFaceEngine.create", lambda **kwargs: fake_engine)
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.load_reference_embeddings",
+        lambda path, engine: (([[0.1]], [path / "sample.jpg"]) if path == ref_a_dir else ([[0.2]], [path / "sample.jpg"])),
+    )
+
+    template_calls = []
+
+    def fake_build_reference_samples_from_embeddings(paths, embeddings, *, engine):
+        scalar = float(embeddings[0][0])
+        return [
+            ReferenceSample(
+                path=paths[0],
+                embedding=np.asarray([scalar], dtype=np.float32),
+                bbox=(0, 10, 10, 0),
+                image_size=(20, 20),
+                face_area_ratio=0.5,
+                sharpness_score=1.0,
+                quality_score=0.0,
+                center_distance=None,
+                kept=True,
+                drop_reason=None,
+            )
+        ]
+
+    def fake_build_reference_template(
+        name,
+        samples,
+        *,
+        engine,
+        default_threshold,
+        override_threshold=None,
+        fallback_threshold=None,
+    ):
+        template_calls.append(
+            {
+                "name": name,
+                "count": len(samples),
+                "default_threshold": default_threshold,
+                "override_threshold": override_threshold,
+                "fallback_threshold": fallback_threshold,
+            }
+        )
+        return object()
+
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_samples_from_embeddings",
+        fake_build_reference_samples_from_embeddings,
+    )
+    monkeypatch.setattr("hikbox_pictures.cli.build_reference_template", fake_build_reference_template)
+    monkeypatch.setattr("hikbox_pictures.cli.iter_candidate_photos", lambda root: iter([candidate]))
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.evaluate_candidate_photo",
+        lambda candidate, template_a, template_b, *, engine: PhotoEvaluation(
+            candidate=candidate,
+            detected_face_count=2,
+            bucket=MatchBucket.ONLY_TWO,
+        ),
+    )
+    monkeypatch.setattr("hikbox_pictures.cli.resolve_capture_datetime", lambda path: datetime(2025, 4, 3, 10, 30))
+    monkeypatch.setattr("hikbox_pictures.cli.export_match", lambda evaluation, output_root, capture_datetime: None)
+
+    exit_code = main(
+        [
+            "--input",
+            str(input_dir),
+            "--ref-a-dir",
+            str(ref_a_dir),
+            "--ref-b-dir",
+            str(ref_b_dir),
+            "--output",
+            str(output_dir),
+            "--distance-threshold",
+            "0.40",
+            "--distance-threshold-a",
+            "0.32",
+            "--distance-threshold-b",
+            "0.36",
+        ]
+    )
+
+    assert exit_code == 0
+    assert template_calls == [
+        {
+            "name": "A",
+            "count": 1,
+            "default_threshold": 0.4,
+            "override_threshold": 0.32,
+            "fallback_threshold": 0.4,
+        },
+        {
+            "name": "B",
+            "count": 1,
+            "default_threshold": 0.4,
+            "override_threshold": 0.36,
+            "fallback_threshold": 0.4,
+        },
+    ]
+
+
 def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_path: Path) -> None:
     sample = tmp_path / "legacy_sample.py"
     sample.write_text(
@@ -214,7 +329,7 @@ def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys
     candidate_hit.path.write_bytes(b"pair")
     candidate_miss.path.write_bytes(b"miss")
 
-    fake_engine = object()
+    fake_engine = type("FakeEngine", (), {"distance_threshold": 0.4})()
     engine_create_calls = []
 
     def fake_create_engine(**kwargs):
@@ -231,6 +346,14 @@ def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys
 
     monkeypatch.setattr("hikbox_pictures.cli.load_reference_embeddings", fake_load_reference_embeddings)
     monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_samples_from_embeddings",
+        lambda paths, embeddings, *, engine: [object() for _ in paths],
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_template",
+        lambda name, samples, **kwargs: f"template-{name}",
+    )
+    monkeypatch.setattr(
         "hikbox_pictures.cli.iter_candidate_photos",
         lambda path: iter([candidate_hit, candidate_miss]),
     )
@@ -242,9 +365,9 @@ def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys
     )
     seen_reference_args = []
 
-    def fake_evaluate(candidate, person_a_embeddings, person_b_embeddings, *, engine):
+    def fake_evaluate(candidate, person_a_template, person_b_template, *, engine):
         assert engine is fake_engine
-        seen_reference_args.append((person_a_embeddings, person_b_embeddings))
+        seen_reference_args.append((person_a_template, person_b_template))
         return next(evaluations)
 
     monkeypatch.setattr("hikbox_pictures.cli.evaluate_candidate_photo", fake_evaluate)
@@ -271,10 +394,7 @@ def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys
             "distance_threshold": None,
         }
     ]
-    assert seen_reference_args == [
-        ([[0.1], [0.11]], [[0.2]]),
-        ([[0.1], [0.11]], [[0.2]]),
-    ]
+    assert seen_reference_args == [("template-A", "template-B"), ("template-A", "template-B")]
     assert exported == [candidate_hit.path]
     assert "Scanned files: 2" in stdout
     assert "only-two matches: 1" in stdout
@@ -369,18 +489,28 @@ def test_main_executes_without_fallback_when_evaluate_accepts_engine(monkeypatch
     candidate = CandidatePhoto(path=input_dir / "pair.jpg")
     candidate.path.write_bytes(b"pair")
 
-    fake_engine = object()
+    fake_engine = type("FakeEngine", (), {"distance_threshold": 0.4})()
     monkeypatch.setattr(cli_module.DeepFaceEngine, "create", lambda **kwargs: fake_engine)
     monkeypatch.setattr(
         "hikbox_pictures.cli.load_reference_embeddings",
         lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
     )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_samples_from_embeddings",
+        lambda paths, embeddings, *, engine: [object() for _ in paths],
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_template",
+        lambda name, samples, **kwargs: f"template-{name}",
+    )
     monkeypatch.setattr("hikbox_pictures.cli.iter_candidate_photos", lambda path: iter([candidate]))
 
     seen_engines = []
 
-    def fake_evaluate(candidate, person_a_embeddings, person_b_embeddings, *, engine):
+    def fake_evaluate(candidate, person_a_template, person_b_template, *, engine):
         seen_engines.append(engine)
+        assert person_a_template == "template-A"
+        assert person_b_template == "template-B"
         return PhotoEvaluation(candidate=candidate, detected_face_count=2, bucket=MatchBucket.ONLY_TWO)
 
     monkeypatch.setattr("hikbox_pictures.cli.evaluate_candidate_photo", fake_evaluate)
@@ -414,19 +544,29 @@ def test_main_counts_decode_errors_and_missing_live_photo_videos(monkeypatch, tm
     candidate_heic.path.write_bytes(b"pair")
     candidate_broken.path.write_bytes(b"broken")
 
-    fake_engine = object()
+    fake_engine = type("FakeEngine", (), {"distance_threshold": 0.4})()
     monkeypatch.setattr(cli_module.DeepFaceEngine, "create", lambda **kwargs: fake_engine)
     monkeypatch.setattr(
         "hikbox_pictures.cli.load_reference_embeddings",
         lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
     )
     monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_samples_from_embeddings",
+        lambda paths, embeddings, *, engine: [object() for _ in paths],
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_template",
+        lambda name, samples, **kwargs: f"template-{name}",
+    )
+    monkeypatch.setattr(
         "hikbox_pictures.cli.iter_candidate_photos",
         lambda path: iter([candidate_heic, candidate_broken]),
     )
 
-    def fake_evaluate(candidate, enc_a, enc_b, *, engine):
+    def fake_evaluate(candidate, template_a, template_b, *, engine):
         assert engine is fake_engine
+        assert template_a == "template-A"
+        assert template_b == "template-B"
         if candidate is candidate_heic:
             return PhotoEvaluation(candidate=candidate_heic, detected_face_count=3, bucket=MatchBucket.GROUP)
         raise CandidateDecodeError(f"Failed to decode {candidate.path}")
@@ -468,16 +608,24 @@ def test_main_counts_no_face_photos(monkeypatch, tmp_path, capsys) -> None:
     candidate = CandidatePhoto(path=input_dir / "noface.jpg")
     candidate.path.write_bytes(b"noface")
 
-    fake_engine = object()
+    fake_engine = type("FakeEngine", (), {"distance_threshold": 0.4})()
     monkeypatch.setattr(cli_module.DeepFaceEngine, "create", lambda **kwargs: fake_engine)
     monkeypatch.setattr(
         "hikbox_pictures.cli.load_reference_embeddings",
         lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
     )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_samples_from_embeddings",
+        lambda paths, embeddings, *, engine: [object() for _ in paths],
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_template",
+        lambda name, samples, **kwargs: f"template-{name}",
+    )
     monkeypatch.setattr("hikbox_pictures.cli.iter_candidate_photos", lambda path: iter([candidate]))
     monkeypatch.setattr(
         "hikbox_pictures.cli.evaluate_candidate_photo",
-        lambda candidate, enc_a, enc_b, *, engine: PhotoEvaluation(
+        lambda candidate, template_a, template_b, *, engine: PhotoEvaluation(
             candidate=candidate,
             detected_face_count=0,
             bucket=None,
@@ -528,6 +676,14 @@ def test_main_passes_deepface_tuning_options_to_engine(monkeypatch, tmp_path) ->
     monkeypatch.setattr(
         "hikbox_pictures.cli.load_reference_embeddings",
         lambda path, engine: ([[0.1]], [path / "sample.jpg"]),
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_samples_from_embeddings",
+        lambda paths, embeddings, *, engine: [object() for _ in paths],
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.cli.build_reference_template",
+        lambda name, samples, **kwargs: f"template-{name}",
     )
     monkeypatch.setattr("hikbox_pictures.cli.iter_candidate_photos", lambda path: iter([]))
 

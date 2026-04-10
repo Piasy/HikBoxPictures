@@ -50,3 +50,12 @@ def test_readme_mentions_deepface_runtime_basics() -> None:
     assert "核对" in readme
 
     assert ("Pillow" in readme and "pillow-heif" in readme) or ("pyproject.toml" in readme)
+
+
+def test_readme_mentions_template_calibration_workflow() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "calibrate_thresholds.py" in readme
+    assert "--distance-threshold-a" in readme
+    assert "--distance-threshold-b" in readme
+    assert "joint_distance" in readme

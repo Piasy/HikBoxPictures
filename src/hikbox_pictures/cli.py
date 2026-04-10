@@ -10,6 +10,7 @@ from hikbox_pictures.matcher import CandidateDecodeError, evaluate_candidate_pho
 from hikbox_pictures.metadata import resolve_capture_datetime
 from hikbox_pictures.models import MatchBucket, RunSummary
 from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_embeddings
+from hikbox_pictures.reference_template import build_reference_samples_from_embeddings, build_reference_template
 from hikbox_pictures.scanner import iter_candidate_photos
 
 
@@ -23,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--detector-backend", default="retinaface")
     parser.add_argument("--distance-metric", default="cosine")
     parser.add_argument("--distance-threshold", type=float)
+    parser.add_argument("--distance-threshold-a", type=float)
+    parser.add_argument("--distance-threshold-b", type=float)
     parser.add_argument("--align", dest="align", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
@@ -38,12 +41,33 @@ def _print_summary(summary: RunSummary) -> None:
         print(f"WARNING: {warning}", file=sys.stderr)
 
 
-def _evaluate_with_engine(candidate, person_a_embeddings, person_b_embeddings, engine):
+def _evaluate_with_engine(candidate, person_a_template, person_b_template, engine):
     return evaluate_candidate_photo(
         candidate,
-        person_a_embeddings,
-        person_b_embeddings,
+        person_a_template,
+        person_b_template,
         engine=engine,
+    )
+
+
+def _build_template(
+    name: str,
+    ref_dir: Path,
+    *,
+    engine: DeepFaceEngine,
+    fallback_threshold: float | None,
+    override_threshold: float | None,
+):
+    embeddings, source_paths = load_reference_embeddings(ref_dir, engine)
+    samples = build_reference_samples_from_embeddings(source_paths, embeddings, engine=engine)
+    default_threshold = fallback_threshold if fallback_threshold is not None else engine.distance_threshold
+    return build_reference_template(
+        name,
+        samples,
+        engine=engine,
+        default_threshold=default_threshold,
+        override_threshold=override_threshold,
+        fallback_threshold=fallback_threshold,
     )
 
 
@@ -74,8 +98,20 @@ def main(argv: list[str] | None = None) -> int:
             align=args.align,
             distance_threshold=args.distance_threshold,
         )
-        person_a_embeddings, _ = load_reference_embeddings(args.ref_a_dir, engine)
-        person_b_embeddings, _ = load_reference_embeddings(args.ref_b_dir, engine)
+        person_a_template = _build_template(
+            "A",
+            args.ref_a_dir,
+            engine=engine,
+            fallback_threshold=args.distance_threshold,
+            override_threshold=args.distance_threshold_a,
+        )
+        person_b_template = _build_template(
+            "B",
+            args.ref_b_dir,
+            engine=engine,
+            fallback_threshold=args.distance_threshold,
+            override_threshold=args.distance_threshold_b,
+        )
     except (DeepFaceInitError, ReferenceImageError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -84,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     for candidate in iter_candidate_photos(args.input):
         summary.scanned_files += 1
         try:
-            evaluation = _evaluate_with_engine(candidate, person_a_embeddings, person_b_embeddings, engine)
+            evaluation = _evaluate_with_engine(candidate, person_a_template, person_b_template, engine)
         except CandidateDecodeError as exc:
             summary.skipped_decode_errors += 1
             summary.warnings.append(str(exc))

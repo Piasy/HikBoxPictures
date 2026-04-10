@@ -31,7 +31,7 @@ PYTHON_BIN=python3.13 ./scripts/install.sh
 ## 用法
 
 ```bash
-hikbox-pictures --input /path/to/photo-library --ref-a-dir /path/to/person-a-images --ref-b-dir /path/to/person-b-images --output /path/to/output --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold 0.40 --align
+hikbox-pictures --input /path/to/photo-library --ref-a-dir /path/to/person-a-images --ref-b-dir /path/to/person-b-images --output /path/to/output --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold-a 0.32 --distance-threshold-b 0.36 --align
 ```
 
 如需关闭对齐，可改为 `--no-align`。
@@ -64,19 +64,30 @@ PYTHONPATH=src python3 -m pytest tests/test_cli.py -v
 
 ## 距离调试
 
-如果想查看每张候选图片中每张人脸到两组参考图的距离，可运行：
+如果想查看每张候选图片中每张人脸到两组参考图的模板距离、质心距离与 `joint_distance`，可运行：
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold 0.40 --align
+PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold-a 0.32 --distance-threshold-b 0.36 --align
 ```
 
 如果还想生成带人脸框和距离标注的临时图片，可额外传入 `--annotated-dir`：
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --annotated-dir test/annotated --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold 0.40 --align
+PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --annotated-dir test/annotated --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold-a 0.32 --distance-threshold-b 0.36 --align
 ```
+
+## 阈值标定
+
+可以先用正负样本目录标定单人的模板阈值，再把建议值回填到 `--distance-threshold-a` 或 `--distance-threshold-b`：
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python3 scripts/calibrate_thresholds.py --ref-dir /path/to/person-a-images --positive-dir /path/to/person-a-positive --negative-dir /path/to/person-a-negative --model-name ArcFace --detector-backend retinaface --distance-metric cosine --align
+```
+
+脚本会输出 `best_f1_threshold` 与 `best_youden_j_threshold` 两组建议值。
 
 ## 输出结构
 

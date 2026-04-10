@@ -82,6 +82,19 @@ def test_main_writes_annotated_image_and_uses_engine_distance_semantics(monkeypa
         lambda path, engine: load_calls.append((path, engine))
         or ((ref_a_embeddings, [ref_a]) if path == ref_a_dir else (ref_b_embeddings, [ref_b])),
     )
+    monkeypatch.setattr(script, "build_reference_samples_from_embeddings", lambda paths, embeddings, *, engine: [object() for _ in paths])
+    monkeypatch.setattr(
+        script,
+        "build_reference_template",
+        lambda name, samples, **kwargs: SimpleNamespace(match_threshold=0.5, top_k=1, kept_samples=[object()], dropped_samples=[]),
+    )
+    results = iter(
+        [
+            SimpleNamespace(template_distance=0.1234, centroid_distance=0.2, matched=True),
+            SimpleNamespace(template_distance=0.5678, centroid_distance=0.3, matched=False),
+        ]
+    )
+    monkeypatch.setattr(script, "compute_template_match", lambda embedding, template, *, engine: next(results))
     monkeypatch.setattr(script, "iter_candidate_photos", lambda root: iter([CandidatePhoto(path=candidate_path)]))
     monkeypatch.setattr(script, "_load_candidate_face_encodings", lambda path, engine: ([(2, 20, 20, 4)], [[0.1]]))
 
@@ -120,16 +133,81 @@ def test_main_writes_annotated_image_and_uses_engine_distance_semantics(monkeypa
     assert "distance_threshold=0.5000" in output
     assert "threshold_source=deepface-default" in output
     assert f"标注图: {generated}" in output
-    assert "dist_a=0.1234" in output
-    assert "dist_b=0.5678" in output
+    assert "template_dist_a=0.1234" in output
+    assert "template_dist_b=0.5678" in output
     assert "match_a=Y" in output
     assert "match_b=N" in output
     assert load_calls == [(ref_a_dir, fake_engine), (ref_b_dir, fake_engine)]
-    assert min_distance_calls == [([0.1], ref_a_embeddings), ([0.1], ref_b_embeddings)]
-    assert is_match_calls == [0.1234, 0.5678]
 
     with Image.open(generated) as image:
         assert image.size == (24, 24)
+
+
+def test_main_prints_template_distances_and_joint_distance(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+    input_dir = tmp_path / "input"
+    ref_a_dir = tmp_path / "ref-a"
+    ref_b_dir = tmp_path / "ref-b"
+    input_dir.mkdir()
+    ref_a_dir.mkdir()
+    ref_b_dir.mkdir()
+
+    candidate_path = input_dir / "candidate.jpg"
+    candidate_path.write_bytes(b"img")
+
+    fake_engine = SimpleNamespace(
+        model_name="ArcFace",
+        detector_backend="retinaface",
+        distance_metric="cosine",
+        align=True,
+        distance_threshold=0.4,
+        threshold_source="explicit",
+    )
+    monkeypatch.setattr(script.DeepFaceEngine, "create", lambda **kwargs: fake_engine)
+    monkeypatch.setattr(script, "iter_candidate_photos", lambda root: iter([CandidatePhoto(path=candidate_path)]))
+    monkeypatch.setattr(script, "_load_candidate_face_encodings", lambda path, engine: ([(0, 10, 10, 0), (0, 20, 20, 0)], [[1.0], [2.0]]))
+
+    fake_template = SimpleNamespace(
+        kept_samples=[SimpleNamespace(path=ref_a_dir / "a.jpg")],
+        dropped_samples=[],
+        match_threshold=0.32,
+        top_k=1,
+    )
+    monkeypatch.setattr(script, "build_reference_template", lambda *args, **kwargs: fake_template)
+    monkeypatch.setattr(script, "build_reference_samples_from_embeddings", lambda paths, embeddings, *, engine: [object()])
+    monkeypatch.setattr(script, "load_reference_embeddings", lambda path, engine: ([[0.1]], [path / "sample.jpg"]))
+
+    results = iter(
+        [
+            SimpleNamespace(template_distance=0.12, centroid_distance=0.13, matched=True),
+            SimpleNamespace(template_distance=0.44, centroid_distance=0.40, matched=False),
+            SimpleNamespace(template_distance=0.45, centroid_distance=0.41, matched=False),
+            SimpleNamespace(template_distance=0.11, centroid_distance=0.14, matched=True),
+        ]
+    )
+    monkeypatch.setattr(script, "compute_template_match", lambda embedding, template, *, engine: next(results))
+
+    exit_code = script.main(
+        [
+            "--input",
+            str(input_dir),
+            "--ref-a-dir",
+            str(ref_a_dir),
+            "--ref-b-dir",
+            str(ref_b_dir),
+            "--distance-threshold-a",
+            "0.32",
+            "--distance-threshold-b",
+            "0.35",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "template_threshold_a=0.3200" in output
+    assert "template_dist_a=0.1200" in output
+    assert "centroid_dist_b=0.4100" in output
+    assert "joint_distance=0.1200" in output
 
 
 def test_write_annotated_image_uses_three_times_larger_font(monkeypatch, tmp_path) -> None:
@@ -166,8 +244,10 @@ def test_write_annotated_image_uses_three_times_larger_font(monkeypatch, tmp_pat
         input_root=input_dir,
         annotated_dir=annotated_dir,
         locations=[(10, 50, 60, 5)],
-        distances_a=[0.1111],
-        distances_b=[0.2222],
+        template_distances_a=[0.1111],
+        template_distances_b=[0.2222],
+        centroid_distances_a=[0.3333],
+        centroid_distances_b=[0.4444],
     )
 
     assert loaded_sizes == [30]
@@ -232,8 +312,10 @@ def test_write_annotated_image_uses_exif_transposed_pixels(tmp_path) -> None:
         input_root=tmp_path,
         annotated_dir=annotated_dir,
         locations=[],
-        distances_a=[],
-        distances_b=[],
+        template_distances_a=[],
+        template_distances_b=[],
+        centroid_distances_a=[],
+        centroid_distances_b=[],
     )
 
     with Image.open(output_path) as annotated:
@@ -277,6 +359,17 @@ def test_main_processes_all_candidates_without_skip_logic(monkeypatch, tmp_path,
         script,
         "load_reference_embeddings",
         lambda path, engine: (([[0.1]], [ref_a]) if path == ref_a_dir else ([[0.2]], [ref_b])),
+    )
+    monkeypatch.setattr(script, "build_reference_samples_from_embeddings", lambda paths, embeddings, *, engine: [object() for _ in paths])
+    monkeypatch.setattr(
+        script,
+        "build_reference_template",
+        lambda name, samples, **kwargs: SimpleNamespace(match_threshold=0.5, top_k=1, kept_samples=[object()], dropped_samples=[]),
+    )
+    monkeypatch.setattr(
+        script,
+        "compute_template_match",
+        lambda embedding, template, *, engine: SimpleNamespace(template_distance=0.1234, centroid_distance=0.2, matched=True),
     )
     monkeypatch.setattr(
         script,
@@ -339,6 +432,17 @@ def test_main_passes_custom_engine_args_and_prints_explicit_threshold(monkeypatc
         script,
         "load_reference_embeddings",
         lambda path, engine: (([[0.1]], [ref_a]) if path == ref_a_dir else ([[0.2]], [ref_b])),
+    )
+    monkeypatch.setattr(script, "build_reference_samples_from_embeddings", lambda paths, embeddings, *, engine: [object() for _ in paths])
+    monkeypatch.setattr(
+        script,
+        "build_reference_template",
+        lambda name, samples, **kwargs: SimpleNamespace(match_threshold=0.42, top_k=1, kept_samples=[object()], dropped_samples=[]),
+    )
+    monkeypatch.setattr(
+        script,
+        "compute_template_match",
+        lambda embedding, template, *, engine: SimpleNamespace(template_distance=0.1, centroid_distance=0.2, matched=True),
     )
     monkeypatch.setattr(script, "iter_candidate_photos", lambda root: iter([]))
 
@@ -483,6 +587,17 @@ def test_main_continues_when_single_annotated_write_fails(monkeypatch, tmp_path,
         "load_reference_embeddings",
         lambda path, engine: (([[0.1]], [ref_a]) if path == ref_a_dir else ([[0.2]], [ref_b])),
     )
+    monkeypatch.setattr(script, "build_reference_samples_from_embeddings", lambda paths, embeddings, *, engine: [object() for _ in paths])
+    monkeypatch.setattr(
+        script,
+        "build_reference_template",
+        lambda name, samples, **kwargs: SimpleNamespace(match_threshold=0.5, top_k=1, kept_samples=[object()], dropped_samples=[]),
+    )
+    monkeypatch.setattr(
+        script,
+        "compute_template_match",
+        lambda embedding, template, *, engine: SimpleNamespace(template_distance=0.1234, centroid_distance=0.2, matched=True),
+    )
     monkeypatch.setattr(
         script,
         "iter_candidate_photos",
@@ -500,8 +615,10 @@ def test_main_continues_when_single_annotated_write_fails(monkeypatch, tmp_path,
         input_root: Path,
         annotated_dir: Path,
         locations,
-        distances_a,
-        distances_b,
+        template_distances_a,
+        template_distances_b,
+        centroid_distances_a,
+        centroid_distances_b,
     ) -> Path:
         if candidate_path == candidate_a:
             raise RuntimeError("mock write failed")
