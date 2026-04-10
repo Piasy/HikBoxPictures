@@ -37,6 +37,12 @@ class ReferenceSample:
     kept: bool
     drop_reason: str | None
 
+    def __post_init__(self) -> None:
+        if self.kept and self.drop_reason is not None:
+            raise ValueError("kept=True 时 drop_reason 必须为 None")
+        if not self.kept and self.drop_reason is None:
+            raise ValueError("kept=False 时 drop_reason 不能为空")
+
 
 @dataclass(frozen=True)
 class ReferenceTemplate:
@@ -46,6 +52,17 @@ class ReferenceTemplate:
     centroid_embedding: Embedding
     match_threshold: float
     top_k: int
+
+    def __post_init__(self) -> None:
+        expected_kept_samples = [sample for sample in self.samples if sample.kept]
+        if len(self.kept_samples) != len(expected_kept_samples):
+            raise ValueError("kept_samples 必须与 samples 中 kept=True 的样本一致")
+
+        for actual_sample, expected_sample in zip(self.kept_samples, expected_kept_samples):
+            if actual_sample is expected_sample:
+                continue
+            if actual_sample.path != expected_sample.path:
+                raise ValueError("kept_samples 必须与 samples 中 kept=True 的样本一致")
 
     @property
     def dropped_samples(self) -> list[ReferenceSample]:
