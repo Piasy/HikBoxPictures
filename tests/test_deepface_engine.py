@@ -13,6 +13,12 @@ from hikbox_pictures.deepface_engine import (
 )
 
 
+def _patch_loaded_rgb(monkeypatch, image: np.ndarray | None = None) -> np.ndarray:
+    loaded_rgb = image if image is not None else np.zeros((4, 4, 3), dtype=np.uint8)
+    monkeypatch.setattr("hikbox_pictures.deepface_engine.load_rgb_image", lambda _path: loaded_rgb)
+    return loaded_rgb
+
+
 def test_create_uses_default_config_and_threshold(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -72,7 +78,10 @@ def test_detect_faces_maps_facial_area_to_bbox(tmp_path: Path, represent_payload
     image_path = tmp_path / "sample.jpg"
     image_path.write_bytes(b"image")
 
-    engine = DeepFaceEngine(
+    monkeypatch = pytest.MonkeyPatch()
+    _patch_loaded_rgb(monkeypatch)
+    try:
+        engine = DeepFaceEngine(
         model_name="ArcFace",
         detector_backend="retinaface",
         distance_metric="cosine",
@@ -81,14 +90,16 @@ def test_detect_faces_maps_facial_area_to_bbox(tmp_path: Path, represent_payload
         threshold_source="explicit",
         deepface_module=SimpleNamespace(represent=lambda **_kwargs: represent_payload),
         verification_module=SimpleNamespace(find_distance=lambda *_args, **_kwargs: 0.0),
-    )
+        )
 
-    faces = engine.detect_faces(image_path)
+        faces = engine.detect_faces(image_path)
 
-    assert len(faces) == 1
-    assert faces[0].bbox == (20, 40, 60, 10)
-    np.testing.assert_allclose(faces[0].embedding, np.array([0.1, 0.2, 0.3], dtype=np.float32))
-    assert faces[0].embedding.dtype == np.float32
+        assert len(faces) == 1
+        assert faces[0].bbox == (20, 40, 60, 10)
+        np.testing.assert_allclose(faces[0].embedding, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+        assert faces[0].embedding.dtype == np.float32
+    finally:
+        monkeypatch.undo()
 
 
 def test_distance_uses_configured_metric(monkeypatch) -> None:
@@ -188,7 +199,10 @@ def test_detect_faces_wraps_inference_error(tmp_path: Path) -> None:
     def raise_error(**_kwargs):
         raise RuntimeError("infer failed")
 
-    engine = DeepFaceEngine(
+    monkeypatch = pytest.MonkeyPatch()
+    _patch_loaded_rgb(monkeypatch)
+    try:
+        engine = DeepFaceEngine(
         model_name="ArcFace",
         detector_backend="retinaface",
         distance_metric="cosine",
@@ -197,10 +211,57 @@ def test_detect_faces_wraps_inference_error(tmp_path: Path) -> None:
         threshold_source="explicit",
         deepface_module=SimpleNamespace(represent=raise_error),
         verification_module=SimpleNamespace(find_distance=lambda *_args, **_kwargs: 0.0),
+        )
+
+        with pytest.raises(DeepFaceInferenceError, match="infer failed"):
+            engine.detect_faces(image_path)
+    finally:
+        monkeypatch.undo()
+
+
+def test_detect_faces_passes_loaded_rgb_array_to_deepface(monkeypatch, tmp_path: Path) -> None:
+    image_path = tmp_path / "sample.heic"
+    image_path.write_bytes(b"image")
+
+    loaded_rgb = np.array(
+        [
+            [[10, 20, 30], [40, 50, 60]],
+            [[70, 80, 90], [100, 110, 120]],
+        ],
+        dtype=np.uint8,
+    )
+    captured: dict[str, object] = {}
+
+    def fake_represent(**kwargs):
+        captured.update(kwargs)
+        return [
+            {
+                "facial_area": {"x": 10, "y": 20, "w": 30, "h": 40},
+                "embedding": [0.1, 0.2, 0.3],
+            }
+        ]
+
+    _patch_loaded_rgb(monkeypatch, loaded_rgb)
+
+    engine = DeepFaceEngine(
+        model_name="ArcFace",
+        detector_backend="retinaface",
+        distance_metric="cosine",
+        align=True,
+        distance_threshold=0.42,
+        threshold_source="explicit",
+        deepface_module=SimpleNamespace(represent=fake_represent),
+        verification_module=SimpleNamespace(find_distance=lambda *_args, **_kwargs: 0.0),
     )
 
-    with pytest.raises(DeepFaceInferenceError, match="infer failed"):
-        engine.detect_faces(image_path)
+    faces = engine.detect_faces(image_path)
+
+    assert len(faces) == 1
+    np.testing.assert_array_equal(captured["img_path"], loaded_rgb[:, :, ::-1])
+    assert captured["model_name"] == "ArcFace"
+    assert captured["detector_backend"] == "retinaface"
+    assert captured["align"] is True
+    assert captured["enforce_detection"] is False
 
 
 @pytest.mark.parametrize(
@@ -224,7 +285,10 @@ def test_detect_faces_raises_for_dirty_payload(tmp_path: Path, represent_payload
     image_path = tmp_path / "broken-payload.jpg"
     image_path.write_bytes(b"image")
 
-    engine = DeepFaceEngine(
+    monkeypatch = pytest.MonkeyPatch()
+    _patch_loaded_rgb(monkeypatch)
+    try:
+        engine = DeepFaceEngine(
         model_name="ArcFace",
         detector_backend="retinaface",
         distance_metric="cosine",
@@ -233,7 +297,9 @@ def test_detect_faces_raises_for_dirty_payload(tmp_path: Path, represent_payload
         threshold_source="explicit",
         deepface_module=SimpleNamespace(represent=lambda **_kwargs: represent_payload),
         verification_module=SimpleNamespace(find_distance=lambda *_args, **_kwargs: 0.0),
-    )
+        )
 
-    with pytest.raises(DeepFaceInferenceError, match=error_message):
-        engine.detect_faces(image_path)
+        with pytest.raises(DeepFaceInferenceError, match=error_message):
+            engine.detect_faces(image_path)
+    finally:
+        monkeypatch.undo()

@@ -173,6 +173,75 @@ def test_write_annotated_image_uses_three_times_larger_font(monkeypatch, tmp_pat
     assert loaded_sizes == [30]
 
 
+def test_draw_label_uses_blue_text_without_background() -> None:
+    script = _load_script_module()
+
+    text_calls: list[dict[str, object]] = []
+
+    class DummyDraw:
+        def rectangle(self, *args, **kwargs):
+            raise AssertionError("不应绘制标签背景矩形")
+
+        def text(self, position, text, *, fill=None, font=None):
+            text_calls.append({"position": position, "text": text, "fill": fill, "font": font})
+
+        @staticmethod
+        def textbbox(_position, text, font=None):
+            return (0, 0, len(text) * 10, 12)
+
+    lines = ["face[0]", "A 0.1234", "B 0.5678"]
+    font = object()
+
+    script._draw_label(
+        DummyDraw(),
+        font=font,
+        left=10,
+        top=30,
+        lines=lines,
+        image_width=200,
+        image_height=200,
+    )
+
+    assert [call["text"] for call in text_calls] == lines
+    assert [call["fill"] for call in text_calls] == [script.ANNOTATION_TEXT_COLOR] * len(lines)
+
+
+def test_write_annotated_image_uses_exif_transposed_pixels(tmp_path) -> None:
+    script = _load_script_module()
+
+    candidate_path = tmp_path / "candidate.png"
+    annotated_dir = tmp_path / "annotated"
+
+    image = Image.new("RGB", (3, 2))
+    image.putdata(
+        [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (255, 0, 255),
+            (0, 255, 255),
+        ]
+    )
+    exif = Image.Exif()
+    exif[274] = 6
+    image.save(candidate_path, exif=exif)
+
+    output_path = script._write_annotated_image(
+        candidate_path,
+        input_root=tmp_path,
+        annotated_dir=annotated_dir,
+        locations=[],
+        distances_a=[],
+        distances_b=[],
+    )
+
+    with Image.open(output_path) as annotated:
+        assert annotated.size == (2, 3)
+        assert annotated.getpixel((0, 0)) == (255, 255, 0)
+        assert annotated.getpixel((1, 0)) == (255, 0, 0)
+
+
 def test_main_processes_all_candidates_without_skip_logic(monkeypatch, tmp_path, capsys) -> None:
     script = _load_script_module()
 

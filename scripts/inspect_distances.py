@@ -14,6 +14,8 @@ from hikbox_pictures.image_io import load_rgb_image
 from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_embeddings
 from hikbox_pictures.scanner import iter_candidate_photos
 
+ANNOTATION_TEXT_COLOR = (64, 128, 255)
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="inspect_distances")
@@ -80,7 +82,6 @@ def _draw_label(
     image_width: int,
     image_height: int,
 ) -> None:
-    padding = 4
     line_gap = 2
     label_width, label_height = _label_size(draw, lines, font)
     label_left = max(0, min(left, image_width - label_width))
@@ -89,16 +90,9 @@ def _draw_label(
         label_top = min(image_height - label_height, top + 6)
     label_top = max(0, label_top)
 
-    draw.rectangle(
-        (label_left, label_top, label_left + label_width, label_top + label_height),
-        fill=(0, 0, 0),
-        outline=(255, 64, 64),
-        width=1,
-    )
-
-    text_top = label_top + padding
+    text_top = label_top
     for line in lines:
-        draw.text((label_left + padding, text_top), line, fill=(255, 255, 255), font=font)
+        draw.text((label_left, text_top), line, fill=ANNOTATION_TEXT_COLOR, font=font)
         _, _, _, bottom = draw.textbbox((0, 0), line, font=font)
         text_top += bottom + line_gap
 

@@ -7,6 +7,8 @@ from typing import Iterable, Literal, Mapping, Protocol, Sequence, TypeAlias
 import numpy as np
 import numpy.typing as npt
 
+from hikbox_pictures.image_io import load_rgb_image
+
 try:
     from deepface import DeepFace as _DeepFace
     from deepface.modules import verification as _verification
@@ -105,8 +107,10 @@ class DeepFaceEngine:
 
     def detect_faces(self, image_path: Path) -> list[DetectedFace]:
         try:
+            loaded_rgb = load_rgb_image(image_path)
+            loaded_bgr = loaded_rgb[:, :, ::-1]
             results = self.deepface_module.represent(
-                img_path=str(image_path),
+                img_path=loaded_bgr,
                 model_name=self.model_name,
                 detector_backend=self.detector_backend,
                 align=self.align,
