@@ -1,5 +1,6 @@
 import ast
 from datetime import datetime
+from importlib.util import resolve_name
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,32 @@ def _import_target_from_call(node: ast.Call) -> str | None:
     return None
 
 
+def _package_from_call(node: ast.Call) -> str | None:
+    for keyword in node.keywords:
+        if keyword.arg != "package":
+            continue
+        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+            return keyword.value.value
+    return None
+
+
+def _normalize_import_target(import_target: str, *, package: str | None = None) -> str | None:
+    if _is_legacy_insightface_module(import_target):
+        return import_target
+
+    if package is None or not import_target.startswith("."):
+        return None
+
+    try:
+        resolved = resolve_name(import_target, package)
+    except ImportError:
+        return None
+
+    if _is_legacy_insightface_module(resolved):
+        return resolved
+    return None
+
+
 def _find_legacy_insightface_imports(paths: list[Path]) -> list[tuple[Path, int, str]]:
     matches: list[tuple[Path, int, str]] = []
     for path in paths:
@@ -77,8 +104,14 @@ def _find_legacy_insightface_imports(paths: list[Path]) -> list[tuple[Path, int,
                     matches.append((path, node.lineno, module_name))
             elif isinstance(node, ast.Call) and _is_import_module_call(node):
                 import_target = _import_target_from_call(node)
-                if import_target is not None and _is_legacy_insightface_module(import_target):
-                    matches.append((path, node.lineno, import_target))
+                if import_target is None:
+                    continue
+                normalized_target = _normalize_import_target(
+                    import_target,
+                    package=_package_from_call(node),
+                )
+                if normalized_target is not None:
+                    matches.append((path, node.lineno, normalized_target))
     return matches
 
 
@@ -109,9 +142,11 @@ def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_
                 "from hikbox_pictures import insightface_engine",
                 "from hikbox_pictures.insightface_engine import InsightFaceEngine",
                 "from . import insightface_engine",
+                "from .insightface_engine import InsightFaceEngine",
                 "import importlib",
                 'importlib.import_module("hikbox_pictures.insightface_engine")',
                 'importlib.import_module(name="hikbox_pictures.insightface_engine")',
+                'importlib.import_module(".insightface_engine", package="hikbox_pictures")',
             ]
         ),
         encoding="utf-8",
@@ -125,8 +160,10 @@ def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_
         (3, "hikbox_pictures.insightface_engine"),
         (4, "hikbox_pictures.insightface_engine"),
         (5, "insightface_engine"),
-        (7, "hikbox_pictures.insightface_engine"),
+        (6, "insightface_engine"),
         (8, "hikbox_pictures.insightface_engine"),
+        (9, "hikbox_pictures.insightface_engine"),
+        (10, "hikbox_pictures.insightface_engine"),
     ]
 
 
