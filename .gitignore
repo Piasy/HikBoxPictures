@@ -1,4 +1,5 @@
 .worktrees/
+deepface
 sample/
 .DS_Store
 .pytest_cache/
