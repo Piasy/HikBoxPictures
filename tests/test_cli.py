@@ -30,6 +30,39 @@ def _is_import_module_call(node: ast.Call) -> bool:
     return False
 
 
+def _legacy_import_from_matches(node: ast.ImportFrom) -> list[str]:
+    module_name = node.module or ""
+    if _is_legacy_insightface_module(module_name):
+        return [module_name]
+
+    matches: list[str] = []
+    if module_name == "hikbox_pictures":
+        for alias in node.names:
+            if alias.name == "insightface_engine":
+                matches.append("hikbox_pictures.insightface_engine")
+    if node.level > 0:
+        if module_name == "insightface_engine":
+            matches.append("insightface_engine")
+        elif module_name == "":
+            for alias in node.names:
+                if alias.name == "insightface_engine":
+                    matches.append("insightface_engine")
+    return matches
+
+
+def _import_target_from_call(node: ast.Call) -> str | None:
+    if node.args:
+        first_arg = node.args[0]
+        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+            return first_arg.value
+    for keyword in node.keywords:
+        if keyword.arg != "name":
+            continue
+        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+            return keyword.value.value
+    return None
+
+
 def _find_legacy_insightface_imports(paths: list[Path]) -> list[tuple[Path, int, str]]:
     matches: list[tuple[Path, int, str]] = []
     for path in paths:
@@ -40,16 +73,12 @@ def _find_legacy_insightface_imports(paths: list[Path]) -> list[tuple[Path, int,
                     if _is_legacy_insightface_module(alias.name):
                         matches.append((path, node.lineno, alias.name))
             elif isinstance(node, ast.ImportFrom):
-                module_name = node.module or ""
-                if _is_legacy_insightface_module(module_name):
+                for module_name in _legacy_import_from_matches(node):
                     matches.append((path, node.lineno, module_name))
             elif isinstance(node, ast.Call) and _is_import_module_call(node):
-                if not node.args:
-                    continue
-                first_arg = node.args[0]
-                if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
-                    if _is_legacy_insightface_module(first_arg.value):
-                        matches.append((path, node.lineno, first_arg.value))
+                import_target = _import_target_from_call(node)
+                if import_target is not None and _is_legacy_insightface_module(import_target):
+                    matches.append((path, node.lineno, import_target))
     return matches
 
 
@@ -77,9 +106,12 @@ def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_
             [
                 "import insightface",
                 "from insightface.app import FaceAnalysis",
+                "from hikbox_pictures import insightface_engine",
                 "from hikbox_pictures.insightface_engine import InsightFaceEngine",
+                "from . import insightface_engine",
                 "import importlib",
                 'importlib.import_module("hikbox_pictures.insightface_engine")',
+                'importlib.import_module(name="hikbox_pictures.insightface_engine")',
             ]
         ),
         encoding="utf-8",
@@ -91,7 +123,10 @@ def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_
         (1, "insightface"),
         (2, "insightface.app"),
         (3, "hikbox_pictures.insightface_engine"),
-        (5, "hikbox_pictures.insightface_engine"),
+        (4, "hikbox_pictures.insightface_engine"),
+        (5, "insightface_engine"),
+        (7, "hikbox_pictures.insightface_engine"),
+        (8, "hikbox_pictures.insightface_engine"),
     ]
 
 
