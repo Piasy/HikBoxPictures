@@ -32,6 +32,7 @@ def test_readme_mentions_deepface_runtime_basics() -> None:
     assert "./scripts/install.sh" in readme
 
     assert "deepface" in readme_lower
+    assert "tf-keras" in readme_lower
     assert "insightface" not in readme_lower
     assert "onnxruntime" not in readme_lower
     assert "face_recognition" not in readme_lower

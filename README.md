@@ -8,6 +8,7 @@ HikBox Pictures 是一个本地 macOS CLI，用于递归扫描照片目录，找
 - Python 3.13+
 - Xcode Command Line Tools
 - `deepface`
+- `tf-keras`
 - `Pillow`
 - `pillow-heif`
 
@@ -19,7 +20,7 @@ HikBox Pictures 是一个本地 macOS CLI，用于递归扫描照片目录，找
 ./scripts/install.sh
 ```
 
-脚本会自动创建 `.venv`、升级 `pip`，并安装项目及开发依赖（包含 `deepface` 与必要的图像处理依赖）。
+脚本会自动创建 `.venv`、升级 `pip`，并安装项目及开发依赖（包含 `deepface`、`tf-keras` 与必要的图像处理依赖）。
 
 如果需要显式指定 Python，可在执行前设置 `PYTHON_BIN`：
 
@@ -36,6 +37,8 @@ hikbox-pictures --input /path/to/photo-library --ref-a-dir /path/to/person-a-ima
 如需关闭对齐，可改为 `--no-align`。
 
 参考目录建议每人准备多张正脸、清晰、光照正常的照片，以提升匹配稳定性。
+
+默认 `retinaface` 检测后端依赖 `tf-keras`，安装脚本会一并安装。
 
 首次运行可能触发模型下载，需联网，首次启动会明显慢于后续运行；后续会复用本地缓存模型。
 

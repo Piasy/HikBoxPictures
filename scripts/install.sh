@@ -37,14 +37,14 @@ fi
 echo "[hikbox-pictures] 升级 pip"
 "${VENV_PYTHON}" -m pip install --upgrade pip
 
-echo "[hikbox-pictures] 安装项目及开发依赖（包含 deepface）"
+echo "[hikbox-pictures] 安装项目及开发依赖（包含 deepface、tf-keras）"
 if ! "${VENV_PYTHON}" -m pip install -e '.[dev]'; then
   cat >&2 <<'ERR'
 安装失败。
 
 请确认：
 1) Python 版本满足 3.13+
-2) 网络可用（首次运行 deepface 相关模型下载需联网）
+2) 网络可用（首次安装 deepface、tf-keras 与相关模型时需联网）
 3) 系统依赖安装完整（如 TensorFlow / OpenCV 的平台依赖）
 
 然后重新运行：
@@ -57,7 +57,7 @@ cat <<DONE
 
 安装完成。
 
-提示：首次运行可能触发 deepface 模型下载，需联网，首次启动会明显慢于后续运行。
+提示：安装脚本会一并安装 deepface 与 tf-keras；首次运行仍可能触发模型下载，需联网，首次启动会明显慢于后续运行。
 
 激活虚拟环境：
   source "${VENV_DIR}/bin/activate"
