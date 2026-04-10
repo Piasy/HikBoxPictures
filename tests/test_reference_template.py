@@ -85,7 +85,7 @@ def test_build_reference_template_does_not_drop_small_reference_sets(tmp_path: P
     assert [sample.drop_reason for sample in template.samples] == [None, None, None]
     assert [sample.center_distance for sample in template.samples] == pytest.approx([0.1, 0.1, 0.8])
     assert [sample.quality_score for sample in template.samples] == pytest.approx([1.0, 0.8555556, 0.0])
-    assert float(template.centroid_embedding[0]) == pytest.approx(10.4610786, rel=1e-6)
+    assert float(template.centroid_embedding[0]) == pytest.approx(1.0, rel=1e-6)
 
 
 def test_build_reference_template_drops_outlier_when_reference_set_is_large(tmp_path: Path) -> None:
@@ -277,6 +277,41 @@ def test_compute_template_match_uses_top_k_mean_and_centroid_distance(tmp_path: 
     assert result.matched is False
 
 
+def test_compute_template_match_works_with_internal_built_centroid(tmp_path: Path) -> None:
+    samples = [
+        _sample(tmp_path, "a.jpg", 10.0, area=0.7, sharpness=10.0),
+        _sample(tmp_path, "b.jpg", 11.0, area=0.7, sharpness=9.0),
+        _sample(tmp_path, "c.jpg", 12.0, area=0.7, sharpness=8.0),
+    ]
+    engine = FakeEngine(
+        {
+            (10, 10): 0.0,
+            (10, 11): 0.1,
+            (10, 12): 0.2,
+            (11, 10): 0.1,
+            (11, 11): 0.0,
+            (11, 12): 0.1,
+            (12, 10): 0.2,
+            (12, 11): 0.1,
+            (12, 12): 0.0,
+            (90, 10): 0.2,
+            (90, 11): 0.1,
+            (90, 12): 0.3,
+            (90, 1): 0.12,
+        }
+    )
+
+    template = build_reference_template("A", samples, engine=engine, default_threshold=0.21)
+
+    result = compute_template_match(np.asarray([90.0], dtype=np.float32), template, engine=engine)
+
+    assert float(template.centroid_embedding[0]) == pytest.approx(1.0, rel=1e-6)
+    assert result.template_distance == pytest.approx(0.2)
+    assert result.centroid_distance == pytest.approx(0.12)
+    assert result.top_k_distances == pytest.approx([0.1, 0.2, 0.3])
+    assert result.matched is True
+
+
 @pytest.mark.parametrize("non_finite_distance", [float("nan"), float("inf"), float("-inf")])
 def test_compute_template_match_rejects_non_finite_distance(tmp_path: Path, non_finite_distance: float) -> None:
     samples = [
@@ -385,3 +420,27 @@ def test_select_template_threshold_prefers_override_then_global_then_engine_defa
     assert select_template_threshold(override_threshold=0.3, fallback_threshold=0.4, engine_threshold=0.5) == 0.3
     assert select_template_threshold(override_threshold=None, fallback_threshold=0.4, engine_threshold=0.5) == 0.4
     assert select_template_threshold(override_threshold=None, fallback_threshold=None, engine_threshold=0.5) == 0.5
+
+
+@pytest.mark.parametrize("non_finite_value", [float("nan"), float("inf"), float("-inf")])
+def test_select_template_threshold_rejects_non_finite_values(non_finite_value: float) -> None:
+    with pytest.raises(ValueError, match="有限值"):
+        select_template_threshold(
+            override_threshold=non_finite_value,
+            fallback_threshold=0.4,
+            engine_threshold=0.5,
+        )
+
+    with pytest.raises(ValueError, match="有限值"):
+        select_template_threshold(
+            override_threshold=None,
+            fallback_threshold=non_finite_value,
+            engine_threshold=0.5,
+        )
+
+    with pytest.raises(ValueError, match="有限值"):
+        select_template_threshold(
+            override_threshold=None,
+            fallback_threshold=None,
+            engine_threshold=non_finite_value,
+        )

@@ -59,10 +59,10 @@ def select_template_threshold(
     engine_threshold: float,
 ) -> float:
     if override_threshold is not None:
-        return float(override_threshold)
+        return _ensure_finite_scalar(float(override_threshold), name="match_threshold")
     if fallback_threshold is not None:
-        return float(fallback_threshold)
-    return float(engine_threshold)
+        return _ensure_finite_scalar(float(fallback_threshold), name="match_threshold")
+    return _ensure_finite_scalar(float(engine_threshold), name="match_threshold")
 
 
 def _normalize_scores(values: Sequence[float]) -> list[float]:
@@ -120,7 +120,12 @@ def _build_centroid_embedding(samples: Sequence[ReferenceSample]) -> np.ndarray:
         centroid = stacked_embeddings.mean(axis=0)
     else:
         centroid = np.average(stacked_embeddings, axis=0, weights=weights)
-    return _ensure_finite_array(np.asarray(centroid, dtype=np.float32), name="centroid_embedding")
+
+    centroid = _ensure_finite_array(np.asarray(centroid, dtype=np.float32), name="centroid_embedding")
+    norm = _ensure_finite_scalar(float(np.linalg.norm(centroid)), name="centroid_embedding_norm")
+    if norm <= 0.0:
+        return centroid
+    return _ensure_finite_array(np.asarray(centroid / norm, dtype=np.float32), name="centroid_embedding")
 
 
 def build_reference_template(
