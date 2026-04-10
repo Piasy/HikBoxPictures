@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from numbers import Real
 from typing import Protocol, runtime_checkable
 
-import numpy as np
-
-from hikbox_pictures.deepface_engine import DeepFaceEngine, EmbeddingLike
-from hikbox_pictures.models import CandidatePhoto, MatchBucket, PhotoEvaluation
+from hikbox_pictures.deepface_engine import DeepFaceEngine
+from hikbox_pictures.models import CandidatePhoto, MatchBucket, PhotoEvaluation, ReferenceTemplate
+from hikbox_pictures.reference_template import compute_template_match
 
 DEFAULT_DISTANCE_THRESHOLD = 10.0
 
@@ -21,10 +19,7 @@ class MatcherEngineProtocol(Protocol):
     def detect_faces(self, image_path: object) -> list[object]:
         ...
 
-    def min_distance(self, embedding: EmbeddingLike, references: Sequence[EmbeddingLike] | np.ndarray) -> float:
-        ...
-
-    def is_match(self, distance: float) -> bool:
+    def distance(self, lhs: object, rhs: object) -> float:
         ...
 
 
@@ -38,40 +33,11 @@ def _get_cached_matcher_engine() -> DeepFaceEngine:
     return _CACHED_MATCHER_ENGINE
 
 
-def _normalize_reference_embeddings(reference_embeddings: object) -> Sequence[EmbeddingLike] | np.ndarray:
-    if isinstance(reference_embeddings, np.ndarray):
-        return reference_embeddings
-
-    if not isinstance(reference_embeddings, Sequence):
-        raise TypeError("reference_embeddings 类型非法")
-
-    if len(reference_embeddings) == 0:
-        return []
-
-    first_item = reference_embeddings[0]
-    if isinstance(first_item, Real):
-        return [reference_embeddings]
-
-    return list(reference_embeddings)
-
-
-def compute_min_distances(
-    candidate_embeddings: Sequence[EmbeddingLike],
-    reference_embeddings: Sequence[EmbeddingLike] | np.ndarray,
-    *,
-    engine: MatcherEngineProtocol,
-) -> list[float]:
-    if len(reference_embeddings) == 0:
-        return [float("inf")] * len(candidate_embeddings)
-
-    return [engine.min_distance(candidate_embedding, reference_embeddings) for candidate_embedding in candidate_embeddings]
-
-
 def _validate_matcher_engine(engine: object) -> MatcherEngineProtocol:
     if not isinstance(engine, MatcherEngineProtocol):
         missing_members = [
             member
-            for member in ("detect_faces", "min_distance", "is_match")
+            for member in ("detect_faces", "distance")
             if not hasattr(engine, member)
         ]
         missing_detail = ", ".join(missing_members) if missing_members else "matcher engine protocol"
@@ -81,6 +47,42 @@ def _validate_matcher_engine(engine: object) -> MatcherEngineProtocol:
 
 def _has_distinct_matches(matches_a: set[int], matches_b: set[int]) -> bool:
     return any(index_a != index_b for index_a in matches_a for index_b in matches_b)
+
+
+def _select_best_match_pair(
+    matches_a: set[int],
+    matches_b: set[int],
+    distances_to_a: Sequence[float],
+    distances_to_b: Sequence[float],
+) -> tuple[int, int] | None:
+    candidate_pairs = [
+        (index_a, index_b)
+        for index_a in matches_a
+        for index_b in matches_b
+        if index_a != index_b
+    ]
+    if not candidate_pairs:
+        return None
+
+    return min(
+        candidate_pairs,
+        key=lambda pair: (
+            max(distances_to_a[pair[0]], distances_to_b[pair[1]]),
+            pair[0],
+            pair[1],
+        ),
+    )
+
+
+def _joint_distance_for_pair(
+    pair: tuple[int, int] | None,
+    distances_to_a: Sequence[float],
+    distances_to_b: Sequence[float],
+) -> float | None:
+    if pair is None:
+        return None
+    index_a, index_b = pair
+    return max(distances_to_a[index_a], distances_to_b[index_b])
 
 
 def _face_area(face: object) -> int | None:
@@ -139,8 +141,8 @@ def _has_large_extra_face(
 
 def evaluate_candidate_photo(
     photo: CandidatePhoto,
-    person_a_embeddings: Sequence[Sequence[float]] | Sequence[float] | np.ndarray,
-    person_b_embeddings: Sequence[Sequence[float]] | Sequence[float] | np.ndarray,
+    person_a_template: ReferenceTemplate,
+    person_b_template: ReferenceTemplate,
     *,
     engine: MatcherEngineProtocol | None = None,
     distance_threshold: float = DEFAULT_DISTANCE_THRESHOLD,
@@ -169,25 +171,31 @@ def evaluate_candidate_photo(
         return PhotoEvaluation(candidate=photo, detected_face_count=0, bucket=None)
 
     candidate_embeddings = [face.embedding for face in faces]
-    normalized_person_a_embeddings = _normalize_reference_embeddings(person_a_embeddings)
-    normalized_person_b_embeddings = _normalize_reference_embeddings(person_b_embeddings)
 
     try:
-        min_distances_to_a = compute_min_distances(
-            candidate_embeddings,
-            normalized_person_a_embeddings,
-            engine=face_engine,
-        )
-        min_distances_to_b = compute_min_distances(
-            candidate_embeddings,
-            normalized_person_b_embeddings,
-            engine=face_engine,
-        )
-
-        matches_a = {index for index, distance in enumerate(min_distances_to_a) if face_engine.is_match(distance)}
-        matches_b = {index for index, distance in enumerate(min_distances_to_b) if face_engine.is_match(distance)}
+        match_results_to_a = [
+            compute_template_match(candidate_embedding, person_a_template, engine=face_engine)
+            for candidate_embedding in candidate_embeddings
+        ]
+        match_results_to_b = [
+            compute_template_match(candidate_embedding, person_b_template, engine=face_engine)
+            for candidate_embedding in candidate_embeddings
+        ]
     except Exception as exc:  # pragma: no cover
         raise CandidateDecodeError(f"Failed to decode {photo.path}: {exc}") from exc
+
+    template_distances_to_a = [result.template_distance for result in match_results_to_a]
+    template_distances_to_b = [result.template_distance for result in match_results_to_b]
+    matches_a = {index for index, result in enumerate(match_results_to_a) if result.matched}
+    matches_b = {index for index, result in enumerate(match_results_to_b) if result.matched}
+
+    best_match_pair = _select_best_match_pair(
+        matches_a,
+        matches_b,
+        template_distances_to_a,
+        template_distances_to_b,
+    )
+    joint_distance = _joint_distance_for_pair(best_match_pair, template_distances_to_a, template_distances_to_b)
 
     if not matches_a or not matches_b or not _has_distinct_matches(matches_a, matches_b):
         return PhotoEvaluation(candidate=photo, detected_face_count=len(candidate_embeddings), bucket=None)
@@ -199,4 +207,10 @@ def evaluate_candidate_photo(
         primary_pair = _select_largest_matching_pair(matches_a, matches_b, face_areas)
         bucket = MatchBucket.GROUP if _has_large_extra_face(face_areas, primary_pair=primary_pair) else MatchBucket.ONLY_TWO
 
-    return PhotoEvaluation(candidate=photo, detected_face_count=len(candidate_embeddings), bucket=bucket)
+    return PhotoEvaluation(
+        candidate=photo,
+        detected_face_count=len(candidate_embeddings),
+        bucket=bucket,
+        joint_distance=joint_distance,
+        best_match_pair=best_match_pair,
+    )
