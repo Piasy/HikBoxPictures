@@ -171,6 +171,43 @@ def test_reference_template_rejects_inconsistent_kept_samples(tmp_path: Path) ->
         )
 
 
+def test_reference_template_rejects_same_path_but_different_kept_sample(tmp_path: Path) -> None:
+    kept_sample = ReferenceSample(
+        path=tmp_path / "kept.jpg",
+        embedding=np.asarray([0.1, 0.2], dtype=np.float32),
+        bbox=(1, 5, 6, 0),
+        image_size=(100, 80),
+        face_area_ratio=0.25,
+        sharpness_score=12.0,
+        quality_score=0.8,
+        center_distance=0.15,
+        kept=True,
+        drop_reason=None,
+    )
+    fake_kept_sample = ReferenceSample(
+        path=tmp_path / "kept.jpg",
+        embedding=np.asarray([0.9, 0.8], dtype=np.float32),
+        bbox=(3, 7, 8, 2),
+        image_size=(100, 80),
+        face_area_ratio=0.4,
+        sharpness_score=3.0,
+        quality_score=0.2,
+        center_distance=0.5,
+        kept=True,
+        drop_reason=None,
+    )
+
+    with pytest.raises(ValueError, match="kept_samples"):
+        ReferenceTemplate(
+            name="A",
+            samples=[kept_sample],
+            kept_samples=[fake_kept_sample],
+            centroid_embedding=np.asarray([0.1, 0.2], dtype=np.float32),
+            match_threshold=0.42,
+            top_k=1,
+        )
+
+
 def test_package_exports_version_and_minimal_cli() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     assert __version__ == pyproject["project"]["version"]

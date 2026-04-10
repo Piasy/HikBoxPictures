@@ -59,9 +59,7 @@ class ReferenceTemplate:
             raise ValueError("kept_samples 必须与 samples 中 kept=True 的样本一致")
 
         for actual_sample, expected_sample in zip(self.kept_samples, expected_kept_samples):
-            if actual_sample is expected_sample:
-                continue
-            if actual_sample.path != expected_sample.path:
+            if actual_sample is not expected_sample:
                 raise ValueError("kept_samples 必须与 samples 中 kept=True 的样本一致")
 
     @property
