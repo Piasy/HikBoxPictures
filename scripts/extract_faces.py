@@ -10,8 +10,8 @@ from typing import Iterator
 import numpy as np
 from PIL import Image
 
+from hikbox_pictures.deepface_engine import DeepFaceEngine, DeepFaceInitError
 from hikbox_pictures.image_io import load_rgb_image
-from hikbox_pictures.insightface_engine import InsightFaceEngine, InsightFaceInitError
 from hikbox_pictures.scanner import SUPPORTED_EXTENSIONS, iter_candidate_photos
 
 DEFAULT_MARGIN_SCALE = 2.0
@@ -58,9 +58,10 @@ def _iter_image_paths(input_path: Path, output_path: Path) -> Iterator[Path]:
         return
 
     resolved_input_path = input_path.resolve()
+    should_skip_output = _is_relative_to(resolved_output_path, resolved_input_path)
     for candidate in iter_candidate_photos(input_path):
         resolved_candidate_path = candidate.path.resolve()
-        if _is_relative_to(resolved_candidate_path, resolved_output_path):
+        if should_skip_output and _is_relative_to(resolved_candidate_path, resolved_output_path):
             continue
         if not _is_relative_to(resolved_candidate_path, resolved_input_path):
             continue
@@ -159,12 +160,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"输出路径不是目录: {args.output}", file=sys.stderr)
         return 2
 
+    if args.input.is_file() and args.input.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        print(f"不支持的图片格式: {args.input}", file=sys.stderr)
+        return 2
+
+    if args.input.is_dir():
+        resolved_input_path = args.input.resolve()
+        resolved_output_path = args.output.resolve()
+        if resolved_output_path == resolved_input_path:
+            print("输出目录不能与输入目录相同", file=sys.stderr)
+            return 2
+        if _is_relative_to(resolved_input_path, resolved_output_path):
+            print("输出目录不能是输入目录的祖先目录", file=sys.stderr)
+            return 2
+
     args.output.mkdir(parents=True, exist_ok=True)
 
     scanned_files = 0
     no_face_files = 0
     decode_failures = 0
     detect_failures = 0
+    save_failures = 0
     written_faces = 0
 
     print(f"输入路径: {args.input}")
@@ -173,8 +189,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"输出尺寸: {args.size}x{args.size}")
 
     try:
-        engine = InsightFaceEngine.create()
-    except InsightFaceInitError as exc:
+        engine = DeepFaceEngine.create()
+    except DeepFaceInitError as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
@@ -207,13 +223,19 @@ def main(argv: list[str] | None = None) -> int:
                     output_path=args.output,
                     face_index=face_index,
                 )
-                _save_face_crop(
-                    image,
-                    location,
-                    margin_scale=args.margin_scale,
-                    size=args.size,
-                    output_path=output_path,
-                )
+                try:
+                    _save_face_crop(
+                        image,
+                        location,
+                        margin_scale=args.margin_scale,
+                        size=args.size,
+                        output_path=output_path,
+                    )
+                except Exception as exc:
+                    save_failures += 1
+                    print(f"保存失败: {output_path} ({exc})", file=sys.stderr)
+                    continue
+
                 written_faces += 1
                 print(f"输出人脸: {output_path}")
     except ValueError as exc:
@@ -226,6 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"无人脸图片数: {no_face_files}")
     print(f"解码失败数: {decode_failures}")
     print(f"检测失败数: {detect_failures}")
+    print(f"保存失败数: {save_failures}")
     return 0
 
 

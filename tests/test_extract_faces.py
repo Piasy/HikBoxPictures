@@ -20,7 +20,7 @@ def _load_script_module():
     return module
 
 
-def test_main_uses_insightface_and_keeps_output_rules(monkeypatch, tmp_path, capsys) -> None:
+def test_main_uses_deepface_and_keeps_output_rules(monkeypatch, tmp_path, capsys) -> None:
     script = _load_script_module()
 
     input_dir = tmp_path / "input"
@@ -46,7 +46,7 @@ def test_main_uses_insightface_and_keeps_output_rules(monkeypatch, tmp_path, cap
             ]
 
     fake_engine = FakeEngine()
-    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: fake_engine)
+    monkeypatch.setattr(script.DeepFaceEngine, "create", lambda: fake_engine)
     monkeypatch.setattr(script, "load_rgb_image", lambda _path: fake_image)
 
     exit_code = script.main([
@@ -71,6 +71,7 @@ def test_main_uses_insightface_and_keeps_output_rules(monkeypatch, tmp_path, cap
     assert "无人脸图片数: 0" in output
     assert "解码失败数: 0" in output
     assert "检测失败数: 0" in output
+    assert "保存失败数: 0" in output
 
     with Image.open(first_output) as image:
         assert image.size == (64, 64)
@@ -128,7 +129,7 @@ def test_main_counts_decode_failures_and_no_face(monkeypatch, tmp_path, capsys) 
             return []
 
     fake_engine = FakeEngine()
-    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: fake_engine)
+    monkeypatch.setattr(script.DeepFaceEngine, "create", lambda: fake_engine)
 
     def fake_load(path: Path):
         if path == broken:
@@ -153,6 +154,7 @@ def test_main_counts_decode_failures_and_no_face(monkeypatch, tmp_path, capsys) 
     assert "无人脸图片数: 1" in stdout
     assert "解码失败数: 1" in stdout
     assert "检测失败数: 0" in stdout
+    assert "保存失败数: 0" in stdout
 
 
 def test_main_counts_detect_failures_separately(monkeypatch, tmp_path, capsys) -> None:
@@ -169,7 +171,7 @@ def test_main_counts_detect_failures_separately(monkeypatch, tmp_path, capsys) -
         def detect_faces(self, _image_path: Path):
             raise RuntimeError("detect error")
 
-    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: FakeEngine())
+    monkeypatch.setattr(script.DeepFaceEngine, "create", lambda: FakeEngine())
     monkeypatch.setattr(script, "load_rgb_image", lambda _path: np.full((12, 12, 3), 120, dtype=np.uint8))
 
     exit_code = script.main([
@@ -187,6 +189,73 @@ def test_main_counts_detect_failures_separately(monkeypatch, tmp_path, capsys) -
     assert "无人脸图片数: 0" in stdout
     assert "解码失败数: 0" in stdout
     assert "检测失败数: 1" in stdout
+    assert "保存失败数: 0" in stdout
+
+
+def test_main_continues_when_save_face_crop_fails(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+
+    first = input_dir / "first.jpg"
+    second = input_dir / "second.jpg"
+    Image.new("RGB", (20, 20), color=(10, 20, 30)).save(first)
+    Image.new("RGB", (20, 20), color=(40, 50, 60)).save(second)
+
+    class FakeEngine:
+        def detect_faces(self, image_path: Path):
+            if image_path == first:
+                return [SimpleNamespace(bbox=(2, 12, 14, 0)), SimpleNamespace(bbox=(4, 18, 16, 6))]
+            return [SimpleNamespace(bbox=(2, 12, 14, 0))]
+
+    monkeypatch.setattr(script.DeepFaceEngine, "create", lambda: FakeEngine())
+    monkeypatch.setattr(script, "load_rgb_image", lambda _path: np.full((20, 20, 3), 200, dtype=np.uint8))
+
+    save_calls: list[Path] = []
+    failed_once = {"value": False}
+
+    def fake_save(
+        image: np.ndarray,
+        location: tuple[int, int, int, int],
+        *,
+        margin_scale: float,
+        size: int,
+        output_path: Path,
+    ) -> None:
+        _ = image, location, margin_scale, size
+        save_calls.append(output_path)
+        if not failed_once["value"] and output_path.name == "first__face_01.png":
+            failed_once["value"] = True
+            raise RuntimeError("disk full")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"ok")
+
+    monkeypatch.setattr(script, "_save_face_crop", fake_save)
+
+    exit_code = script.main([
+        "--input",
+        str(input_dir),
+        "--output",
+        str(output_dir),
+        "--size",
+        "64",
+    ])
+
+    stdout = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert len(save_calls) == 3
+    assert (output_dir / "first__face_01.png").exists() is False
+    assert (output_dir / "first__face_02.png").is_file()
+    assert (output_dir / "second__face_01.png").is_file()
+    assert "扫描图片数: 2" in stdout
+    assert "输出人脸数: 2" in stdout
+    assert "无人脸图片数: 0" in stdout
+    assert "解码失败数: 0" in stdout
+    assert "检测失败数: 0" in stdout
+    assert "保存失败数: 1" in stdout
 
 
 def test_main_keeps_fixed_name_rule_when_output_name_collides(monkeypatch, tmp_path) -> None:
@@ -206,7 +275,7 @@ def test_main_keeps_fixed_name_rule_when_output_name_collides(monkeypatch, tmp_p
         def detect_faces(self, _image_path: Path):
             return [SimpleNamespace(bbox=(2, 12, 14, 0))]
 
-    monkeypatch.setattr(script.InsightFaceEngine, "create", lambda: FakeEngine())
+    monkeypatch.setattr(script.DeepFaceEngine, "create", lambda: FakeEngine())
     monkeypatch.setattr(script, "load_rgb_image", lambda _path: np.full((20, 20, 3), 180, dtype=np.uint8))
 
     exit_code = script.main([
@@ -238,7 +307,7 @@ def test_main_returns_2_when_output_path_is_file(monkeypatch, tmp_path, capsys) 
         create_calls.append(True)
         return object()
 
-    monkeypatch.setattr(script.InsightFaceEngine, "create", fake_create)
+    monkeypatch.setattr(script.DeepFaceEngine, "create", fake_create)
 
     exit_code = script.main([
         "--input",
@@ -251,3 +320,110 @@ def test_main_returns_2_when_output_path_is_file(monkeypatch, tmp_path, capsys) 
     assert exit_code == 2
     assert not create_calls
     assert f"输出路径不是目录: {output_file}" in stderr
+
+
+def test_main_returns_2_when_deepface_init_fails(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+
+    def fake_create():
+        raise script.DeepFaceInitError("初始化失败")
+
+    monkeypatch.setattr(script.DeepFaceEngine, "create", fake_create)
+
+    exit_code = script.main([
+        "--input",
+        str(input_dir),
+        "--output",
+        str(output_dir),
+    ])
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 2
+    assert "初始化失败" in stderr
+
+
+def test_main_returns_2_when_output_equals_input(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+
+    create_calls: list[bool] = []
+
+    def fake_create():
+        create_calls.append(True)
+        return object()
+
+    monkeypatch.setattr(script.DeepFaceEngine, "create", fake_create)
+
+    exit_code = script.main([
+        "--input",
+        str(input_dir),
+        "--output",
+        str(input_dir),
+    ])
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 2
+    assert not create_calls
+    assert "输出目录不能与输入目录相同" in stderr
+
+
+def test_main_returns_2_when_output_is_input_parent(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    output_dir = tmp_path / "output-root"
+    input_dir = output_dir / "nested" / "input"
+    input_dir.mkdir(parents=True)
+
+    create_calls: list[bool] = []
+
+    def fake_create():
+        create_calls.append(True)
+        return object()
+
+    monkeypatch.setattr(script.DeepFaceEngine, "create", fake_create)
+
+    exit_code = script.main([
+        "--input",
+        str(input_dir),
+        "--output",
+        str(output_dir),
+    ])
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 2
+    assert not create_calls
+    assert "输出目录不能是输入目录的祖先目录" in stderr
+
+
+def test_main_returns_2_for_unsupported_single_file_without_init_engine(monkeypatch, tmp_path, capsys) -> None:
+    script = _load_script_module()
+
+    input_file = tmp_path / "bad.txt"
+    output_dir = tmp_path / "output"
+    input_file.write_text("x", encoding="utf-8")
+
+    create_calls: list[bool] = []
+
+    def fake_create():
+        create_calls.append(True)
+        return object()
+
+    monkeypatch.setattr(script.DeepFaceEngine, "create", fake_create)
+
+    exit_code = script.main([
+        "--input",
+        str(input_file),
+        "--output",
+        str(output_dir),
+    ])
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 2
+    assert not create_calls
+    assert f"不支持的图片格式: {input_file}" in stderr
