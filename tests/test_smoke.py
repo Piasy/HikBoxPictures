@@ -208,6 +208,53 @@ def test_reference_template_rejects_same_path_but_different_kept_sample(tmp_path
         )
 
 
+def test_reference_template_isolated_from_external_list_mutation(tmp_path: Path) -> None:
+    kept_sample = ReferenceSample(
+        path=tmp_path / "kept.jpg",
+        embedding=np.asarray([0.1, 0.2], dtype=np.float32),
+        bbox=(1, 5, 6, 0),
+        image_size=(100, 80),
+        face_area_ratio=0.25,
+        sharpness_score=12.0,
+        quality_score=0.8,
+        center_distance=0.15,
+        kept=True,
+        drop_reason=None,
+    )
+    dropped_sample = ReferenceSample(
+        path=tmp_path / "dropped.jpg",
+        embedding=np.asarray([0.3, 0.4], dtype=np.float32),
+        bbox=(2, 6, 7, 1),
+        image_size=(120, 90),
+        face_area_ratio=0.2,
+        sharpness_score=8.0,
+        quality_score=0.5,
+        center_distance=0.45,
+        kept=False,
+        drop_reason="模糊",
+    )
+    samples = [kept_sample, dropped_sample]
+    kept_samples = [kept_sample]
+
+    template = ReferenceTemplate(
+        name="A",
+        samples=samples,
+        kept_samples=kept_samples,
+        centroid_embedding=np.asarray([0.1, 0.2], dtype=np.float32),
+        match_threshold=0.42,
+        top_k=1,
+    )
+
+    samples.pop()
+    kept_samples.clear()
+
+    assert template.samples == (kept_sample, dropped_sample)
+    assert template.kept_samples == (kept_sample,)
+    assert template.dropped_samples == [dropped_sample]
+    assert isinstance(template.samples, tuple)
+    assert isinstance(template.kept_samples, tuple)
+
+
 def test_package_exports_version_and_minimal_cli() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     assert __version__ == pyproject["project"]["version"]

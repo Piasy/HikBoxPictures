@@ -47,14 +47,17 @@ class ReferenceSample:
 @dataclass(frozen=True)
 class ReferenceTemplate:
     name: str
-    samples: list[ReferenceSample]
-    kept_samples: list[ReferenceSample]
+    samples: tuple[ReferenceSample, ...]
+    kept_samples: tuple[ReferenceSample, ...]
     centroid_embedding: Embedding
     match_threshold: float
     top_k: int
 
     def __post_init__(self) -> None:
-        expected_kept_samples = [sample for sample in self.samples if sample.kept]
+        object.__setattr__(self, "samples", tuple(self.samples))
+        object.__setattr__(self, "kept_samples", tuple(self.kept_samples))
+
+        expected_kept_samples = tuple(sample for sample in self.samples if sample.kept)
         if len(self.kept_samples) != len(expected_kept_samples):
             raise ValueError("kept_samples 必须与 samples 中 kept=True 的样本一致")
 
