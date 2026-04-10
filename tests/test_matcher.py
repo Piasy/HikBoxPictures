@@ -173,6 +173,35 @@ def test_evaluate_candidate_photo_ignores_small_extra_face(tmp_path) -> None:
     assert evaluation.best_match_pair == (0, 1)
 
 
+def test_evaluate_candidate_photo_with_invalid_bbox_type_keeps_conservative_bucket(tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "invalid-bbox-type.jpg")
+    template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.2)
+    template_b = _make_template(tmp_path, name="B", sample_label=20, threshold=0.2)
+
+    engine = _TemplateDistanceEngine(
+        faces=[
+            _make_face(1, bbox=(0, 10, 10, 0)),
+            _make_face(2, bbox=(0, 10, 10, 0)),
+            _make_face(3, bbox=123),
+        ],
+        distance_by_label_pair={
+            (1, 10): 0.1,
+            (1, 20): 0.9,
+            (2, 10): 0.9,
+            (2, 20): 0.1,
+            (3, 10): 0.9,
+            (3, 20): 0.9,
+        },
+    )
+
+    evaluation = evaluate_candidate_photo(photo, template_a, template_b, engine=engine)
+
+    assert evaluation.detected_face_count == 3
+    assert evaluation.bucket is MatchBucket.GROUP
+    assert evaluation.joint_distance == pytest.approx(0.1)
+    assert evaluation.best_match_pair == (0, 1)
+
+
 def test_evaluate_candidate_photo_accepts_generator_faces_without_index_error(tmp_path) -> None:
     photo = CandidatePhoto(path=tmp_path / "generator-faces.jpg")
     template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.2)
@@ -323,6 +352,36 @@ def test_evaluate_candidate_photo_fast_fails_on_incompatible_engine(tmp_path) ->
 
     with pytest.raises(TypeError, match="distance"):
         evaluate_candidate_photo(photo, template_a, template_b, engine=IncompatibleEngine())
+
+
+def test_evaluate_candidate_photo_fast_fails_when_detect_faces_is_not_callable(tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "detect-not-callable.jpg")
+    template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.2)
+    template_b = _make_template(tmp_path, name="B", sample_label=20, threshold=0.2)
+
+    class InvalidEngine:
+        detect_faces = 1
+
+        def distance(self, lhs, rhs):
+            return 0.1
+
+    with pytest.raises(TypeError, match="detect_faces"):
+        evaluate_candidate_photo(photo, template_a, template_b, engine=InvalidEngine())
+
+
+def test_evaluate_candidate_photo_fast_fails_when_distance_is_not_callable(tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "distance-not-callable.jpg")
+    template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.2)
+    template_b = _make_template(tmp_path, name="B", sample_label=20, threshold=0.2)
+
+    class InvalidEngine:
+        def detect_faces(self, image_path):
+            return [_make_face(1)]
+
+        distance = 1
+
+    with pytest.raises(TypeError, match="distance"):
+        evaluate_candidate_photo(photo, template_a, template_b, engine=InvalidEngine())
 
 
 def test_evaluate_candidate_photo_wraps_cached_engine_init_errors(monkeypatch, tmp_path) -> None:

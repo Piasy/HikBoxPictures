@@ -34,14 +34,19 @@ def _get_cached_matcher_engine() -> DeepFaceEngine:
 
 
 def _validate_matcher_engine(engine: object) -> MatcherEngineProtocol:
-    if not isinstance(engine, MatcherEngineProtocol):
-        missing_members = [
-            member
-            for member in ("detect_faces", "distance")
-            if not hasattr(engine, member)
-        ]
-        missing_detail = ", ".join(missing_members) if missing_members else "matcher engine protocol"
+    required_members = ("detect_faces", "distance")
+    missing_members = [member for member in required_members if not hasattr(engine, member)]
+    if missing_members:
+        missing_detail = ", ".join(missing_members)
         raise TypeError(f"engine 接口不兼容，缺少: {missing_detail}")
+
+    non_callable_members = [member for member in required_members if not callable(getattr(engine, member))]
+    if non_callable_members:
+        non_callable_detail = ", ".join(non_callable_members)
+        raise TypeError(f"engine 接口不兼容，不可调用: {non_callable_detail}")
+
+    if not isinstance(engine, MatcherEngineProtocol):
+        raise TypeError("engine 接口不兼容，缺少: matcher engine protocol")
     return engine
 
 
@@ -87,11 +92,18 @@ def _joint_distance_for_pair(
 
 def _face_area(face: object) -> int | None:
     bbox = getattr(face, "bbox", None)
-    if bbox is None or len(bbox) != 4:
+    if bbox is None:
         return None
 
-    top, right, bottom, left = bbox
-    return max(0, bottom - top) * max(0, right - left)
+    try:
+        top, right, bottom, left = bbox
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        return max(0, bottom - top) * max(0, right - left)
+    except TypeError:
+        return None
 
 
 def _select_largest_matching_pair(
