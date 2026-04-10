@@ -26,6 +26,26 @@ def test_main_returns_zero_when_called_without_argv() -> None:
     assert main() == 0
 
 
+def test_codebase_no_longer_references_insightface_imports() -> None:
+    import subprocess
+
+    result = subprocess.run(
+        [
+            "rg",
+            "insightface_engine|InsightFaceEngine",
+            "src",
+            "scripts",
+            "tests",
+            "--glob",
+            "!tests/test_cli.py",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+
+
 def test_main_exports_only_hits_and_prints_summary(monkeypatch, tmp_path, capsys) -> None:
     input_dir = tmp_path / "input"
     output_dir = tmp_path / "output"
