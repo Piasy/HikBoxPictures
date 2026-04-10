@@ -65,6 +65,11 @@ def _import_target_from_call(node: ast.Call) -> str | None:
 
 
 def _package_from_call(node: ast.Call) -> str | None:
+    if len(node.args) >= 2:
+        package_arg = node.args[1]
+        if isinstance(package_arg, ast.Constant) and isinstance(package_arg.value, str):
+            return package_arg.value
+
     for keyword in node.keywords:
         if keyword.arg != "package":
             continue
@@ -147,6 +152,7 @@ def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_
                 'importlib.import_module("hikbox_pictures.insightface_engine")',
                 'importlib.import_module(name="hikbox_pictures.insightface_engine")',
                 'importlib.import_module(".insightface_engine", package="hikbox_pictures")',
+                'importlib.import_module(".insightface_engine", "hikbox_pictures")',
             ]
         ),
         encoding="utf-8",
@@ -164,6 +170,7 @@ def test_find_legacy_insightface_imports_detects_static_and_dynamic_imports(tmp_
         (8, "hikbox_pictures.insightface_engine"),
         (9, "hikbox_pictures.insightface_engine"),
         (10, "hikbox_pictures.insightface_engine"),
+        (11, "hikbox_pictures.insightface_engine"),
     ]
 
 
