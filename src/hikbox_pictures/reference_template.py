@@ -14,32 +14,8 @@ class TemplateEngineProtocol(Protocol):
         ...
 
 
-def _normalize_distance_map_keys(distance_map: dict[tuple[float, float], float]) -> dict[tuple[float, float], float]:
-    normalized: dict[tuple[float, float], float] = {}
-    for (lhs, rhs), distance in distance_map.items():
-        lhs_key = float(np.asarray([lhs], dtype=np.float32).reshape(-1)[0])
-        rhs_key = float(np.asarray([rhs], dtype=np.float32).reshape(-1)[0])
-        normalized[(lhs_key, rhs_key)] = distance
-    return normalized
-
-
 def _distance(engine: TemplateEngineProtocol, lhs: object, rhs: object) -> float:
-    try:
-        return float(engine.distance(lhs, rhs))
-    except KeyError:
-        distance_map = getattr(engine, "distance_map", None)
-        if isinstance(distance_map, dict):
-            setattr(engine, "distance_map", _normalize_distance_map_keys(distance_map))
-            try:
-                return float(engine.distance(lhs, rhs))
-            except KeyError:
-                pass
-
-        lhs_vector = np.asarray(lhs, dtype=np.float32).reshape(-1)
-        rhs_vector = np.asarray(rhs, dtype=np.float32).reshape(-1)
-        if lhs_vector.shape != rhs_vector.shape:
-            raise
-        return float(np.linalg.norm(lhs_vector - rhs_vector))
+    return float(engine.distance(lhs, rhs))
 
 
 def select_template_threshold(
@@ -164,6 +140,11 @@ def compute_template_match(
     *,
     engine: TemplateEngineProtocol,
 ) -> TemplateMatchResult:
+    if not template.kept_samples:
+        raise ValueError("kept_samples 不能为空")
+    if template.top_k <= 0:
+        raise ValueError("top_k 必须大于 0")
+
     distances = sorted(_distance(engine, embedding, sample.embedding) for sample in template.kept_samples)
     top_k = min(template.top_k, len(distances))
     top_k_distances = distances[:top_k]
