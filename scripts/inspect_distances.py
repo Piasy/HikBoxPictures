@@ -6,10 +6,11 @@ import argparse
 import sys
 from pathlib import Path
 from typing import Any, Sequence
+
 from PIL import Image, ImageDraw, ImageFont
 
-from hikbox_pictures.insightface_engine import InsightFaceEngine, InsightFaceInitError
-from hikbox_pictures.matcher import DEFAULT_DISTANCE_THRESHOLD, compute_min_distances
+from hikbox_pictures.deepface_engine import DeepFaceEngine, DeepFaceInitError
+from hikbox_pictures.image_io import load_rgb_image
 from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_embeddings
 from hikbox_pictures.scanner import iter_candidate_photos
 
@@ -19,14 +20,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--ref-a-dir", required=True, type=Path)
     parser.add_argument("--ref-b-dir", required=True, type=Path)
-    parser.add_argument("--tolerance", type=float, default=DEFAULT_DISTANCE_THRESHOLD)
+    parser.add_argument("--model-name", default="ArcFace")
+    parser.add_argument("--detector-backend", default="retinaface")
+    parser.add_argument("--distance-metric", default="cosine")
+    parser.add_argument("--distance-threshold", type=float)
+    parser.add_argument("--align", dest="align", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--annotated-dir", type=Path)
     return parser
 
 
 def _load_candidate_face_encodings(
     path: Path,
-    engine: InsightFaceEngine,
+    engine: DeepFaceEngine,
 ) -> tuple[list[tuple[int, int, int, int]], list[Sequence[float]]]:
     faces = engine.detect_faces(path)
     locations = [face.bbox for face in faces]
@@ -107,8 +112,8 @@ def _write_annotated_image(
     distances_a: list[float],
     distances_b: list[float],
 ) -> Path:
-    with Image.open(candidate_path) as source_image:
-        image = source_image.convert("RGB")
+    image_array = load_rgb_image(candidate_path)
+    image = Image.fromarray(image_array)
 
     draw = ImageDraw.Draw(image)
     font = _load_annotation_font(size=30)
@@ -150,19 +155,36 @@ def main(argv: list[str] | None = None) -> int:
         if not path.is_dir():
             print(f"路径不是目录: {path}", file=sys.stderr)
             return 2
+    if args.annotated_dir is not None and args.annotated_dir.exists() and not args.annotated_dir.is_dir():
+        print(f"路径不是目录: {args.annotated_dir}", file=sys.stderr)
+        return 2
 
     try:
-        engine = InsightFaceEngine.create()
+        engine = DeepFaceEngine.create(
+            model_name=args.model_name,
+            detector_backend=args.detector_backend,
+            distance_metric=args.distance_metric,
+            align=args.align,
+            distance_threshold=args.distance_threshold,
+        )
         ref_a_embeddings, _ = load_reference_embeddings(args.ref_a_dir, engine)
         ref_b_embeddings, _ = load_reference_embeddings(args.ref_b_dir, engine)
-    except (InsightFaceInitError, ReferenceImageError) as exc:
+    except (DeepFaceInitError, ReferenceImageError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
     print(f"输入目录: {args.input}")
     print(f"参考图目录 A: {args.ref_a_dir}")
     print(f"参考图目录 B: {args.ref_b_dir}")
-    print(f"匹配阈值: {args.tolerance:.2f}")
+    print(
+        "运行配置: "
+        f"model_name={engine.model_name} "
+        f"detector_backend={engine.detector_backend} "
+        f"distance_metric={engine.distance_metric} "
+        f"align={engine.align} "
+        f"distance_threshold={_format_distance(engine.distance_threshold)} "
+        f"threshold_source={engine.threshold_source}"
+    )
     if args.annotated_dir is not None:
         print(f"标注输出目录: {args.annotated_dir}")
 
@@ -179,14 +201,14 @@ def main(argv: list[str] | None = None) -> int:
         if not encodings:
             continue
 
-        distances_a = [float(value) for value in compute_min_distances(encodings, ref_a_embeddings)]
-        distances_b = [float(value) for value in compute_min_distances(encodings, ref_b_embeddings)]
+        distances_a = [float(engine.min_distance(encoding, ref_a_embeddings)) for encoding in encodings]
+        distances_b = [float(engine.min_distance(encoding, ref_b_embeddings)) for encoding in encodings]
 
         for index, location in enumerate(locations):
             distance_a = distances_a[index]
             distance_b = distances_b[index]
-            match_a = "Y" if distance_a <= args.tolerance else "N"
-            match_b = "Y" if distance_b <= args.tolerance else "N"
+            match_a = "Y" if engine.is_match(distance_a) else "N"
+            match_b = "Y" if engine.is_match(distance_b) else "N"
             print(
                 "  "
                 f"face[{index}] location={location} "
@@ -197,15 +219,18 @@ def main(argv: list[str] | None = None) -> int:
             )
 
         if args.annotated_dir is not None:
-            output_path = _write_annotated_image(
-                candidate.path,
-                input_root=args.input,
-                annotated_dir=args.annotated_dir,
-                locations=locations,
-                distances_a=distances_a,
-                distances_b=distances_b,
-            )
-            print(f"  标注图: {output_path}")
+            try:
+                output_path = _write_annotated_image(
+                    candidate.path,
+                    input_root=args.input,
+                    annotated_dir=args.annotated_dir,
+                    locations=locations,
+                    distances_a=distances_a,
+                    distances_b=distances_b,
+                )
+                print(f"  标注图: {output_path}")
+            except Exception as exc:
+                print(f"标注失败: {candidate.path} -> {exc}", file=sys.stderr)
 
     return 0
 
