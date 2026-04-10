@@ -14,8 +14,42 @@ class TemplateEngineProtocol(Protocol):
         ...
 
 
+def _ensure_finite_scalar(value: float, *, name: str) -> float:
+    value = float(value)
+    if not bool(np.isfinite(value)):
+        raise ValueError(f"{name} 必须是有限值")
+    return value
+
+
+def _ensure_finite_array(values: np.ndarray, *, name: str) -> np.ndarray:
+    if not bool(np.all(np.isfinite(values))):
+        raise ValueError(f"{name} 必须全部为有限值")
+    return values
+
+
 def _distance(engine: TemplateEngineProtocol, lhs: object, rhs: object) -> float:
-    return float(engine.distance(lhs, rhs))
+    return _ensure_finite_scalar(float(engine.distance(lhs, rhs)), name="distance")
+
+
+def _sample_embedding_dimension(samples: Sequence[ReferenceSample]) -> int:
+    first_embedding = np.asarray(samples[0].embedding, dtype=np.float32)
+    return int(first_embedding.reshape(-1).shape[0])
+
+
+def _validate_external_centroid_embedding(
+    centroid_embedding: np.ndarray,
+    *,
+    samples: Sequence[ReferenceSample],
+) -> np.ndarray:
+    centroid = np.asarray(centroid_embedding, dtype=np.float32)
+    if centroid.ndim != 1:
+        raise ValueError("centroid_embedding 必须是 1 维向量")
+
+    expected_dimension = _sample_embedding_dimension(samples)
+    if int(centroid.shape[0]) != expected_dimension:
+        raise ValueError("centroid_embedding 维度必须与样本 embedding 一致")
+
+    return _ensure_finite_array(centroid, name="centroid_embedding")
 
 
 def select_template_threshold(
@@ -86,7 +120,7 @@ def _build_centroid_embedding(samples: Sequence[ReferenceSample]) -> np.ndarray:
         centroid = stacked_embeddings.mean(axis=0)
     else:
         centroid = np.average(stacked_embeddings, axis=0, weights=weights)
-    return np.asarray(centroid, dtype=np.float32)
+    return _ensure_finite_array(np.asarray(centroid, dtype=np.float32), name="centroid_embedding")
 
 
 def build_reference_template(
@@ -119,7 +153,7 @@ def build_reference_template(
 
     kept_samples = [sample for sample in rebuilt_samples if sample.kept]
     template_centroid = (
-        np.asarray(centroid_embedding, dtype=np.float32)
+        _validate_external_centroid_embedding(centroid_embedding, samples=kept_samples)
         if centroid_embedding is not None
         else _build_centroid_embedding(kept_samples)
     )
@@ -148,7 +182,7 @@ def compute_template_match(
     distances = sorted(_distance(engine, embedding, sample.embedding) for sample in template.kept_samples)
     top_k = min(template.top_k, len(distances))
     top_k_distances = distances[:top_k]
-    template_distance = float(np.mean(top_k_distances))
+    template_distance = _ensure_finite_scalar(float(np.mean(top_k_distances)), name="template_distance")
     centroid_distance = _distance(engine, embedding, template.centroid_embedding)
 
     return TemplateMatchResult(

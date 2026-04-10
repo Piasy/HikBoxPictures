@@ -140,6 +140,102 @@ def test_build_reference_template_drops_outlier_when_reference_set_is_large(tmp_
     assert max(distance for distance in kept_center_distances if distance is not None) < outlier_sample.center_distance
 
 
+@pytest.mark.parametrize("non_finite_distance", [float("nan"), float("inf"), float("-inf")])
+def test_build_reference_template_rejects_non_finite_distance(tmp_path: Path, non_finite_distance: float) -> None:
+    samples = [
+        _sample(tmp_path, "a.jpg", 10.0, area=0.7, sharpness=10.0),
+        _sample(tmp_path, "b.jpg", 11.0, area=0.6, sharpness=9.0),
+    ]
+    engine = FakeEngine(
+        {
+            (10, 10): 0.0,
+            (10, 11): non_finite_distance,
+            (11, 10): 0.1,
+            (11, 11): 0.0,
+        },
+        complete_labels={10, 11},
+    )
+
+    with pytest.raises(ValueError, match="distance"):
+        build_reference_template("A", samples, engine=engine, default_threshold=0.5)
+
+
+def test_build_reference_template_rejects_external_centroid_non_vector(tmp_path: Path) -> None:
+    samples = [
+        _sample(tmp_path, "a.jpg", 10.0, area=0.7, sharpness=10.0),
+        _sample(tmp_path, "b.jpg", 11.0, area=0.6, sharpness=9.0),
+    ]
+    engine = FakeEngine(
+        {
+            (10, 10): 0.0,
+            (10, 11): 0.1,
+            (11, 10): 0.1,
+            (11, 11): 0.0,
+        },
+        complete_labels={10, 11},
+    )
+
+    with pytest.raises(ValueError, match="1 维"):
+        build_reference_template(
+            "A",
+            samples,
+            engine=engine,
+            default_threshold=0.5,
+            centroid_embedding=np.asarray([[99.0]], dtype=np.float32),
+        )
+
+
+def test_build_reference_template_rejects_external_centroid_dimension_mismatch(tmp_path: Path) -> None:
+    samples = [
+        _sample(tmp_path, "a.jpg", 10.0, area=0.7, sharpness=10.0),
+        _sample(tmp_path, "b.jpg", 11.0, area=0.6, sharpness=9.0),
+    ]
+    engine = FakeEngine(
+        {
+            (10, 10): 0.0,
+            (10, 11): 0.1,
+            (11, 10): 0.1,
+            (11, 11): 0.0,
+        },
+        complete_labels={10, 11},
+    )
+
+    with pytest.raises(ValueError, match="维度"):
+        build_reference_template(
+            "A",
+            samples,
+            engine=engine,
+            default_threshold=0.5,
+            centroid_embedding=np.asarray([99.0, 100.0], dtype=np.float32),
+        )
+
+
+@pytest.mark.parametrize("non_finite_value", [float("nan"), float("inf"), float("-inf")])
+def test_build_reference_template_rejects_external_centroid_non_finite(tmp_path: Path, non_finite_value: float) -> None:
+    samples = [
+        _sample(tmp_path, "a.jpg", 10.0, area=0.7, sharpness=10.0),
+        _sample(tmp_path, "b.jpg", 11.0, area=0.6, sharpness=9.0),
+    ]
+    engine = FakeEngine(
+        {
+            (10, 10): 0.0,
+            (10, 11): 0.1,
+            (11, 10): 0.1,
+            (11, 11): 0.0,
+        },
+        complete_labels={10, 11},
+    )
+
+    with pytest.raises(ValueError, match="centroid_embedding"):
+        build_reference_template(
+            "A",
+            samples,
+            engine=engine,
+            default_threshold=0.5,
+            centroid_embedding=np.asarray([non_finite_value], dtype=np.float32),
+        )
+
+
 def test_compute_template_match_uses_top_k_mean_and_centroid_distance(tmp_path: Path) -> None:
     samples = [
         _sample(tmp_path, "a.jpg", 10.0, area=0.7, sharpness=10.0),
@@ -179,6 +275,43 @@ def test_compute_template_match_uses_top_k_mean_and_centroid_distance(tmp_path: 
     assert result.centroid_distance == pytest.approx(0.15)
     assert result.top_k_distances == pytest.approx([0.1, 0.2, 0.3])
     assert result.matched is False
+
+
+@pytest.mark.parametrize("non_finite_distance", [float("nan"), float("inf"), float("-inf")])
+def test_compute_template_match_rejects_non_finite_distance(tmp_path: Path, non_finite_distance: float) -> None:
+    samples = [
+        _sample(tmp_path, "a.jpg", 10.0, area=0.7, sharpness=10.0),
+        _sample(tmp_path, "b.jpg", 11.0, area=0.7, sharpness=9.0),
+        _sample(tmp_path, "c.jpg", 12.0, area=0.7, sharpness=8.0),
+    ]
+    engine = FakeEngine(
+        {
+            (10, 10): 0.0,
+            (10, 11): 0.1,
+            (10, 12): 0.2,
+            (11, 10): 0.1,
+            (11, 11): 0.0,
+            (11, 12): 0.1,
+            (12, 10): 0.2,
+            (12, 11): 0.1,
+            (12, 12): 0.0,
+            (90, 10): 0.2,
+            (90, 11): non_finite_distance,
+            (90, 12): 0.3,
+            (90, 99): 0.15,
+        },
+        complete_labels={10, 11, 12},
+    )
+    template = build_reference_template(
+        "A",
+        samples,
+        engine=engine,
+        default_threshold=0.3,
+        centroid_embedding=np.asarray([99.0], dtype=np.float32),
+    )
+
+    with pytest.raises(ValueError, match="distance"):
+        compute_template_match(np.asarray([90.0], dtype=np.float32), template, engine=engine)
 
 
 def test_compute_template_match_rejects_empty_kept_samples(tmp_path: Path) -> None:
