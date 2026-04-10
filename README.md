@@ -7,8 +7,11 @@ HikBox Pictures 是一个本地 macOS CLI，用于递归扫描照片目录，找
 - macOS
 - Python 3.13+
 - Xcode Command Line Tools
-- `insightface`
-- `onnxruntime`
+- `deepface`
+- `Pillow`
+- `pillow-heif`
+
+完整依赖列表与版本约束以 `pyproject.toml` 为准。
 
 ## 安装
 
@@ -16,7 +19,7 @@ HikBox Pictures 是一个本地 macOS CLI，用于递归扫描照片目录，找
 ./scripts/install.sh
 ```
 
-脚本会自动创建 `.venv`、升级 `pip`，并安装项目及开发依赖（包含 `insightface`、`onnxruntime` 与必要的 `numpy`）。
+脚本会自动创建 `.venv`、升级 `pip`，并安装项目及开发依赖（包含 `deepface` 与必要的图像处理依赖）。
 
 如果需要显式指定 Python，可在执行前设置 `PYTHON_BIN`：
 
@@ -27,12 +30,14 @@ PYTHON_BIN=python3.13 ./scripts/install.sh
 ## 用法
 
 ```bash
-hikbox-pictures --input /path/to/photo-library --ref-a-dir /path/to/person-a-images --ref-b-dir /path/to/person-b-images --output /path/to/output
+hikbox-pictures --input /path/to/photo-library --ref-a-dir /path/to/person-a-images --ref-b-dir /path/to/person-b-images --output /path/to/output --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold 0.40 --align
 ```
+
+如需关闭对齐，可改为 `--no-align`。
 
 参考目录建议每人准备多张正脸、清晰、光照正常的照片，以提升匹配稳定性。
 
-首次运行会自动下载模型，需联网，首次会稍慢；后续会复用本地缓存模型。
+首次运行可能触发模型下载，需联网，首次启动会明显慢于后续运行；后续会复用本地缓存模型。
 
 ## 测试
 
@@ -60,21 +65,14 @@ PYTHONPATH=src python3 -m pytest tests/test_cli.py -v
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b
+PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold 0.40 --align
 ```
 
 如果还想生成带人脸框和距离标注的临时图片，可额外传入 `--annotated-dir`：
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --annotated-dir test/annotated
-```
-
-如需测试其他阈值，可额外传入 `--tolerance`：
-
-```bash
-source .venv/bin/activate
-PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --tolerance 10.0
+PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir test/ref-a --ref-b-dir test/ref-b --annotated-dir test/annotated --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold 0.40 --align
 ```
 
 ## 输出结构
@@ -85,8 +83,8 @@ PYTHONPATH=src python3 scripts/inspect_distances.py --input test --ref-a-dir tes
 
 ## 限制
 
-- 匹配效果依赖 `insightface` 模型和图片质量。
-- 预训练模型包需遵循其官方许可与用途限制，通常仅限非商业研究用途；用于生产或商业场景前请务必自行核对最新许可条款。
+- 匹配效果依赖 `deepface` 模型与图片质量。
+- DeepFace 及其底层模型、检测器组件许可可能各不相同；用于生产或商业场景前请务必自行核对最新许可条款（常见限制包括非商业研究用途）。
 - 工具只扫描图片文件，不分析视频内容。
 - 归档月份优先使用图片 EXIF 拍摄时间；若缺失，则回退到文件创建时间和修改时间。
 - 创建时间保留依赖 macOS `SetFile`，属于尽力而为。

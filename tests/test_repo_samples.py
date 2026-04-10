@@ -23,27 +23,29 @@ def test_sample_files_exist_as_placeholder_assets() -> None:
     assert mov.stat().st_size == 0
 
 
-def test_readme_mentions_macos_dependencies() -> None:
+def test_readme_mentions_deepface_runtime_basics() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    readme_lower = readme.lower()
+
     assert "macOS" in readme
-    assert "insightface" in readme
-    assert "onnxruntime" in readme
-    assert "face_recognition" not in readme
-    assert "## 依赖要求" in readme
-    assert "## 安装" in readme
-    assert "## 用法" in readme
-    assert "## 输出结构" in readme
-    assert "## 限制" in readme
     assert "Python 3.13+" in readme
-    assert "Xcode Command Line Tools" in readme
     assert "./scripts/install.sh" in readme
-    assert "hikbox-pictures --input" in readme
-    assert "--ref-a-dir" in readme
-    assert "--ref-b-dir" in readme
-    assert "only-two/YYYY-MM" in readme
-    assert "group/YYYY-MM" in readme
-    assert "首次运行会自动下载模型" in readme
-    assert "需联网" in readme
-    assert "首次会稍慢" in readme
-    assert "非商业研究用途" in readme
-    assert "工具只扫描图片文件，不分析视频内容。" in readme
+
+    assert "deepface" in readme_lower
+    assert "insightface" not in readme_lower
+    assert "onnxruntime" not in readme_lower
+    assert "face_recognition" not in readme_lower
+
+    for flag in ("--model-name", "--detector-backend", "--distance-metric", "--distance-threshold"):
+        assert flag in readme
+    assert "--align" in readme
+    assert "--no-align" in readme
+
+    assert "首次运行" in readme
+    assert "下载" in readme
+    assert "联网" in readme
+
+    assert "许可" in readme
+    assert "核对" in readme
+
+    assert ("Pillow" in readme and "pillow-heif" in readme) or ("pyproject.toml" in readme)

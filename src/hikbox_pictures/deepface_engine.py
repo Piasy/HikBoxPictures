@@ -10,7 +10,7 @@ import numpy.typing as npt
 try:
     from deepface import DeepFace as _DeepFace
     from deepface.modules import verification as _verification
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     _DeepFace = None
     _verification = None
 

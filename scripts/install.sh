@@ -15,6 +15,12 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
+  echo "Python 版本过低：${PYTHON_BIN} 需要 >= 3.13。" >&2
+  echo "请安装 Python 3.13+，或通过 PYTHON_BIN 指定符合要求的解释器。" >&2
+  exit 1
+fi
+
 if [[ ! -d "${VENV_DIR}" ]]; then
   echo "[hikbox-pictures] 创建虚拟环境"
   "${PYTHON_BIN}" -m venv "${VENV_DIR}"
@@ -22,15 +28,26 @@ fi
 
 source "${VENV_DIR}/bin/activate"
 
-echo "[hikbox-pictures] 升级 pip"
-python3 -m pip install --upgrade pip
+VENV_PYTHON="${VENV_DIR}/bin/python3"
+if [[ ! -x "${VENV_PYTHON}" ]]; then
+  echo "虚拟环境 Python 不可用: ${VENV_PYTHON}" >&2
+  exit 1
+fi
 
-echo "[hikbox-pictures] 安装项目及开发依赖（包含 insightface、onnxruntime）"
-if ! python3 -m pip install -e '.[dev]'; then
+echo "[hikbox-pictures] 升级 pip"
+"${VENV_PYTHON}" -m pip install --upgrade pip
+
+echo "[hikbox-pictures] 安装项目及开发依赖（包含 deepface）"
+if ! "${VENV_PYTHON}" -m pip install -e '.[dev]'; then
   cat >&2 <<'ERR'
 安装失败。
 
-请确认网络可用（首次安装 insightface 模型下载需联网），然后重新运行：
+请确认：
+1) Python 版本满足 3.13+
+2) 网络可用（首次运行 deepface 相关模型下载需联网）
+3) 系统依赖安装完整（如 TensorFlow / OpenCV 的平台依赖）
+
+然后重新运行：
   ./scripts/install.sh
 ERR
   exit 1
@@ -40,7 +57,7 @@ cat <<DONE
 
 安装完成。
 
-提示：首次运行会自动下载 insightface 预训练模型，需联网且速度会稍慢。
+提示：首次运行可能触发 deepface 模型下载，需联网，首次启动会明显慢于后续运行。
 
 激活虚拟环境：
   source "${VENV_DIR}/bin/activate"
