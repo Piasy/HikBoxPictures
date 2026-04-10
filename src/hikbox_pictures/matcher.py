@@ -171,9 +171,19 @@ def evaluate_candidate_photo(
             raise CandidateDecodeError(f"Failed to decode {photo.path}: {exc}") from exc
 
     try:
-        faces = face_engine.detect_faces(photo.path)
+        detected_faces = face_engine.detect_faces(photo.path)
     except Exception as exc:  # pragma: no cover
         raise CandidateDecodeError(f"Failed to decode {photo.path}: {exc}") from exc
+
+    if detected_faces is None:
+        faces = []
+    elif isinstance(detected_faces, (str, bytes)):
+        raise CandidateDecodeError(f"Failed to decode {photo.path}: detect_faces 返回了非法字符串类型")
+    else:
+        try:
+            faces = list(detected_faces)
+        except TypeError as exc:
+            raise CandidateDecodeError(f"Failed to decode {photo.path}: detect_faces 返回值不可迭代") from exc
 
     if not faces:
         return PhotoEvaluation(candidate=photo, detected_face_count=0, bucket=None)

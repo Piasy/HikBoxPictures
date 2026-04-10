@@ -173,6 +173,38 @@ def test_evaluate_candidate_photo_ignores_small_extra_face(tmp_path) -> None:
     assert evaluation.best_match_pair == (0, 1)
 
 
+def test_evaluate_candidate_photo_accepts_generator_faces_without_index_error(tmp_path) -> None:
+    photo = CandidatePhoto(path=tmp_path / "generator-faces.jpg")
+    template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.2)
+    template_b = _make_template(tmp_path, name="B", sample_label=20, threshold=0.2)
+
+    engine = _TemplateDistanceEngine(
+        faces=(
+            face
+            for face in [
+                _make_face(1, bbox=(0, 10, 10, 0)),
+                _make_face(2, bbox=(0, 10, 10, 0)),
+                _make_face(3, bbox=(0, 6, 5, 0)),
+            ]
+        ),
+        distance_by_label_pair={
+            (1, 10): 0.1,
+            (1, 20): 0.9,
+            (2, 10): 0.9,
+            (2, 20): 0.1,
+            (3, 10): 0.9,
+            (3, 20): 0.9,
+        },
+    )
+
+    evaluation = evaluate_candidate_photo(photo, template_a, template_b, engine=engine)
+
+    assert evaluation.detected_face_count == 3
+    assert evaluation.bucket is MatchBucket.GROUP
+    assert evaluation.joint_distance == pytest.approx(0.1)
+    assert evaluation.best_match_pair == (0, 1)
+
+
 def test_evaluate_candidate_photo_requires_both_people(tmp_path) -> None:
     photo = CandidatePhoto(path=tmp_path / "solo.jpg")
     template_a = _make_template(tmp_path, name="A", sample_label=10, threshold=0.3)
