@@ -1,4 +1,5 @@
 .worktrees/
+.superpowers/
 deepface
 sample/
 .DS_Store
