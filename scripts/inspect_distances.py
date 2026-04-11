@@ -49,7 +49,7 @@ def _load_candidate_face_encodings(
 
 
 def _format_distance(value: float) -> str:
-    return f"{value:.4f}"
+    return f"{value:.2f}"
 
 
 def _best_joint_distance(matches_a, matches_b):

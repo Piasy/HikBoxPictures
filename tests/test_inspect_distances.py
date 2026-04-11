@@ -49,9 +49,9 @@ def test_main_writes_annotated_image_and_uses_engine_distance_semantics(monkeypa
     def fake_min_distance(embedding, references):
         min_distance_calls.append((embedding, references))
         if references is ref_a_embeddings:
-            return 0.1234
+            return 0.12
         if references is ref_b_embeddings:
-            return 0.5678
+            return 0.57
         raise AssertionError("unexpected references")
 
     def fake_is_match(distance: float) -> bool:
@@ -90,8 +90,8 @@ def test_main_writes_annotated_image_and_uses_engine_distance_semantics(monkeypa
     )
     results = iter(
         [
-            SimpleNamespace(template_distance=0.1234, centroid_distance=0.2, matched=True),
-            SimpleNamespace(template_distance=0.5678, centroid_distance=0.3, matched=False),
+            SimpleNamespace(template_distance=0.12, centroid_distance=0.2, matched=True),
+            SimpleNamespace(template_distance=0.57, centroid_distance=0.3, matched=False),
         ]
     )
     monkeypatch.setattr(script, "compute_template_match", lambda embedding, template, *, engine: next(results))
@@ -130,11 +130,11 @@ def test_main_writes_annotated_image_and_uses_engine_distance_semantics(monkeypa
     assert "detector_backend=retinaface" in output
     assert "distance_metric=cosine" in output
     assert "align=True" in output
-    assert "distance_threshold=0.5000" in output
+    assert "distance_threshold=0.50" in output
     assert "threshold_source=deepface-default" in output
     assert f"标注图: {generated}" in output
-    assert "template_dist_a=0.1234" in output
-    assert "template_dist_b=0.5678" in output
+    assert "template_dist_a=0.12" in output
+    assert "template_dist_b=0.57" in output
     assert "match_a=Y" in output
     assert "match_b=N" in output
     assert load_calls == [(ref_a_dir, fake_engine), (ref_b_dir, fake_engine)]
@@ -204,10 +204,10 @@ def test_main_prints_template_distances_and_joint_distance(monkeypatch, tmp_path
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "template_threshold_a=0.3200" in output
-    assert "template_dist_a=0.1200" in output
-    assert "centroid_dist_b=0.4100" in output
-    assert "joint_distance=0.1200" in output
+    assert "template_threshold_a=0.32" in output
+    assert "template_dist_a=0.12" in output
+    assert "centroid_dist_b=0.41" in output
+    assert "joint_distance=0.12" in output
 
 
 def test_write_annotated_image_uses_three_times_larger_font(monkeypatch, tmp_path) -> None:
@@ -269,7 +269,7 @@ def test_draw_label_uses_blue_text_without_background() -> None:
         def textbbox(_position, text, font=None):
             return (0, 0, len(text) * 10, 12)
 
-    lines = ["face[0]", "A 0.1234", "B 0.5678"]
+    lines = ["face[0]", "A 0.12", "B 0.57"]
     font = object()
 
     script._draw_label(
@@ -350,7 +350,7 @@ def test_main_processes_all_candidates_without_skip_logic(monkeypatch, tmp_path,
         align=True,
         distance_threshold=0.5,
         threshold_source="deepface-default",
-        min_distance=lambda _embedding, _references: 0.1234,
+        min_distance=lambda _embedding, _references: 0.12,
         is_match=lambda _distance: True,
     )
     monkeypatch.setattr(script.DeepFaceEngine, "create", lambda **_kwargs: fake_engine)
@@ -369,7 +369,7 @@ def test_main_processes_all_candidates_without_skip_logic(monkeypatch, tmp_path,
     monkeypatch.setattr(
         script,
         "compute_template_match",
-        lambda embedding, template, *, engine: SimpleNamespace(template_distance=0.1234, centroid_distance=0.2, matched=True),
+        lambda embedding, template, *, engine: SimpleNamespace(template_distance=0.12, centroid_distance=0.2, matched=True),
     )
     monkeypatch.setattr(
         script,
@@ -482,7 +482,7 @@ def test_main_passes_custom_engine_args_and_prints_explicit_threshold(monkeypatc
     assert "detector_backend=mtcnn" in output
     assert "distance_metric=euclidean_l2" in output
     assert "align=False" in output
-    assert "distance_threshold=0.4200" in output
+    assert "distance_threshold=0.42" in output
     assert "threshold_source=explicit" in output
 
 
@@ -578,7 +578,7 @@ def test_main_continues_when_single_annotated_write_fails(monkeypatch, tmp_path,
         align=True,
         distance_threshold=0.5,
         threshold_source="deepface-default",
-        min_distance=lambda _embedding, _references: 0.1234,
+        min_distance=lambda _embedding, _references: 0.12,
         is_match=lambda _distance: True,
     )
     monkeypatch.setattr(script.DeepFaceEngine, "create", lambda **_kwargs: fake_engine)
@@ -596,7 +596,7 @@ def test_main_continues_when_single_annotated_write_fails(monkeypatch, tmp_path,
     monkeypatch.setattr(
         script,
         "compute_template_match",
-        lambda embedding, template, *, engine: SimpleNamespace(template_distance=0.1234, centroid_distance=0.2, matched=True),
+        lambda embedding, template, *, engine: SimpleNamespace(template_distance=0.12, centroid_distance=0.2, matched=True),
     )
     monkeypatch.setattr(
         script,

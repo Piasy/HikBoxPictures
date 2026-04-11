@@ -127,7 +127,7 @@ def test_build_reference_template_drops_outlier_when_reference_set_is_large(tmp_
         complete_labels={10, 11, 12, 13, 50},
     )
 
-    template = build_reference_template("A", samples, engine=engine, default_threshold=0.5)
+    template = build_reference_template("A", samples, engine=engine, default_threshold=0.5, drop_outliers=True)
 
     assert [sample.path.name for sample in template.kept_samples] == ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]
     assert [sample.path.name for sample in template.dropped_samples] == ["outlier.jpg"]
@@ -138,6 +138,52 @@ def test_build_reference_template_drops_outlier_when_reference_set_is_large(tmp_
     kept_center_distances = [sample.center_distance for sample in template.samples[:-1]]
     assert outlier_sample.center_distance is not None
     assert max(distance for distance in kept_center_distances if distance is not None) < outlier_sample.center_distance
+
+
+def test_build_reference_template_keeps_all_samples_when_drop_outliers_disabled(tmp_path: Path) -> None:
+    samples = [
+        _sample(tmp_path, "a.jpg", 10.0, area=0.8, sharpness=10.0),
+        _sample(tmp_path, "b.jpg", 11.0, area=0.7, sharpness=9.5),
+        _sample(tmp_path, "c.jpg", 12.0, area=0.7, sharpness=9.0),
+        _sample(tmp_path, "d.jpg", 13.0, area=0.6, sharpness=8.5),
+        _sample(tmp_path, "outlier.jpg", 50.0, area=0.1, sharpness=1.0),
+    ]
+    engine = FakeEngine(
+        {
+            (10, 10): 0.0,
+            (10, 11): 0.1,
+            (10, 12): 0.2,
+            (10, 13): 0.3,
+            (10, 50): 2.5,
+            (11, 10): 0.1,
+            (11, 11): 0.0,
+            (11, 12): 0.1,
+            (11, 13): 0.2,
+            (11, 50): 2.4,
+            (12, 10): 0.2,
+            (12, 11): 0.1,
+            (12, 12): 0.0,
+            (12, 13): 0.1,
+            (12, 50): 2.3,
+            (13, 10): 0.3,
+            (13, 11): 0.2,
+            (13, 12): 0.1,
+            (13, 13): 0.0,
+            (13, 50): 2.2,
+            (50, 10): 2.5,
+            (50, 11): 2.4,
+            (50, 12): 2.3,
+            (50, 13): 2.2,
+            (50, 50): 0.0,
+        },
+        complete_labels={10, 11, 12, 13, 50},
+    )
+
+    template = build_reference_template("A", samples, engine=engine, default_threshold=0.5)
+
+    assert len(template.kept_samples) == 5
+    assert template.dropped_samples == []
+    assert [sample.path.name for sample in template.kept_samples] == ["a.jpg", "b.jpg", "c.jpg", "d.jpg", "outlier.jpg"]
 
 
 @pytest.mark.parametrize("non_finite_distance", [float("nan"), float("inf"), float("-inf")])

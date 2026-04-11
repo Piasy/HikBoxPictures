@@ -152,6 +152,7 @@ def build_reference_template(
     default_threshold: float,
     override_threshold: float | None = None,
     fallback_threshold: float | None = None,
+    drop_outliers: bool = False,
     centroid_embedding: np.ndarray | None = None,
 ) -> ReferenceTemplate:
     if not samples:
@@ -159,7 +160,10 @@ def build_reference_template(
 
     quality_scores = _compute_quality_scores(samples)
     center_distances = _compute_pairwise_center_distances(samples, engine=engine)
-    kept_indexes = _select_kept_indexes(center_distances)
+    if drop_outliers:
+        kept_indexes = _select_kept_indexes(center_distances)
+    else:
+        kept_indexes = set(range(len(samples)))
 
     rebuilt_samples: list[ReferenceSample] = []
     for index, sample in enumerate(samples):
