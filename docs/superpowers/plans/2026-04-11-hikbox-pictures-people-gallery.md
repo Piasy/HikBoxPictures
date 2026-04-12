@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax. This plan's checkbox state is the persistent progress source of truth; TodoWrite is session-local tracking. Executors may run dependency-free tasks in parallel (default max concurrency: 4).
 
-**Goal:** 将现有一次性双人检索 CLI 升级为“本地人物图库 + 多 source 管理 + 可恢复增量扫描 + 人物维护 + 智能导出模板”系统。
+**Goal:** 将现有一次性双人检索 CLI 升级为“本地人物图库 + 多 source 管理 + 可恢复增量扫描 + 人物维护 + 智能导出模板 + 结构化日志排障”系统。
 
-**Architecture:** 业务真相统一写入 `<workspace>/.hikbox/library.db`；扫描、归属、审核、导出都使用状态表建模并可恢复。向量真相落库，查询层通过 `person_prototype + ANN` 做人物级召回，导出命中通过关系查询和账本比对实现，避免运行时全库向量扫描。系统分层为 `repository -> service -> api/web`，CLI 负责控制面，WebUI 提供人物库优先入口。
+**Architecture:** 业务真相统一写入 `<workspace>/.hikbox/library.db`；扫描、归属、审核、导出都使用状态表建模并可恢复。向量真相落库，查询层通过 `person_prototype + ANN` 做人物级召回，导出命中通过关系查询和账本比对实现，避免运行时全库向量扫描。系统分层为 `repository -> service -> api/web`，CLI 负责控制面，WebUI 提供人物库优先入口。可观测分为“文件结构化日志 + `ops_event` 事件索引”双层，日志只用于排障与分析，不参与状态恢复。
 
 **Tech Stack:** Python 3.13+、SQLite、DeepFace、NumPy、hnswlib、FastAPI、Jinja2、pytest
 
@@ -16,7 +16,7 @@
 
 - 顺序执行：`Task 1 -> Task 2 -> Task 3 -> Task 4`
 - 原因：后续所有功能都依赖 workspace、DB 连接与完整 schema。
-- 阻塞项：`Task 5-16` 全部等待 `Task 4`。
+- 阻塞项：`Task 5-17` 全部等待 `Task 4`。
 
 ### Wave B（首轮并行）
 
@@ -41,17 +41,17 @@
 
 ### Wave D（流水线与界面并行）
 
-- 可并行：`Task 11`、`Task 12`
+- 可并行：`Task 11`、`Task 12`、`Task 15`
 - 并行依据：
   - `Task 11` 写 `scan_repo.py/scan_service.py` 的 source+checkpoint 流水线。
   - `Task 12` 写 API/Web 文件。
   - 写集合不重叠。
-- 阻塞项：`Task 14` 等 `Task 11 + Task 12 + Task 13`。
+- 阻塞项：`Task 14` 等 `Task 11 + Task 12 + Task 13`；`Task 16` 等 `Task 14 + Task 15`。
 
 ### Wave E（控制面与收口）
 
-- 顺序执行：`Task 14 -> Task 15 -> Task 16`
-- 原因：`Task 14` 汇总 CLI 控制面命令，`Task 15` 依赖完整命令面执行回归，`Task 16` 收口文档与验证。
+- 顺序执行：`Task 14 -> Task 16 -> Task 17`
+- 原因：`Task 14` 汇总 CLI 控制面命令，`Task 15` 在 Wave D 并行建立日志底座，`Task 16` 在命令面和日志底座就绪后补齐排障入口，`Task 17` 执行回归与收口。
 
 ---
 
@@ -64,25 +64,31 @@
 - `src/hikbox_pictures/db/migrator.py`
 - `src/hikbox_pictures/db/migrations/0001_scan_core.sql`
 - `src/hikbox_pictures/db/migrations/0002_people_export.sql`
+- `src/hikbox_pictures/db/migrations/0003_ops_events.sql`
 - `src/hikbox_pictures/repositories/source_repo.py`
 - `src/hikbox_pictures/repositories/scan_repo.py`
 - `src/hikbox_pictures/repositories/person_repo.py`
 - `src/hikbox_pictures/repositories/export_repo.py`
+- `src/hikbox_pictures/repositories/ops_event_repo.py`
 - `src/hikbox_pictures/services/scan_service.py`
 - `src/hikbox_pictures/services/assignment_service.py`
 - `src/hikbox_pictures/services/export_service.py`
+- `src/hikbox_pictures/services/observability_service.py`
+- `src/hikbox_pictures/logging_config.py`
 - `src/hikbox_pictures/ann/index_store.py`
 - `src/hikbox_pictures/api/app.py`
 - `src/hikbox_pictures/api/routes_people.py`
 - `src/hikbox_pictures/api/routes_reviews.py`
 - `src/hikbox_pictures/api/routes_scan.py`
 - `src/hikbox_pictures/api/routes_export.py`
+- `src/hikbox_pictures/api/routes_logs.py`
 - `src/hikbox_pictures/web/templates/base.html`
 - `src/hikbox_pictures/web/templates/people.html`
 - `src/hikbox_pictures/web/templates/person_detail.html`
 - `src/hikbox_pictures/web/templates/review_queue.html`
 - `src/hikbox_pictures/web/templates/sources_scan.html`
 - `src/hikbox_pictures/web/templates/export_templates.html`
+- `src/hikbox_pictures/web/templates/logs.html`
 - `src/hikbox_pictures/web/static/app.js`
 - `src/hikbox_pictures/web/static/style.css`
 - `tests/people_gallery/test_init_and_schema.py`
@@ -94,6 +100,7 @@
 - `tests/people_gallery/test_export_service.py`
 - `tests/people_gallery/test_api_web.py`
 - `tests/people_gallery/test_cli_control_plane.py`
+- `tests/people_gallery/test_logging_observability.py`
 
 ### 修改
 
@@ -2346,21 +2353,360 @@ git add src/hikbox_pictures/cli.py pyproject.toml README.md tests/people_gallery
 git commit -m "feat: complete cli control-plane commands (Task 14)"
 ```
 
-### Task 15: 端到端回归
+### Task 15: 日志 schema 与可观测服务接入
 
-**Depends on:** Task 11, Task 14
+**Depends on:** Task 4, Task 11, Task 13
 
 **Scope Budget:**
 - Max files: 20
-- Estimated files touched: 2
+- Estimated files touched: 9
 - Max added lines: 1000
-- Estimated added lines: 120
+- Estimated added lines: 420
+
+**Files:**
+- Create: `src/hikbox_pictures/db/migrations/0003_ops_events.sql`
+- Create: `src/hikbox_pictures/repositories/ops_event_repo.py`
+- Create: `src/hikbox_pictures/services/observability_service.py`
+- Create: `src/hikbox_pictures/logging_config.py`
+- Modify: `src/hikbox_pictures/workspace.py`
+- Modify: `src/hikbox_pictures/services/scan_service.py`
+- Modify: `src/hikbox_pictures/services/export_service.py`
+- Test: `tests/people_gallery/test_init_and_schema.py`
+- Test: `tests/people_gallery/test_logging_observability.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `ops_event` 表与日志目录布局**
+
+```python
+from pathlib import Path
+
+from hikbox_pictures.workspace import ensure_workspace_layout
+from hikbox_pictures.db.connection import connect_db
+from hikbox_pictures.db.migrator import apply_migrations
+
+
+def test_workspace_creates_logs_layout(tmp_path: Path) -> None:
+    paths = ensure_workspace_layout(tmp_path)
+    assert (paths.hikbox_dir / "logs").is_dir()
+    assert (paths.hikbox_dir / "logs" / "runs").is_dir()
+
+
+def test_schema_contains_ops_event_table(tmp_path: Path) -> None:
+    conn = connect_db(tmp_path / "library.db")
+    apply_migrations(conn)
+
+    table = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ops_event'"
+    ).fetchone()
+    assert table is not None
+```
+
+- [ ] **Step 2: 运行测试，确认日志 schema 未接入前失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_init_and_schema.py::test_workspace_creates_logs_layout tests/people_gallery/test_init_and_schema.py::test_schema_contains_ops_event_table -v`
+Expected: FAIL。
+
+- [ ] **Step 3: 实现 `0003_ops_events.sql` 与可观测 repository/service**
+
+```sql
+-- src/hikbox_pictures/db/migrations/0003_ops_events.sql
+CREATE TABLE IF NOT EXISTS ops_event (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  level TEXT NOT NULL,
+  component TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  run_kind TEXT,
+  run_id INTEGER,
+  scan_session_id INTEGER,
+  scan_session_source_id INTEGER,
+  export_run_id INTEGER,
+  photo_asset_id INTEGER,
+  face_observation_id INTEGER,
+  template_id INTEGER,
+  message TEXT,
+  detail_json TEXT,
+  traceback_text TEXT,
+  dedupe_key TEXT,
+  repeat_count INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_ops_event_occurred_at ON ops_event(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_ops_event_run ON ops_event(run_kind, run_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_ops_event_level ON ops_event(level, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_ops_event_type ON ops_event(event_type, occurred_at);
+```
+
+```python
+# src/hikbox_pictures/services/observability_service.py
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+import logging
+from pathlib import Path
+import sqlite3
+from typing import Any
+
+from hikbox_pictures.repositories.ops_event_repo import OpsEventRepo
+
+
+@dataclass(frozen=True)
+class LogContext:
+    run_kind: str | None = None
+    run_id: int | None = None
+    scan_session_id: int | None = None
+    scan_session_source_id: int | None = None
+    export_run_id: int | None = None
+    photo_asset_id: int | None = None
+    face_observation_id: int | None = None
+    template_id: int | None = None
+    phase: str | None = None
+
+
+class ObservabilityService:
+    def __init__(self, conn: sqlite3.Connection, logger: logging.Logger) -> None:
+        self._repo = OpsEventRepo(conn)
+        self._logger = logger
+
+    def record_event(
+        self,
+        *,
+        level: str,
+        component: str,
+        event_type: str,
+        message: str,
+        ctx: LogContext,
+        detail: dict[str, Any] | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        payload = {
+            "event_type": event_type,
+            "component": component,
+            "run_kind": ctx.run_kind,
+            "run_id": ctx.run_id,
+            "scan_session_id": ctx.scan_session_id,
+            "scan_session_source_id": ctx.scan_session_source_id,
+            "export_run_id": ctx.export_run_id,
+            "photo_asset_id": ctx.photo_asset_id,
+            "face_observation_id": ctx.face_observation_id,
+            "template_id": ctx.template_id,
+            "phase": ctx.phase,
+            "detail": detail or {},
+        }
+        self._logger.log(getattr(logging, level.upper(), logging.INFO), message, extra={"hikbox": payload})
+
+        traceback_text = None
+        if error is not None:
+            traceback_text = "".join(__import__("traceback").format_exception(type(error), error, error.__traceback__))
+
+        self._repo.insert_event(
+            level=level,
+            component=component,
+            event_type=event_type,
+            run_kind=ctx.run_kind,
+            run_id=ctx.run_id,
+            scan_session_id=ctx.scan_session_id,
+            scan_session_source_id=ctx.scan_session_source_id,
+            export_run_id=ctx.export_run_id,
+            photo_asset_id=ctx.photo_asset_id,
+            face_observation_id=ctx.face_observation_id,
+            template_id=ctx.template_id,
+            message=message,
+            detail_json=json.dumps(detail or {}, ensure_ascii=False),
+            traceback_text=traceback_text,
+        )
+```
+
+- [ ] **Step 4: 在扫描与导出关键节点接入事件日志**
+
+```python
+# src/hikbox_pictures/services/scan_service.py（关键点）
+self.obs.record_event(
+    level="info",
+    component="scanner",
+    event_type="scan.session.started",
+    message="scan session started",
+    ctx=LogContext(run_kind="scan", run_id=session_id, scan_session_id=session_id),
+)
+
+try:
+    self._process_asset(...)
+except Exception as exc:
+    self.obs.record_event(
+        level="error",
+        component="scanner",
+        event_type="scan.asset.phase.failed",
+        message="scan asset phase failed",
+        ctx=LogContext(
+            run_kind="scan",
+            run_id=session_id,
+            scan_session_id=session_id,
+            scan_session_source_id=session_source_id,
+            photo_asset_id=asset_id,
+            phase=phase,
+        ),
+        detail={"phase": phase},
+        error=exc,
+    )
+```
+
+```python
+# src/hikbox_pictures/services/export_service.py（关键点）
+self.obs.record_event(
+    level="info",
+    component="exporter",
+    event_type="export.run.started",
+    message="export run started",
+    ctx=LogContext(run_kind="export", run_id=run_id, export_run_id=run_id, template_id=template_id),
+)
+```
+
+- [ ] **Step 5: 运行测试，确认 Task 15 通过**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_init_and_schema.py tests/people_gallery/test_logging_observability.py -q`
+Expected: PASS。
+
+**提交动作（非复选框）**
+
+```bash
+git add src/hikbox_pictures/db/migrations/0003_ops_events.sql src/hikbox_pictures/repositories/ops_event_repo.py src/hikbox_pictures/services/observability_service.py src/hikbox_pictures/logging_config.py src/hikbox_pictures/workspace.py src/hikbox_pictures/services/scan_service.py src/hikbox_pictures/services/export_service.py tests/people_gallery/test_init_and_schema.py tests/people_gallery/test_logging_observability.py docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: add observability schema and structured event logging (Task 15)"
+```
+
+### Task 16: 日志查询入口与控制面命令
+
+**Depends on:** Task 14, Task 15
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 8
+- Max added lines: 1000
+- Estimated added lines: 360
+
+**Files:**
+- Modify: `src/hikbox_pictures/cli.py`
+- Create: `src/hikbox_pictures/api/routes_logs.py`
+- Modify: `src/hikbox_pictures/api/app.py`
+- Create: `src/hikbox_pictures/web/templates/logs.html`
+- Modify: `src/hikbox_pictures/web/templates/sources_scan.html`
+- Modify: `README.md`
+- Test: `tests/people_gallery/test_cli_control_plane.py`
+- Test: `tests/people_gallery/test_api_web.py`
+
+- [ ] **Step 1: 写失败测试，锁定 `logs tail/prune` 与日志 API 路由**
+
+```python
+from pathlib import Path
+
+from hikbox_pictures.cli import main
+from hikbox_pictures.api.app import create_app
+from fastapi.testclient import TestClient
+
+
+def test_logs_cli_commands(tmp_path: Path) -> None:
+    assert main(["init", "--workspace", str(tmp_path)]) == 0
+    assert main(["logs", "tail", "--workspace", str(tmp_path), "--run-kind", "scan", "--run-id", "1", "--lines", "20"]) in {0, 4}
+    assert main(["logs", "prune", "--workspace", str(tmp_path), "--days", "30"]) == 0
+
+
+def test_logs_api_route_exists() -> None:
+    client = TestClient(create_app())
+    resp = client.get("/api/logs/events")
+    assert resp.status_code in {200, 422}
+```
+
+- [ ] **Step 2: 运行测试，确认日志入口尚未接线**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_cli_control_plane.py::test_logs_cli_commands tests/people_gallery/test_api_web.py::test_logs_api_route_exists -v`
+Expected: FAIL。
+
+- [ ] **Step 3: 实现 CLI `logs` 子命令与 API `GET /api/logs/events`**
+
+```python
+# src/hikbox_pictures/cli.py（新增 logs 子命令）
+logs_parser = subparsers.add_parser("logs")
+logs_sub = logs_parser.add_subparsers(dest="logs_command", required=True)
+
+tail_parser = logs_sub.add_parser("tail")
+tail_parser.add_argument("--workspace", required=True, type=Path)
+tail_parser.add_argument("--run-kind", choices=["scan", "export"], required=True)
+tail_parser.add_argument("--run-id", required=True, type=int)
+tail_parser.add_argument("--lines", type=int, default=100)
+
+prune_parser = logs_sub.add_parser("prune")
+prune_parser.add_argument("--workspace", required=True, type=Path)
+prune_parser.add_argument("--days", type=int, default=90)
+```
+
+```python
+# src/hikbox_pictures/api/routes_logs.py
+from fastapi import APIRouter, Depends, Query
+import sqlite3
+
+router = APIRouter(prefix="/api/logs", tags=["logs"])
+
+
+@router.get("/events")
+def list_events(
+    conn: sqlite3.Connection = Depends(get_db),
+    run_kind: str | None = Query(default=None),
+    run_id: int | None = Query(default=None),
+    level: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+):
+    sql = "SELECT * FROM ops_event WHERE 1=1"
+    args: list[object] = []
+    if run_kind is not None:
+        sql += " AND run_kind = ?"
+        args.append(run_kind)
+    if run_id is not None:
+        sql += " AND run_id = ?"
+        args.append(run_id)
+    if level is not None:
+        sql += " AND level = ?"
+        args.append(level)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    return {"items": [dict(row) for row in conn.execute(sql, args).fetchall()]}
+```
+
+- [ ] **Step 4: 更新 WebUI 扫描页错误时间线与 README 排障命令示例**
+
+```md
+# README.md（排障示例）
+hikbox-pictures logs tail --workspace /path/to/workspace --run-kind scan --run-id 42 --lines 200
+hikbox-pictures logs prune --workspace /path/to/workspace --days 90
+```
+
+- [ ] **Step 5: 运行测试，确认 Task 16 通过**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_cli_control_plane.py tests/people_gallery/test_api_web.py -q`
+Expected: PASS。
+
+**提交动作（非复选框）**
+
+```bash
+git add src/hikbox_pictures/cli.py src/hikbox_pictures/api/routes_logs.py src/hikbox_pictures/api/app.py src/hikbox_pictures/web/templates/logs.html src/hikbox_pictures/web/templates/sources_scan.html README.md tests/people_gallery/test_cli_control_plane.py tests/people_gallery/test_api_web.py docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: add logs query endpoints and control-plane commands (Task 16)"
+```
+
+### Task 17: 端到端回归与计划收口
+
+**Depends on:** Task 16
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 4
+- Max added lines: 1000
+- Estimated added lines: 160
 
 **Files:**
 - Modify: `tests/people_gallery/test_scan_pipeline.py`
-- Test: `tests/people_gallery/test_scan_pipeline.py`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+- Test: `tests/test_cli.py`
+- Test: `tests/test_matcher.py`
+- Test: `tests/test_exporter.py`
 
-- [ ] **Step 1: 写失败测试，串起最小主流程**
+- [ ] **Step 1: 写失败测试，串起最小主流程并校验日志可查询**
 
 ```python
 from pathlib import Path
@@ -2368,7 +2714,7 @@ from pathlib import Path
 from hikbox_pictures.cli import main
 
 
-def test_end_to_end_minimal_flow(tmp_path: Path) -> None:
+def test_end_to_end_minimal_flow_with_logs(tmp_path: Path) -> None:
     source_root = tmp_path / "photos"
     source_root.mkdir()
     (source_root / "a.jpg").write_bytes(b"jpg")
@@ -2376,48 +2722,20 @@ def test_end_to_end_minimal_flow(tmp_path: Path) -> None:
     assert main(["init", "--workspace", str(tmp_path)]) == 0
     assert main(["source", "add", "--workspace", str(tmp_path), "--name", "main", "--root", str(source_root)]) == 0
     assert main(["scan", "--workspace", str(tmp_path)]) == 0
-    assert main(["scan", "status", "--workspace", str(tmp_path)]) == 0
+    assert main(["logs", "tail", "--workspace", str(tmp_path), "--run-kind", "scan", "--run-id", "1", "--lines", "20"]) == 0
 ```
 
-- [ ] **Step 2: 运行测试，确认端到端链路缺口**
-
-Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_pipeline.py::test_end_to_end_minimal_flow -v`
-Expected: FAIL。
-
-- [ ] **Step 3: 补齐链路后运行 tests/people_gallery 全量测试**
+- [ ] **Step 2: 运行 people_gallery 全量测试，确认新方案稳定**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery -q`
 Expected: PASS。
 
-**提交动作（非复选框）**
-
-```bash
-git add tests/people_gallery/test_scan_pipeline.py docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
-git commit -m "test: add end-to-end minimal flow regression (Task 15)"
-```
-
-### Task 16: 兼容回归与计划收口
-
-**Depends on:** Task 15
-
-**Scope Budget:**
-- Max files: 20
-- Estimated files touched: 2
-- Max added lines: 1000
-- Estimated added lines: 80
-
-**Files:**
-- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
-- Test: `tests/test_cli.py`
-- Test: `tests/test_matcher.py`
-- Test: `tests/test_exporter.py`
-
-- [ ] **Step 1: 运行存量关键回归，确认不破坏旧能力**
+- [ ] **Step 3: 运行存量关键回归，确认不破坏旧能力**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/test_cli.py tests/test_matcher.py tests/test_exporter.py -q`
 Expected: PASS。
 
-- [ ] **Step 2: 更新计划完成状态与执行备注**
+- [ ] **Step 4: 更新计划完成状态与执行备注**
 
 ```markdown
 - [x] Task 1
@@ -2436,13 +2754,14 @@ Expected: PASS。
 - [x] Task 14
 - [x] Task 15
 - [x] Task 16
+- [x] Task 17
 ```
 
 **提交动作（非复选框）**
 
 ```bash
-git add docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
-git commit -m "docs: finalize execution status and compatibility verification (Task 16)"
+git add tests/people_gallery/test_scan_pipeline.py tests/test_cli.py tests/test_matcher.py tests/test_exporter.py docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "test: add logging-aware end-to-end and compatibility regression (Task 17)"
 ```
 
 ---
@@ -2451,7 +2770,7 @@ git commit -m "docs: finalize execution status and compatibility verification (T
 
 - 每个任务都有 `Depends on` 字段。
 - 依赖图无环。
-- 所有共享写文件（`cli.py`、`scan_service.py`）通过依赖关系串行化；`export_service.py` 仅由 Task 13 写入。
+- 共享写文件均通过依赖串行：`cli.py` 由 Task 10、Task 14、Task 16 顺序写入；`scan_service.py` 由 Task 6、Task 8、Task 11、Task 15 顺序写入。
 - 存在依赖起点 `Task 1`，可立即启动。
 
 ## Scope Validation
@@ -2471,4 +2790,5 @@ git commit -m "docs: finalize execution status and compatibility verification (T
 - `spec_hash`、only/group、交付账本：`Task 13`
 - 本地 API 与人物库优先 WebUI：`Task 12`
 - 控制面命令闭环：`Task 14`
-- 端到端与兼容回归：`Task 15`、`Task 16`
+- 日志 schema、结构化事件与排障入口：`Task 15`、`Task 16`
+- 端到端与兼容回归：`Task 17`
