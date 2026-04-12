@@ -856,7 +856,7 @@ git commit -m "feat: add source repository (Task 5)"
 - Create: `src/hikbox_pictures/services/scan_service.py`
 - Test: `tests/people_gallery/test_scan_session.py`
 
-- [ ] **Step 1: 写失败测试，锁定 scan 会话续跑/中断/悬挂恢复**
+- [ ] **Step 1: 写失败测试，锁定 scan 会话续跑与悬挂恢复（遵守单 running 约束）**
 
 ```python
 from pathlib import Path
@@ -866,7 +866,7 @@ from hikbox_pictures.db.migrator import apply_migrations
 from hikbox_pictures.services.scan_service import ScanService
 
 
-def test_scan_session_state_machine(tmp_path: Path) -> None:
+def test_start_or_resume_scan_resumes_interrupted_session(tmp_path: Path) -> None:
     conn = connect_db(tmp_path / "library.db")
     apply_migrations(conn)
 
@@ -878,20 +878,31 @@ def test_scan_session_state_machine(tmp_path: Path) -> None:
     session_id, resumed = svc.start_or_resume_scan()
     assert resumed is True
     assert session_id == old_id
+    status = conn.execute("SELECT status FROM scan_session WHERE id = ?", (session_id,)).fetchone()[0]
+    assert status == "running"
+
+
+def test_mark_stale_running_sessions_marks_old_heartbeat_as_interrupted(tmp_path: Path) -> None:
+    conn = connect_db(tmp_path / "library.db")
+    apply_migrations(conn)
 
     conn.execute(
         "INSERT INTO scan_session(mode, status, heartbeat_at) VALUES ('incremental', 'running', datetime('now', '-2 hours'))"
     )
+    stale_id = conn.execute("SELECT id FROM scan_session ORDER BY id DESC LIMIT 1").fetchone()[0]
     conn.commit()
 
+    svc = ScanService(conn)
     svc.mark_stale_running_sessions(max_age_seconds=1800)
-    status = conn.execute("SELECT status FROM scan_session ORDER BY id DESC LIMIT 1").fetchone()[0]
+    status = conn.execute("SELECT status FROM scan_session WHERE id = ?", (stale_id,)).fetchone()[0]
     assert status == "interrupted"
 ```
 
+> 说明：`scan_session` 在 Task 3 通过 `uq_single_running_scan_session` 限制“同一时刻仅允许一条 `running`”。因此这里将“恢复会话”和“stale 中断”拆成两个独立测试，避免构造违反 schema 的前置状态。
+
 - [ ] **Step 2: 运行测试，确认 scan repo/service 未实现**
 
-Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_session.py::test_scan_session_state_machine -v`
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_session.py::test_start_or_resume_scan_resumes_interrupted_session tests/people_gallery/test_scan_session.py::test_mark_stale_running_sessions_marks_old_heartbeat_as_interrupted -v`
 Expected: FAIL。
 
 - [ ] **Step 3: 实现 scan repository（会话与进度基础方法）**
@@ -1011,7 +1022,7 @@ class ScanService:
 
 - [ ] **Step 5: 运行测试，确认 Task 6 通过**
 
-Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_session.py::test_scan_session_state_machine -q`
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_session.py::test_start_or_resume_scan_resumes_interrupted_session tests/people_gallery/test_scan_session.py::test_mark_stale_running_sessions_marks_old_heartbeat_as_interrupted -q`
 Expected: PASS。
 
 **提交动作（非复选框）**
