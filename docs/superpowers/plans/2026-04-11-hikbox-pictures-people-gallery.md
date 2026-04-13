@@ -1709,7 +1709,7 @@ git commit -m "test: add webui media viewer p0 acceptance and performance smoke 
 - Modify: `README.md`
 - Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
 
-- [ ] **Step 1: 写失败测试，锁定“无人脸源图 + mock embedding 注入 + 后续全流程”**
+- [x] **Step 1: 写失败测试，锁定“无人脸源图 + mock embedding 注入 + 后续全流程”**
 
 ```python
 def test_e2e_with_number_images_and_mock_embeddings(tmp_path):
@@ -1751,12 +1751,12 @@ def test_mock_embedding_flow_visible_in_webui(seed_workspace_with_mock_embedding
     assert "queue-item" in html_reviews
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_e2e_mock_embedding_pipeline.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现数字图片工厂与 mock embedding 注入夹具**
+- [x] **Step 3: 实现数字图片工厂与 mock embedding 注入夹具**
 
 ```python
 # tests/people_gallery/image_factory.py（关键片段）
@@ -1787,12 +1787,12 @@ def inject_mock_embeddings_for_assets(workspace: Path, person_specs: list[dict],
     conn.commit()
 ```
 
-- [ ] **Step 4: 运行回归，确认 mock 路径可覆盖后续全流程**
+- [x] **Step 4: 运行回归，确认 mock 路径可覆盖后续全流程**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_e2e_mock_embedding_pipeline.py tests/people_gallery/test_media_viewer_acceptance.py tests/people_gallery/test_export_matching_and_ledger.py::test_export_preview_returns_real_only_group_counts -q`
 Expected: PASS。
 
-- [ ] **Step 5: 合并到 e2e 套件并更新文档口径**
+- [x] **Step 5: 合并到 e2e 套件并更新文档口径**
 
 ```markdown
 ## E2E（Mock Embedding）说明

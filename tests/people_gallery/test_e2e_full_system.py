@@ -16,6 +16,7 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+build_seed_workspace_with_mock_embeddings = _MODULE.build_seed_workspace_with_mock_embeddings
 
 
 def test_full_system_webui_flow_keeps_review_queue_available(tmp_path) -> None:
@@ -53,3 +54,20 @@ def test_full_system_webui_flow_keeps_review_queue_available(tmp_path) -> None:
             assert f"review #{review_id}" in html
     finally:
         ws.close()
+
+
+def test_full_system_mock_embedding_flow_has_people_and_export_sample(tmp_path) -> None:
+    ws_root = tmp_path / "ws"
+    seeded = build_seed_workspace_with_mock_embeddings(ws_root)
+    template_id = int(seeded["template_id"])
+
+    client = TestClient(create_app(workspace=ws_root))
+    people_html = client.get("/").text
+    exports_html = client.get("/exports").text
+    preview = client.get(f"/api/export/templates/{template_id}/preview")
+
+    assert "人物甲" in people_html
+    assert "人物乙" in people_html
+    assert "export-preview-sample" in exports_html
+    assert preview.status_code == 200
+    assert preview.json()["matched_only_count"] >= 1

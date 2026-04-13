@@ -107,6 +107,12 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - 媒体 API 需满足边界约束：原图接口支持 `Range`，并具备路径越界防护与结构化错误码。
 - 预览接口性能烟测门槛为 600ms（本地测试以 `tests/people_gallery/test_media_preview_performance_smoke.py` 为准）。
 
+## E2E（Mock Embedding）说明
+
+- e2e 集成测试支持使用“数字图片”作为输入，不依赖真实人脸检测结果。
+- 通过测试夹具向 `face_observation`、`face_embedding`、`person_face_assignment` 注入 mock 数据，绕过检测与 embedding 提取耗时链路。
+- 该路径用于验证“人物维护 -> 预览 -> 导出 -> 日志”后续流程稳定性，不替代真实模型链路测试。
+
 当前可用扫描控制命令：
 
 - `scan --workspace <dir>`：默认恢复最近可恢复会话（`pending/running/paused/interrupted`），若不存在则创建新的增量会话。

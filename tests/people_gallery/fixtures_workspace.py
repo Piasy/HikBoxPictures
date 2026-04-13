@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+from importlib.util import module_from_spec, spec_from_file_location
+import json
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 from PIL import Image
 
 try:
@@ -22,6 +27,14 @@ from hikbox_pictures.repositories import (
     SourceRepo,
 )
 from hikbox_pictures.workspace import WorkspacePaths, ensure_workspace_layout
+
+_IMAGE_FACTORY_PATH = Path(__file__).with_name("image_factory.py")
+_IMAGE_FACTORY_SPEC = spec_from_file_location("people_gallery_image_factory", _IMAGE_FACTORY_PATH)
+if _IMAGE_FACTORY_SPEC is None or _IMAGE_FACTORY_SPEC.loader is None:
+    raise RuntimeError(f"无法加载图片工厂夹具文件: {_IMAGE_FACTORY_PATH}")
+_IMAGE_FACTORY_MODULE = module_from_spec(_IMAGE_FACTORY_SPEC)
+_IMAGE_FACTORY_SPEC.loader.exec_module(_IMAGE_FACTORY_MODULE)
+write_number_jpeg = _IMAGE_FACTORY_MODULE.write_number_jpeg
 
 
 @dataclass
@@ -470,3 +483,414 @@ def build_seed_workspace(
         media_photo_id=media_photo_id,
         media_observation_id=media_observation_id,
     )
+
+
+def create_number_image_dataset(
+    dataset_dir: Path,
+    *,
+    names: list[str] | None = None,
+) -> list[Path]:
+    """创建用于 e2e 的数字图片数据集。"""
+    effective_names = names or ["001.jpg", "002.jpg", "003.jpg"]
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    created: list[Path] = []
+    for name in effective_names:
+        file_path = dataset_dir / name
+        write_number_jpeg(file_path, text=file_path.stem)
+        created.append(file_path)
+    return created
+
+
+def inject_mock_embeddings_for_assets(
+    workspace: Path,
+    *,
+    dataset_dir: Path,
+    person_specs: list[dict[str, Any]],
+    template_name: str = "甲乙模板",
+    include_group: bool = True,
+    export_live_mov: bool = False,
+) -> dict[str, Any]:
+    """
+    向工作区注入 mock observation/embedding/assignment，并创建可直接导出的模板。
+
+    person_specs 每项支持字段：
+    - file_name: str
+    - display_name: str
+    - vector: list[float]
+    - assignment_source: str（默认 manual）
+    - locked: bool（默认 False）
+    - bbox: tuple[top, right, bottom, left]（默认 0.1,0.9,0.9,0.1）
+    - face_area_ratio: float（默认 0.22）
+    """
+    if not person_specs:
+        raise ValueError("person_specs 不能为空")
+
+    paths = ensure_workspace_layout(workspace)
+    conn = connect_db(paths.db_path)
+    apply_migrations(conn)
+    source_repo = SourceRepo(conn)
+    asset_repo = AssetRepo(conn)
+    person_repo = PersonRepo(conn)
+    review_repo = ReviewRepo(conn)
+    export_repo = ExportRepo(conn)
+    try:
+        source_root = str(dataset_dir.resolve())
+        source_row = conn.execute(
+            """
+            SELECT id
+            FROM library_source
+            WHERE root_path = ?
+              AND active = 1
+            LIMIT 1
+            """,
+            (source_root,),
+        ).fetchone()
+        if source_row is None:
+            source_id = source_repo.add_source(
+                "MockDigits",
+                source_root,
+                root_fingerprint=f"fp-{abs(hash(source_root))}",
+                active=True,
+            )
+        else:
+            source_id = int(source_row["id"])
+
+        person_ids_by_name: dict[str, int] = {}
+        template_person_ids: list[int] = []
+        touched_asset_ids: list[int] = []
+        spec_occurrences: dict[tuple[str, str], int] = {}
+
+        for index, spec in enumerate(person_specs, start=1):
+            file_name = str(spec["file_name"]).strip()
+            display_name = str(spec["display_name"]).strip()
+            if not file_name or not display_name:
+                raise ValueError("person_specs 缺少 file_name/display_name")
+
+            primary_path = str((dataset_dir / file_name).resolve())
+            path_row = conn.execute(
+                """
+                SELECT id
+                FROM photo_asset
+                WHERE library_source_id = ?
+                  AND primary_path = ?
+                LIMIT 1
+                """,
+                (int(source_id), primary_path),
+            ).fetchone()
+            if path_row is None:
+                asset_id = asset_repo.add_photo_asset(
+                    source_id,
+                    primary_path,
+                    processing_status="assignment_done",
+                )
+            else:
+                asset_id = int(path_row["id"])
+
+            capture_day = 10 + index
+            conn.execute(
+                """
+                UPDATE photo_asset
+                SET processing_status = 'assignment_done',
+                    capture_datetime = ?,
+                    capture_month = '2025-04',
+                    primary_fingerprint = ?,
+                    is_heic = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (f"2025-04-{capture_day:02d}T08:00:00+08:00", f"fp-mock-{asset_id}", int(asset_id)),
+            )
+
+            bbox = spec.get("bbox", (0.1, 0.9, 0.9, 0.1))
+            if not isinstance(bbox, (tuple, list)) or len(bbox) != 4:
+                raise ValueError("bbox 必须是四元组/四元素列表 (top, right, bottom, left)")
+
+            occurrence_key = (file_name, display_name)
+            occurrence = int(spec_occurrences.get(occurrence_key, 0)) + 1
+            spec_occurrences[occurrence_key] = occurrence
+            marker_payload = f"{source_root}|{file_name}|{display_name}|{occurrence}"
+            marker_digest = sha256(marker_payload.encode("utf-8")).hexdigest()[:24]
+            detector_key = "mock_embedding_fixture"
+            detector_version = f"mk-{marker_digest}"
+            crop_path = paths.artifacts_dir / "mock-crops" / f"{detector_version}.jpg"
+            write_number_jpeg(crop_path, text=f"C{asset_id}")
+            observation_row = conn.execute(
+                """
+                SELECT id
+                FROM face_observation
+                WHERE photo_asset_id = ?
+                  AND detector_key = ?
+                  AND detector_version = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (int(asset_id), detector_key, detector_version),
+            ).fetchone()
+            if observation_row is None:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO face_observation(
+                        photo_asset_id,
+                        bbox_top,
+                        bbox_right,
+                        bbox_bottom,
+                        bbox_left,
+                        face_area_ratio,
+                        crop_path,
+                        detector_key,
+                        detector_version,
+                        active
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        int(asset_id),
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                        float(spec.get("face_area_ratio", 0.22)),
+                        str(crop_path),
+                        detector_key,
+                        detector_version,
+                    ),
+                )
+                observation_id = int(cursor.lastrowid)
+            else:
+                observation_id = int(observation_row["id"])
+                conn.execute(
+                    """
+                    UPDATE face_observation
+                    SET bbox_top = ?,
+                        bbox_right = ?,
+                        bbox_bottom = ?,
+                        bbox_left = ?,
+                        face_area_ratio = ?,
+                        crop_path = ?,
+                        active = 1
+                    WHERE id = ?
+                    """,
+                    (
+                        float(bbox[0]),
+                        float(bbox[1]),
+                        float(bbox[2]),
+                        float(bbox[3]),
+                        float(spec.get("face_area_ratio", 0.22)),
+                        str(crop_path),
+                        int(observation_id),
+                    ),
+                )
+
+            vector_raw = spec.get("vector")
+            if not isinstance(vector_raw, list) or not vector_raw:
+                raise ValueError("vector 必须是非空 list[float]")
+            vector = np.asarray(vector_raw, dtype=np.float32)
+            conn.execute(
+                """
+                INSERT INTO face_embedding(
+                    face_observation_id,
+                    feature_type,
+                    model_key,
+                    dimension,
+                    vector_blob,
+                    normalized
+                )
+                VALUES (?, 'face', 'pipeline-stub-v1', ?, ?, 1)
+                ON CONFLICT(face_observation_id, feature_type)
+                DO UPDATE SET
+                    model_key = excluded.model_key,
+                    dimension = excluded.dimension,
+                    vector_blob = excluded.vector_blob,
+                    normalized = excluded.normalized,
+                    generated_at = CURRENT_TIMESTAMP
+                """,
+                (int(observation_id), int(vector.size), vector.tobytes()),
+            )
+
+            person_id = person_ids_by_name.get(display_name)
+            if person_id is None:
+                person_row = conn.execute(
+                    """
+                    SELECT id
+                    FROM person
+                    WHERE display_name = ?
+                    ORDER BY id ASC
+                    LIMIT 1
+                    """,
+                    (display_name,),
+                ).fetchone()
+                if person_row is None:
+                    person_id = person_repo.create_person(display_name, status="active", confirmed=True, ignored=False)
+                else:
+                    person_id = int(person_row["id"])
+                person_ids_by_name[display_name] = int(person_id)
+                template_person_ids.append(int(person_id))
+
+            assignment_source = str(spec.get("assignment_source", "manual"))
+            locked = 1 if bool(spec.get("locked", False)) else 0
+            conn.execute(
+                """
+                UPDATE person_face_assignment
+                SET active = 0,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE face_observation_id = ?
+                  AND person_id <> ?
+                  AND active = 1
+                """,
+                (int(observation_id), int(person_id)),
+            )
+            assignment_row = conn.execute(
+                """
+                SELECT id
+                FROM person_face_assignment
+                WHERE face_observation_id = ?
+                  AND person_id = ?
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (int(observation_id), int(person_id)),
+            ).fetchone()
+            if assignment_row is None:
+                conn.execute(
+                    """
+                    INSERT INTO person_face_assignment(
+                        person_id,
+                        face_observation_id,
+                        assignment_source,
+                        confidence,
+                        locked,
+                        active
+                    )
+                    VALUES (?, ?, ?, 1.0, ?, 1)
+                    """,
+                    (
+                        int(person_id),
+                        int(observation_id),
+                        assignment_source,
+                        locked,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE person_face_assignment
+                    SET assignment_source = ?,
+                        confidence = 1.0,
+                        locked = ?,
+                        active = 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (assignment_source, locked, int(assignment_row["id"])),
+                )
+            touched_asset_ids.append(int(asset_id))
+
+        template_output_root = str(paths.exports_dir / "mock")
+        template_row = conn.execute(
+            """
+            SELECT id
+            FROM export_template
+            WHERE name = ?
+              AND output_root = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (template_name, template_output_root),
+        ).fetchone()
+        if template_row is None:
+            template_id = export_repo.create_template(
+                name=template_name,
+                output_root=template_output_root,
+                include_group=include_group,
+                export_live_mov=export_live_mov,
+                enabled=True,
+            )
+        else:
+            template_id = int(template_row["id"])
+            conn.execute(
+                """
+                UPDATE export_template
+                SET include_group = ?,
+                    export_live_mov = ?,
+                    enabled = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    1 if include_group else 0,
+                    1 if export_live_mov else 0,
+                    int(template_id),
+                ),
+            )
+            conn.execute("DELETE FROM export_template_person WHERE template_id = ?", (int(template_id),))
+        for position, person_id in enumerate(template_person_ids):
+            export_repo.add_template_person(template_id=template_id, person_id=person_id, position=position)
+
+        review_payload = json.dumps(
+            {
+                "mock_marker": source_root,
+                "template_name": template_name,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        review_row = conn.execute(
+            """
+            SELECT id
+            FROM review_item
+            WHERE review_type = 'new_person'
+              AND status = 'open'
+              AND payload_json = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (review_payload,),
+        ).fetchone()
+        if review_row is None:
+            review_id = review_repo.create_review_item(
+                "new_person",
+                payload_json=review_payload,
+                priority=35,
+                status="open",
+                primary_person_id=int(template_person_ids[0]) if template_person_ids else None,
+            )
+        else:
+            review_id = int(review_row["id"])
+
+        conn.commit()
+        return {
+            "template_id": int(template_id),
+            "person_ids": template_person_ids,
+            "person_ids_by_name": person_ids_by_name,
+            "asset_ids": touched_asset_ids,
+            "source_id": int(source_id),
+            "review_id": int(review_id),
+            "review_payload": review_payload,
+        }
+    finally:
+        conn.close()
+
+
+def build_seed_workspace_with_mock_embeddings(
+    root: Path,
+    *,
+    names: list[str] | None = None,
+    person_specs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """可复用的一站式 helper：创建数字图并注入 mock embeddings。"""
+    dataset_dir = root / "mock-digits"
+    created = create_number_image_dataset(dataset_dir, names=names)
+    default_specs: list[dict[str, Any]] = [
+        {"file_name": "001.jpg", "display_name": "人物甲", "vector": [0.11, 0.12, 0.13, 0.14], "locked": True},
+        {"file_name": "001.jpg", "display_name": "人物乙", "vector": [0.21, 0.22, 0.23, 0.24], "locked": False},
+        {"file_name": "002.jpg", "display_name": "人物甲", "vector": [0.31, 0.32, 0.33, 0.34], "locked": True},
+    ]
+    result = inject_mock_embeddings_for_assets(
+        root,
+        dataset_dir=dataset_dir,
+        person_specs=person_specs if person_specs is not None else default_specs,
+        template_name="甲乙模板",
+    )
+    result["dataset_dir"] = dataset_dir
+    result["created_images"] = created
+    return result

@@ -17,6 +17,7 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+build_seed_workspace_with_mock_embeddings = _MODULE.build_seed_workspace_with_mock_embeddings
 
 
 def test_scan_status_reads_real_session(tmp_path) -> None:
@@ -265,3 +266,39 @@ def test_media_original_missing_returns_structured_error(tmp_path) -> None:
         assert "message" in payload
     finally:
         ws.close()
+
+
+def test_api_contract_preview_counts_with_mock_embedding_dataset(tmp_path) -> None:
+    ws_root = tmp_path / "ws"
+    seeded = build_seed_workspace_with_mock_embeddings(ws_root)
+    template_id = int(seeded["template_id"])
+    review_id = int(seeded["review_id"])
+    review_payload = str(seeded["review_payload"])
+    client = TestClient(create_app(workspace=ws_root))
+
+    people_response = client.get("/api/people")
+    preview_response = client.get(f"/api/export/templates/{template_id}/preview")
+    reviews_response = client.get("/api/reviews")
+    reviews_page_response = client.get("/reviews")
+
+    assert people_response.status_code == 200
+    people_names = [str(item["display_name"]) for item in people_response.json()]
+    assert "人物甲" in people_names
+    assert "人物乙" in people_names
+
+    assert preview_response.status_code == 200
+    preview = preview_response.json()
+    assert preview["template_id"] == template_id
+    assert preview["matched_only_count"] == 1
+    assert preview["matched_group_count"] == 0
+
+    assert reviews_response.status_code == 200
+    reviews = reviews_response.json()
+    assert isinstance(reviews, list)
+    assert len(reviews) >= 1
+    target_reviews = [item for item in reviews if int(item.get("id", 0)) == review_id]
+    assert len(target_reviews) >= 1
+    assert any(str(item.get("payload_json")) == review_payload for item in target_reviews)
+    assert reviews_page_response.status_code == 200
+    assert "queue-new_person" in reviews_page_response.text
+    assert f"review #{review_id}" in reviews_page_response.text
