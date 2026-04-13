@@ -5,15 +5,98 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from hikbox_pictures.deepface_engine import DeepFaceEngine, DeepFaceInitError
-from hikbox_pictures.exporter import export_match
-from hikbox_pictures.matcher import CandidateDecodeError, evaluate_candidate_photo
+from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.metadata import resolve_capture_datetime
 from hikbox_pictures.models import MatchBucket, RunSummary
-from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_embeddings
-from hikbox_pictures.reference_template import build_reference_samples_from_embeddings, build_reference_template
-from hikbox_pictures.scanner import iter_candidate_photos
 from hikbox_pictures.services.runtime import initialize_workspace
+from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
+
+
+class DeepFaceInitError(Exception):
+    """DeepFace 初始化失败。"""
+
+
+class ReferenceImageError(Exception):
+    """参考图加载失败。"""
+
+
+class CandidateDecodeError(Exception):
+    """候选图解码失败。"""
+
+
+class DeepFaceEngine:
+    """延迟加载 DeepFace 引擎，避免控制面命令触发重依赖导入。"""
+
+    @staticmethod
+    def create(**kwargs):
+        from hikbox_pictures.deepface_engine import DeepFaceEngine as RealDeepFaceEngine
+        from hikbox_pictures.deepface_engine import DeepFaceInitError as RealDeepFaceInitError
+
+        try:
+            return RealDeepFaceEngine.create(**kwargs)
+        except RealDeepFaceInitError as exc:
+            raise DeepFaceInitError(str(exc)) from exc
+
+
+def load_reference_embeddings(ref_dir, engine):
+    from hikbox_pictures.reference_loader import ReferenceImageError as RealReferenceImageError
+    from hikbox_pictures.reference_loader import load_reference_embeddings as real_load_reference_embeddings
+
+    try:
+        return real_load_reference_embeddings(ref_dir, engine)
+    except RealReferenceImageError as exc:
+        raise ReferenceImageError(str(exc)) from exc
+
+
+def build_reference_samples_from_embeddings(paths, embeddings, *, engine):
+    from hikbox_pictures.reference_template import (
+        build_reference_samples_from_embeddings as real_build_reference_samples_from_embeddings,
+    )
+
+    return real_build_reference_samples_from_embeddings(paths, embeddings, engine=engine)
+
+
+def build_reference_template(
+    name,
+    samples,
+    *,
+    engine,
+    default_threshold,
+    override_threshold=None,
+    fallback_threshold=None,
+):
+    from hikbox_pictures.reference_template import build_reference_template as real_build_reference_template
+
+    return real_build_reference_template(
+        name,
+        samples,
+        engine=engine,
+        default_threshold=default_threshold,
+        override_threshold=override_threshold,
+        fallback_threshold=fallback_threshold,
+    )
+
+
+def iter_candidate_photos(root):
+    from hikbox_pictures.scanner import iter_candidate_photos as real_iter_candidate_photos
+
+    return real_iter_candidate_photos(root)
+
+
+def evaluate_candidate_photo(candidate, template_a, template_b, *, engine):
+    from hikbox_pictures.matcher import CandidateDecodeError as RealCandidateDecodeError
+    from hikbox_pictures.matcher import evaluate_candidate_photo as real_evaluate_candidate_photo
+
+    try:
+        return real_evaluate_candidate_photo(candidate, template_a, template_b, engine=engine)
+    except RealCandidateDecodeError as exc:
+        raise CandidateDecodeError(str(exc)) from exc
+
+
+def export_match(evaluation, *, output_root, capture_datetime):
+    from hikbox_pictures.exporter import export_match as real_export_match
+
+    return real_export_match(evaluation, output_root=output_root, capture_datetime=capture_datetime)
 
 
 ControlHandler = Callable[[argparse.Namespace], int]
@@ -66,8 +149,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.set_defaults(handler=handle_serve)
 
     p_scan = sub.add_parser("scan", help="扫描控制命令")
-    p_scan.add_argument("--workspace", type=Path, required=True)
-    p_scan.set_defaults(handler=handle_scan)
+    p_scan.add_argument("--workspace", type=Path)
+    p_scan.set_defaults(handler=handle_scan, scan_command="start_or_resume")
+    scan_sub = p_scan.add_subparsers(dest="scan_command")
+
+    p_scan_status = scan_sub.add_parser("status", help="查看扫描会话状态")
+    p_scan_status.add_argument("--workspace", type=Path, required=True)
+    p_scan_status.set_defaults(handler=handle_scan_status)
 
     p_rebuild = sub.add_parser("rebuild-artifacts", help="重建可派生产物")
     p_rebuild.add_argument("--workspace", type=Path, required=True)
@@ -211,16 +299,23 @@ def _run_legacy_matching(argv: list[str]) -> int:
             fallback_threshold=args.distance_threshold,
             override_threshold=args.distance_threshold_b,
         )
-    except (DeepFaceInitError, ReferenceImageError) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+    except Exception as exc:
+        is_init_error = isinstance(exc, DeepFaceInitError) or exc.__class__.__name__ == "DeepFaceInitError"
+        is_reference_error = isinstance(exc, ReferenceImageError) or exc.__class__.__name__ == "ReferenceImageError"
+        if is_init_error or is_reference_error:
+            print(str(exc), file=sys.stderr)
+            return 2
+        raise
 
     summary = RunSummary()
     for candidate in iter_candidate_photos(args.input):
         summary.scanned_files += 1
         try:
             evaluation = _evaluate_with_engine(candidate, person_a_template, person_b_template, engine)
-        except CandidateDecodeError as exc:
+        except Exception as exc:
+            is_decode_error = isinstance(exc, CandidateDecodeError) or exc.__class__.__name__ == "CandidateDecodeError"
+            if not is_decode_error:
+                raise
             summary.skipped_decode_errors += 1
             summary.warnings.append(str(exc))
             continue
@@ -279,7 +374,38 @@ def handle_serve(args: argparse.Namespace) -> int:
 
 
 def handle_scan(args: argparse.Namespace) -> int:
-    return _not_implemented(f"scan 未实现: workspace={args.workspace}")
+    if args.workspace is None:
+        print("scan 需要 --workspace", file=sys.stderr)
+        return 2
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        orchestrator = ScanOrchestrator(conn)
+        session_id = orchestrator.start_or_resume()
+        session = orchestrator.scan_repo.get_session(session_id)
+        if session is None:
+            print(f"scan session_id={session_id} status=unknown mode=unknown")
+            return 0
+        print(f"scan session_id={session_id} status={session['status']} mode={session['mode']}")
+        return 0
+    finally:
+        conn.close()
+
+
+def handle_scan_status(args: argparse.Namespace) -> int:
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        status = ScanOrchestrator(conn).get_status()
+        print(
+            "scan "
+            f"session_id={status['session_id']} "
+            f"status={status['status']} "
+            f"mode={status['mode']}"
+        )
+        return 0
+    finally:
+        conn.close()
 
 
 def handle_rebuild_artifacts(args: argparse.Namespace) -> int:

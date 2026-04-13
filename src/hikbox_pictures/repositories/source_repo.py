@@ -53,6 +53,17 @@ class SourceRepo:
         rows = self.conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def list_active_source_ids(self) -> list[int]:
+        rows = self.conn.execute(
+            """
+            SELECT id
+            FROM library_source
+            WHERE active = 1
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [int(row["id"]) for row in rows]
+
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM library_source").fetchone()
         return int(row["c"])

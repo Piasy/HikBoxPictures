@@ -24,6 +24,7 @@ def test_scan_status_reads_real_session(tmp_path) -> None:
         client = TestClient(create_app(workspace=ws.root))
         expected = ws.latest_resumable_session()
         assert expected is not None
+        expected_sources = ws.scan_repo.list_session_sources(int(expected["id"]))
 
         response = client.get("/api/scan/status")
 
@@ -32,6 +33,8 @@ def test_scan_status_reads_real_session(tmp_path) -> None:
         assert body["session_id"] == expected["id"]
         assert body["status"] == expected["status"]
         assert body["mode"] == expected["mode"]
+        assert len(body["sources"]) == len(expected_sources)
+        assert body["sources"][0]["status"] == expected_sources[0]["status"]
     finally:
         ws.close()
 
@@ -43,6 +46,48 @@ def test_scan_status_returns_idle_when_no_resumable_session(tmp_path) -> None:
     body = response.json()
     assert body["session_id"] is None
     assert body["status"] == "idle"
+    assert body["sources"] == []
+
+
+def test_scan_start_or_resume_prefers_latest_resumable_session(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        expected = ws.latest_resumable_session()
+        assert expected is not None
+
+        response = client.post("/api/scan/start_or_resume")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["session_id"] == expected["id"]
+        assert body["status"] == "running"
+    finally:
+        ws.close()
+
+
+def test_scan_start_or_resume_creates_session_from_idle(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        ws.conn.execute(
+            """
+            UPDATE scan_session
+            SET status = 'completed',
+                finished_at = CURRENT_TIMESTAMP
+            WHERE status IN ('pending', 'running', 'paused', 'interrupted')
+            """
+        )
+        ws.conn.commit()
+
+        client = TestClient(create_app(workspace=ws.root))
+        response = client.post("/api/scan/start_or_resume")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["session_id"] is not None
+        assert body["status"] == "running"
+        assert body["mode"] == "incremental"
+    finally:
+        ws.close()
 
 
 def test_people_reviews_export_and_logs_read_workspace_db(tmp_path) -> None:

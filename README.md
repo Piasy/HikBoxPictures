@@ -28,7 +28,7 @@ HikBox Pictures 是一个本地 macOS CLI，用于递归扫描照片目录，找
 PYTHON_BIN=python3.13 ./scripts/install.sh
 ```
 
-## 控制面命令（Task 3 骨架）
+## 控制面命令（Task 5 最小可用）
 
 先进入虚拟环境：
 
@@ -52,11 +52,22 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 
 - `GET /api/health`
 - `GET /api/scan/status`
+- `POST /api/scan/start_or_resume`
 - `GET /api/people`
 - `POST /api/people/{id}/actions/rename`
 - `GET /api/reviews`
 - `GET /api/export/templates`
 - `GET /api/logs/events`
+
+当前可用扫描控制命令：
+
+- `scan --workspace <dir>`：默认恢复最近可恢复会话（`pending/running/paused/interrupted`），若不存在则创建新的增量会话。
+- `scan status --workspace <dir>`：查看当前可恢复会话状态；若无可恢复会话则显示 `idle`。
+
+Task 5 回归记录（先失败后通过）：
+
+- 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_resume_semantics.py tests/people_gallery/test_scan_owner_reaper.py -v`
+- 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_resume_semantics.py tests/people_gallery/test_scan_owner_reaper.py tests/people_gallery/test_cli_control_plane.py::test_scan_status_command -q`
 
 Task 4 回归记录（先失败后通过）：
 

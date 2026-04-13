@@ -9,6 +9,7 @@ except ModuleNotFoundError:
 
 
 _RESUMABLE_STATUSES: tuple[str, ...] = ("pending", "running", "paused", "interrupted")
+_ACTIVE_SOURCE_STATUSES: tuple[str, ...] = ("pending", "running", "paused", "interrupted")
 
 
 class ScanRepo:
@@ -64,6 +65,42 @@ class ScanRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def latest_running_session(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, mode, status, resume_from_session_id, created_at, started_at, stopped_at, finished_at
+            FROM scan_session
+            WHERE status = 'running'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_session_running(self, session_id: int) -> None:
+        self.conn.execute(
+            """
+            UPDATE scan_session
+            SET status = 'running',
+                started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                stopped_at = NULL,
+                finished_at = NULL
+            WHERE id = ?
+            """,
+            (int(session_id),),
+        )
+
+    def mark_session_completed(self, session_id: int) -> None:
+        self.conn.execute(
+            """
+            UPDATE scan_session
+            SET status = 'completed',
+                finished_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (int(session_id),),
+        )
+
     def create_session_source(
         self,
         scan_session_id: int,
@@ -80,20 +117,159 @@ class ScanRepo:
         )
         return int(cursor.lastrowid)
 
-    def list_session_sources(self, scan_session_id: int) -> list[dict[str, Any]]:
-        rows = self.conn.execute(
+    def attach_sources(self, scan_session_id: int, source_ids: list[int]) -> None:
+        for source_id in source_ids:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO scan_session_source(scan_session_id, library_source_id, status)
+                VALUES (?, ?, 'pending')
+                """,
+                (int(scan_session_id), int(source_id)),
+            )
+
+    def mark_session_sources_running(self, scan_session_id: int) -> None:
+        self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET status = 'running',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE scan_session_id = ?
+              AND status IN (?, ?, ?, ?)
+            """,
+            (int(scan_session_id),) + _ACTIVE_SOURCE_STATUSES,
+        )
+
+    def get_session_source(self, session_source_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
             """
             SELECT id, scan_session_id, library_source_id, status, cursor_json,
                    discovered_count, metadata_done_count, faces_done_count,
                    embeddings_done_count, assignment_done_count,
                    last_checkpoint_at, created_at, updated_at
             FROM scan_session_source
-            WHERE scan_session_id = ?
-            ORDER BY id ASC
+            WHERE id = ?
+            """,
+            (int(session_source_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_session_sources(self, scan_session_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT ss.id, ss.scan_session_id, ss.library_source_id, ss.status, ss.cursor_json,
+                   discovered_count, metadata_done_count, faces_done_count,
+                   embeddings_done_count, assignment_done_count,
+                   last_checkpoint_at, ss.created_at, ss.updated_at,
+                   ls.name AS source_name, ls.root_path AS source_root_path
+            FROM scan_session_source ss
+            JOIN library_source ls ON ls.id = ss.library_source_id
+            WHERE ss.scan_session_id = ?
+            ORDER BY ss.id ASC
             """,
             (int(scan_session_id),),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def touch_source_heartbeat(self, session_source_id: int, cursor_json: str | None = None) -> None:
+        if cursor_json is None:
+            self.conn.execute(
+                """
+                UPDATE scan_session_source
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (int(session_source_id),),
+            )
+            return
+        self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET cursor_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (cursor_json, int(session_source_id)),
+        )
+
+    def insert_checkpoint(
+        self,
+        session_source_id: int,
+        phase: str,
+        cursor_json: str | None,
+        pending_asset_count: int = 0,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO scan_checkpoint(scan_session_source_id, phase, cursor_json, pending_asset_count)
+            VALUES (?, ?, ?, ?)
+            """,
+            (int(session_source_id), phase, cursor_json, int(pending_asset_count)),
+        )
+        self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET last_checkpoint_at = CURRENT_TIMESTAMP,
+                cursor_json = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (cursor_json, int(session_source_id)),
+        )
+        return int(cursor.lastrowid)
+
+    def latest_checkpoint_for_source(self, session_source_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, scan_session_source_id, phase, cursor_json, pending_asset_count, created_at
+            FROM scan_checkpoint
+            WHERE scan_session_source_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (int(session_source_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def mark_stale_running_as_interrupted(self, stale_after_seconds: int) -> int:
+        stale_ids_rows = self.conn.execute(
+            """
+            SELECT s.id
+            FROM scan_session s
+            LEFT JOIN scan_session_source ss ON ss.scan_session_id = s.id
+            WHERE s.status = 'running'
+            GROUP BY s.id
+            HAVING (julianday('now') - julianday(
+                COALESCE(MAX(ss.last_checkpoint_at), MAX(ss.updated_at), s.started_at, s.created_at)
+            )) * 86400.0 > ?
+            """,
+            (max(int(stale_after_seconds), 0),),
+        ).fetchall()
+        session_ids = [int(row["id"]) for row in stale_ids_rows]
+        if not session_ids:
+            return 0
+
+        placeholders = ", ".join("?" for _ in session_ids)
+        self.conn.execute(
+            f"""
+            UPDATE scan_session
+            SET status = 'interrupted',
+                stopped_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+              AND status = 'running'
+            """,
+            tuple(session_ids),
+        )
+        self.conn.execute(
+            f"""
+            UPDATE scan_session_source
+            SET status = 'interrupted',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE scan_session_id IN ({placeholders})
+              AND status IN ('pending', 'running', 'paused')
+            """,
+            tuple(session_ids),
+        )
+        return len(session_ids)
 
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM scan_session").fetchone()

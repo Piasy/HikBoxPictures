@@ -529,7 +529,7 @@ git commit -m "feat: add workspace-backed api query and action layers (Task 4)"
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定默认恢复语义与 owner 回收**
+- [x] **Step 1: 写失败测试，锁定默认恢复语义与 owner 回收**
 
 ```python
 from hikbox_pictures.services.scan_recovery import mark_stale_running_sessions
@@ -547,12 +547,12 @@ def test_stale_running_session_marked_interrupted(seed_workspace):
     assert status == "interrupted"
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_resume_semantics.py tests/people_gallery/test_scan_owner_reaper.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 scan 会话控制、heartbeat 与 checkpoint 语义**
+- [x] **Step 3: 实现 scan 会话控制、heartbeat 与 checkpoint 语义**
 
 ```python
 # src/hikbox_pictures/services/scan_orchestrator.py（关键片段）
@@ -578,7 +578,7 @@ def mark_stale_running_sessions(workspace: Path, stale_after_seconds: int) -> in
     return repo.mark_stale_running_as_interrupted(stale_after_seconds=stale_after_seconds)
 ```
 
-- [ ] **Step 4: 运行回归，确认 scan 控制面可恢复**
+- [x] **Step 4: 运行回归，确认 scan 控制面可恢复**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_resume_semantics.py tests/people_gallery/test_scan_owner_reaper.py tests/people_gallery/test_cli_control_plane.py::test_scan_status_command -q`
 Expected: PASS。
