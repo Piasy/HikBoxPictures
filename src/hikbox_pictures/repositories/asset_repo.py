@@ -69,6 +69,39 @@ class AssetRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_observation_with_source(self, observation_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT fo.id,
+                   fo.photo_asset_id,
+                   fo.bbox_top,
+                   fo.bbox_right,
+                   fo.bbox_bottom,
+                   fo.bbox_left,
+                   fo.crop_path,
+                   fo.active,
+                   pa.library_source_id,
+                   pa.primary_path
+            FROM face_observation AS fo
+            JOIN photo_asset AS pa
+              ON pa.id = fo.photo_asset_id
+            WHERE fo.id = ?
+            """,
+            (int(observation_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def update_observation_crop_path(self, observation_id: int, crop_path: str) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE face_observation
+            SET crop_path = ?
+            WHERE id = ?
+            """,
+            (crop_path, int(observation_id)),
+        )
+        return int(cursor.rowcount)
+
     def list_assets_for_source(self, library_source_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """

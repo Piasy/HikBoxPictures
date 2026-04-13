@@ -14,6 +14,9 @@ AssetStatus = Literal[
 
 DEFAULT_AUTO_ASSIGN_THRESHOLD = 0.25
 DEFAULT_REVIEW_THRESHOLD = 0.35
+PREVIEW_ASSET_MISSING_ERROR = "preview.asset.missing"
+PREVIEW_ASSET_DECODE_FAILED_ERROR = "preview.asset.decode_failed"
+PREVIEW_CONTEXT_REBUILD_FAILED_ERROR = "preview.context.rebuild_failed"
 
 STAGE_ORDER: tuple[AssetStage, ...] = ("metadata", "faces", "embeddings", "assignment")
 STATUS_ORDER: tuple[AssetStatus, ...] = (

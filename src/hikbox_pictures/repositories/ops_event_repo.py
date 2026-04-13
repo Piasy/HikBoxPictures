@@ -98,3 +98,14 @@ class OpsEventRepo:
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM ops_event").fetchone()
         return int(row["c"])
+
+    def count_by_event_type(self, event_type: str) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM ops_event
+            WHERE event_type = ?
+            """,
+            (event_type,),
+        ).fetchone()
+        return int(row["c"])

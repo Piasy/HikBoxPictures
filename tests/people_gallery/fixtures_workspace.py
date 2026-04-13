@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from PIL import Image
+
 try:
     import sqlite3
 except ModuleNotFoundError:
@@ -148,6 +150,52 @@ class SeedWorkspace:
             (int(person_id),),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def break_crop_for_observation(self, observation_id: int) -> None:
+        row = self.conn.execute(
+            "SELECT crop_path FROM face_observation WHERE id = ?",
+            (int(observation_id),),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"observation {observation_id} 不存在")
+        crop_path = row["crop_path"]
+        if crop_path:
+            Path(str(crop_path)).unlink(missing_ok=True)
+
+    def crop_exists(self, observation_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT crop_path FROM face_observation WHERE id = ?",
+            (int(observation_id),),
+        ).fetchone()
+        if row is None:
+            return False
+        crop_path = row["crop_path"]
+        if not crop_path:
+            return False
+        return Path(str(crop_path)).exists()
+
+    def break_original_for_photo(self, photo_id: int) -> None:
+        row = self.conn.execute(
+            "SELECT primary_path FROM photo_asset WHERE id = ?",
+            (int(photo_id),),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"photo {photo_id} 不存在")
+        Path(str(row["primary_path"])).unlink(missing_ok=True)
+
+    def inject_broken_image_for_photo(self, photo_id: int) -> None:
+        row = self.conn.execute(
+            "SELECT primary_path FROM photo_asset WHERE id = ?",
+            (int(photo_id),),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"photo {photo_id} 不存在")
+        target = Path(str(row["primary_path"]))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"not-an-image")
+
+    def count_ops_event(self, event_type: str) -> int:
+        return self.ops_event_repo.count_by_event_type(event_type)
 
 
 def build_seed_workspace(
@@ -369,9 +417,9 @@ def build_seed_workspace(
         media_dir = paths.artifacts_dir / "media-test-assets"
         media_dir.mkdir(parents=True, exist_ok=True)
         original_path = media_dir / "photo-1.jpg"
-        original_path.write_bytes(b"\xff\xd8" + (b"A" * 4096) + b"\xff\xd9")
         crop_path = media_dir / "crop-1.jpg"
-        crop_path.write_bytes(b"\xff\xd8" + (b"B" * 512) + b"\xff\xd9")
+        Image.new("RGB", (48, 48), color=(180, 120, 90)).save(original_path, format="JPEG")
+        Image.new("RGB", (16, 16), color=(90, 140, 200)).save(crop_path, format="JPEG")
 
         media_photo_id = asset_repo.add_photo_asset(
             source_a,

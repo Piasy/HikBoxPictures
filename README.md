@@ -68,6 +68,12 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /api/observations/{observation_id}/crop`
 - `GET /api/observations/{observation_id}/context`
 
+预览降级与重建行为：
+
+- 当 `/api/observations/{observation_id}/crop` 对应裁剪文件缺失时，系统会按 observation bbox 自动重建 crop，写回数据库并记录事件 `preview.context.rebuild_requested`。
+- 当原图缺失时，`/api/photos/{photo_id}/original` 返回结构化错误 `{"error_code":"preview.asset.missing","message":"..."}`，并记录事件 `preview.asset.missing`。
+- 当预览解码失败时，`/api/photos/{photo_id}/preview` 返回结构化错误 `{"error_code":"preview.asset.decode_failed","message":"..."}`，并记录事件 `preview.asset.decode_failed`。
+
 当前可用 WebUI 路由（同一进程托管，页面数据直接读取 workspace 数据库）：
 
 - `GET /`：人物库首页

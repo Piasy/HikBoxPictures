@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
-from hikbox_pictures.services.media_preview_service import MediaRangeError
+from hikbox_pictures.services.media_preview_service import MediaBusinessError, MediaRangeError
 
 router = APIRouter()
 
@@ -34,6 +34,14 @@ def get_original(photo_id: int, request: Request) -> StreamingResponse:
             detail="无效的 Range 请求",
             headers={"Content-Range": f"bytes */{exc.total_size}"},
         ) from exc
+    except MediaBusinessError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": exc.error_code,
+                "message": exc.message,
+            },
+        )
 
     return _build_stream_response(payload)
 
@@ -46,6 +54,14 @@ def get_preview(photo_id: int, request: Request) -> StreamingResponse:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MediaBusinessError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": exc.error_code,
+                "message": exc.message,
+            },
+        )
 
     return _build_stream_response(payload)
 
@@ -58,6 +74,14 @@ def get_observation_crop(observation_id: int, request: Request) -> StreamingResp
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MediaBusinessError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": exc.error_code,
+                "message": exc.message,
+            },
+        )
 
     return _build_stream_response(payload)
 
@@ -70,5 +94,13 @@ def get_observation_context(observation_id: int, request: Request) -> StreamingR
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except MediaBusinessError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error_code": exc.error_code,
+                "message": exc.message,
+            },
+        )
 
     return _build_stream_response(payload)

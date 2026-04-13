@@ -248,3 +248,20 @@ def test_people_api_matches_people_page(tmp_path) -> None:
             assert f"/people/{person['id']}" in html
     finally:
         ws.close()
+
+
+def test_media_original_missing_returns_structured_error(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_media_assets=True)
+    try:
+        assert ws.media_photo_id is not None
+        ws.break_original_for_photo(int(ws.media_photo_id))
+        client = TestClient(create_app(workspace=ws.root))
+
+        response = client.get(f"/api/photos/{ws.media_photo_id}/original")
+
+        assert response.status_code == 404
+        payload = response.json()
+        assert payload["error_code"] == "preview.asset.missing"
+        assert "message" in payload
+    finally:
+        ws.close()

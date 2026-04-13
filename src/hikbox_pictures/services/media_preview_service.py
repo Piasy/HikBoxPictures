@@ -5,9 +5,17 @@ import mimetypes
 from pathlib import Path
 from typing import Callable, Iterator
 
+from PIL import Image, UnidentifiedImageError
+
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.repositories import AssetRepo
+from hikbox_pictures.services.asset_pipeline import (
+    PREVIEW_ASSET_DECODE_FAILED_ERROR,
+    PREVIEW_ASSET_MISSING_ERROR,
+)
+from hikbox_pictures.services.observability_service import ObservabilityService
 from hikbox_pictures.services.path_guard import ensure_safe_asset_path
+from hikbox_pictures.services.preview_artifact_service import PreviewArtifactError, PreviewArtifactService
 from hikbox_pictures.services.runtime import resolve_media_allowed_roots
 
 
@@ -15,6 +23,14 @@ class MediaRangeError(Exception):
     def __init__(self, *, total_size: int, message: str = "无效的 Range 请求") -> None:
         super().__init__(message)
         self.total_size = int(total_size)
+        self.message = message
+
+
+class MediaBusinessError(Exception):
+    def __init__(self, *, status_code: int, error_code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = int(status_code)
+        self.error_code = error_code
         self.message = message
 
 
@@ -51,6 +67,7 @@ class MediaPreviewService:
         self.db_path = Path(db_path)
         self.workspace = Path(workspace)
         self.allowed_roots_resolver = allowed_roots_resolver or resolve_media_allowed_roots
+        self.preview_artifact_service = PreviewArtifactService(db_path=self.db_path, workspace=self.workspace)
 
     def read_original_stream(self, photo_id: int, range_header: str | None = None) -> MediaStreamPayload:
         conn = connect_db(self.db_path)
@@ -61,37 +78,70 @@ class MediaPreviewService:
             conn.close()
 
         if row is None:
-            raise LookupError(f"photo {photo_id} 不存在")
+            self._emit_event(
+                level="warning",
+                event_type=PREVIEW_ASSET_MISSING_ERROR,
+                message=f"photo not found: {photo_id}",
+                detail={"photo_id": int(photo_id)},
+            )
+            raise MediaBusinessError(
+                status_code=404,
+                error_code=PREVIEW_ASSET_MISSING_ERROR,
+                message="原图不存在或不可用",
+            )
+
         source_path = str(row["primary_path"])
-        return self._build_stream_payload(source_path=source_path, range_header=range_header)
+        try:
+            return self._build_stream_payload(source_path=source_path, range_header=range_header)
+        except LookupError:
+            self._emit_event(
+                level="warning",
+                event_type=PREVIEW_ASSET_MISSING_ERROR,
+                message=f"photo file missing: {photo_id}",
+                detail={"photo_id": int(photo_id), "path": source_path},
+            )
+            raise MediaBusinessError(
+                status_code=404,
+                error_code=PREVIEW_ASSET_MISSING_ERROR,
+                message="原图不存在或不可用",
+            )
 
     def read_preview_stream(self, photo_id: int) -> MediaStreamPayload:
-        conn = connect_db(self.db_path)
+        payload = self.read_original_stream(photo_id, range_header=None)
         try:
-            repo = AssetRepo(conn)
-            row = repo.get_photo_media(int(photo_id))
-        finally:
-            conn.close()
-
-        if row is None:
-            raise LookupError(f"photo {photo_id} 不存在")
-        # Task13 先走独立预览入口，后续 Task14 可切换到预览产物路径。
-        return self._build_stream_payload(source_path=str(row["primary_path"]), range_header=None)
+            with Image.open(payload.file_path) as image:
+                image.verify()
+        except (UnidentifiedImageError, OSError, ValueError) as exc:
+            self._emit_event(
+                level="warning",
+                event_type=PREVIEW_ASSET_DECODE_FAILED_ERROR,
+                message=f"preview decode failed: {photo_id}",
+                detail={
+                    "photo_id": int(photo_id),
+                    "path": str(payload.file_path),
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+            )
+            raise MediaBusinessError(
+                status_code=422,
+                error_code=PREVIEW_ASSET_DECODE_FAILED_ERROR,
+                message="预览解码失败",
+            ) from exc
+        return payload
 
     def read_observation_crop(self, observation_id: int) -> MediaStreamPayload:
-        conn = connect_db(self.db_path)
         try:
-            repo = AssetRepo(conn)
-            row = repo.get_observation_media(int(observation_id))
-        finally:
-            conn.close()
-
-        if row is None:
-            raise LookupError(f"observation {observation_id} 不存在")
-        crop_path = row.get("crop_path")
-        if crop_path is None or str(crop_path).strip() == "":
-            raise LookupError(f"observation {observation_id} 缺少 crop_path")
-        return self._build_stream_payload(source_path=str(crop_path), range_header=None)
+            crop_path = self.preview_artifact_service.ensure_crop(int(observation_id))
+        except PreviewArtifactError as exc:
+            raise MediaBusinessError(
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                message=exc.message,
+            ) from exc
+        except LookupError:
+            raise
+        return self._build_stream_payload(source_path=crop_path, range_header=None)
 
     def read_observation_context(self, observation_id: int) -> MediaStreamPayload:
         conn = connect_db(self.db_path)
@@ -175,3 +225,25 @@ class MediaPreviewService:
 
         end = min(end, total_size - 1)
         return start, end
+
+    def _emit_event(
+        self,
+        *,
+        level: str,
+        event_type: str,
+        message: str,
+        detail: dict[str, object],
+    ) -> None:
+        conn = connect_db(self.db_path)
+        try:
+            ObservabilityService(conn, workspace=self.workspace).emit_event(
+                level=level,
+                component="api",
+                event_type=event_type,
+                message=message,
+                detail=detail,
+                run_kind=None,
+                run_id=None,
+            )
+        finally:
+            conn.close()

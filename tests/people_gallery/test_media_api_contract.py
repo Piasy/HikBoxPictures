@@ -56,7 +56,7 @@ def test_media_endpoint_returns_404_when_photo_missing(tmp_path) -> None:
         ws.close()
 
 
-def test_media_crop_returns_404_when_crop_missing(tmp_path) -> None:
+def test_media_crop_auto_rebuilds_when_crop_missing(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path, seed_media_assets=True)
     try:
         assert ws.media_observation_id is not None
@@ -67,6 +67,7 @@ def test_media_crop_returns_404_when_crop_missing(tmp_path) -> None:
         ws.conn.commit()
         client = TestClient(create_app(workspace=ws.root))
         response = client.get(f"/api/observations/{ws.media_observation_id}/crop")
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("image/")
     finally:
         ws.close()

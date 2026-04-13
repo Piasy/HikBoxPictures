@@ -1437,7 +1437,7 @@ git commit -m "feat: add media preview apis with range support and path security
 - Modify: `tests/people_gallery/test_api_contract.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定 crop/context 缺失重建与错误码**
+- [x] **Step 1: 写失败测试，锁定 crop/context 缺失重建与错误码**
 
 ```python
 def test_missing_crop_is_rebuilt_on_demand(seed_workspace, client):
@@ -1461,12 +1461,12 @@ def test_decode_failed_emits_ops_event(seed_workspace, client):
     assert seed_workspace.count_ops_event("preview.asset.decode_failed") >= 1
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_preview_artifact_rebuild.py tests/people_gallery/test_preview_error_handling.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现重建服务与预览错误打点**
+- [x] **Step 3: 实现重建服务与预览错误打点**
 
 ```python
 # src/hikbox_pictures/services/preview_artifact_service.py（关键片段）
@@ -1498,7 +1498,7 @@ def read_original_stream(self, photo_id: int, range_header: str | None):
         raise PreviewNotFound(photo_id=photo_id, error_code="preview.asset.missing")
 ```
 
-- [ ] **Step 4: 运行回归，确认重建与降级行为满足 spec**
+- [x] **Step 4: 运行回归，确认重建与降级行为满足 spec**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_preview_artifact_rebuild.py tests/people_gallery/test_preview_error_handling.py tests/people_gallery/test_api_contract.py::test_logs_api_filter_event_type -q`
 Expected: PASS。
