@@ -1288,3 +1288,519 @@ git commit -m "test: add full-system e2e acceptance and finalize implementation 
 - 已补齐导出真实语义（命中统计、账本、spec_hash、stale、MOV）。
 - 已补齐可观测体系（结构化日志 + 事件索引 + prune）。
 - 已修正并行设计，移除共享文件高冲突并行波次。
+
+---
+
+## 增补任务（2026-04-13，WebUI 看图能力）
+
+> 说明：本节仅追加新任务，不修改 Task 1-12 内容。新任务用于覆盖 spec 新增的“WebUI 看图与预览（P0）”“图片读取与预览服务边界”“看图验收标准”。
+
+## 增补并行执行计划
+
+### Wave G（顺序）
+
+- 顺序执行：`Task 13 -> Task 14`
+- 原因：`Task 14` 依赖 `Task 13` 的媒体读取接口与安全边界。
+- 阻塞项：`Task 15`。
+
+### Wave H（顺序）
+
+- 顺序执行：`Task 15`
+- 原因：需要复用 `Task 13-14` 的接口和异常降级语义，并与既有 `Task 11` 页面绑定。
+- 阻塞项：`Task 16`。
+
+### Wave I（顺序）
+
+- 顺序执行：`Task 16`
+- 原因：统一做 P0 验收与性能烟测，避免在 UI 迭代过程中反复改门槛。
+
+### Task 13: 媒体预览 API 与路径安全边界
+
+**Depends on:** Task 11
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 11
+- Max added lines: 1000
+- Estimated added lines: 760
+
+**Files:**
+- Create: `src/hikbox_pictures/api/routes_media.py`
+- Create: `src/hikbox_pictures/services/media_preview_service.py`
+- Create: `src/hikbox_pictures/services/path_guard.py`
+- Modify: `src/hikbox_pictures/repositories/asset_repo.py`
+- Modify: `src/hikbox_pictures/services/runtime.py`
+- Modify: `src/hikbox_pictures/api/app.py`
+- Create: `tests/people_gallery/test_media_api_contract.py`
+- Create: `tests/people_gallery/test_media_range_request.py`
+- Create: `tests/people_gallery/test_media_path_security.py`
+- Modify: `tests/people_gallery/fixtures_workspace.py`
+- Modify: `README.md`
+
+- [ ] **Step 1: 写失败测试，锁定 4 个媒体端点与路径越界防护**
+
+```python
+def test_crop_and_context_endpoint_returns_image(seed_workspace, client):
+    crop = client.get("/api/observations/1/crop")
+    context = client.get("/api/observations/1/context")
+    assert crop.status_code == 200
+    assert context.status_code == 200
+    assert crop.headers["content-type"].startswith("image/")
+    assert context.headers["content-type"].startswith("image/")
+
+
+def test_original_endpoint_supports_range(seed_workspace, client):
+    resp = client.get("/api/photos/1/original", headers={"Range": "bytes=0-1023"})
+    assert resp.status_code == 206
+    assert "Content-Range" in resp.headers
+
+
+def test_path_traversal_is_blocked(seed_workspace):
+    from hikbox_pictures.services.path_guard import ensure_safe_asset_path
+    import pytest
+
+    with pytest.raises(PermissionError):
+        ensure_safe_asset_path(
+            candidate="/etc/passwd",
+            allowed_roots=["/tmp/workspace/sample"],
+        )
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_media_range_request.py tests/people_gallery/test_media_path_security.py -v`
+Expected: FAIL。
+
+- [ ] **Step 3: 实现媒体读取服务、Range 返回与安全校验**
+
+```python
+# src/hikbox_pictures/services/path_guard.py（关键片段）
+from pathlib import Path
+
+
+def ensure_safe_asset_path(candidate: str, allowed_roots: list[str]) -> Path:
+    resolved = Path(candidate).expanduser().resolve()
+    roots = [Path(root).expanduser().resolve() for root in allowed_roots]
+    if not any(root == resolved or root in resolved.parents for root in roots):
+        raise PermissionError(f"asset path out of allowed roots: {resolved}")
+    return resolved
+```
+
+```python
+# src/hikbox_pictures/api/routes_media.py（关键片段）
+@router.get("/api/photos/{photo_id}/original")
+def get_original(photo_id: int, request: Request):
+    result = request.app.state.media_preview_service.read_original_stream(photo_id, request.headers.get("Range"))
+    return StreamingResponse(
+        result.body_iter,
+        status_code=result.status_code,
+        media_type=result.media_type,
+        headers=result.headers,
+    )
+```
+
+- [ ] **Step 4: 运行回归，确认媒体 API 合同成立**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_media_range_request.py tests/people_gallery/test_media_path_security.py tests/people_gallery/test_api_contract.py::test_people_api_matches_people_page -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/api/routes_media.py src/hikbox_pictures/services/media_preview_service.py src/hikbox_pictures/services/path_guard.py src/hikbox_pictures/repositories/asset_repo.py src/hikbox_pictures/services/runtime.py src/hikbox_pictures/api/app.py tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_media_range_request.py tests/people_gallery/test_media_path_security.py tests/people_gallery/fixtures_workspace.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: add media preview apis with range support and path security (Task 13)"
+```
+
+### Task 14: 预览 artifact 重建与错误降级事件
+
+**Depends on:** Task 10, Task 13
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 10
+- Max added lines: 1000
+- Estimated added lines: 700
+
+**Files:**
+- Create: `src/hikbox_pictures/services/preview_artifact_service.py`
+- Modify: `src/hikbox_pictures/services/asset_pipeline.py`
+- Modify: `src/hikbox_pictures/services/media_preview_service.py`
+- Modify: `src/hikbox_pictures/services/observability_service.py`
+- Modify: `src/hikbox_pictures/repositories/ops_event_repo.py`
+- Create: `tests/people_gallery/test_preview_artifact_rebuild.py`
+- Create: `tests/people_gallery/test_preview_error_handling.py`
+- Modify: `tests/people_gallery/fixtures_workspace.py`
+- Modify: `tests/people_gallery/test_api_contract.py`
+- Modify: `README.md`
+
+- [ ] **Step 1: 写失败测试，锁定 crop/context 缺失重建与错误码**
+
+```python
+def test_missing_crop_is_rebuilt_on_demand(seed_workspace, client):
+    seed_workspace.break_crop_for_observation(1)
+    resp = client.get("/api/observations/1/crop")
+    assert resp.status_code == 200
+    assert seed_workspace.crop_exists(1)
+
+
+def test_missing_original_returns_structured_error(seed_workspace, client):
+    seed_workspace.break_original_for_photo(1)
+    resp = client.get("/api/photos/1/original")
+    assert resp.status_code == 404
+    payload = resp.json()
+    assert payload["error_code"] == "preview.asset.missing"
+
+
+def test_decode_failed_emits_ops_event(seed_workspace, client):
+    seed_workspace.inject_broken_image_for_photo(2)
+    client.get("/api/photos/2/preview")
+    assert seed_workspace.count_ops_event("preview.asset.decode_failed") >= 1
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_preview_artifact_rebuild.py tests/people_gallery/test_preview_error_handling.py -v`
+Expected: FAIL。
+
+- [ ] **Step 3: 实现重建服务与预览错误打点**
+
+```python
+# src/hikbox_pictures/services/preview_artifact_service.py（关键片段）
+class PreviewArtifactService:
+    def ensure_crop(self, observation_id: int) -> str:
+        record = self.asset_repo.get_observation(observation_id)
+        crop_path = record["crop_path"]
+        if crop_path and Path(crop_path).exists():
+            return crop_path
+        rebuilt = self.rebuild_crop_from_source(record)
+        self.asset_repo.update_observation_crop_path(observation_id, rebuilt)
+        self.observability.emit_event(
+            level="info",
+            component="api",
+            event_type="preview.context.rebuild_requested",
+            run_kind=None,
+            run_id=None,
+            message=f"rebuild crop for observation={observation_id}",
+        )
+        return rebuilt
+```
+
+```python
+# src/hikbox_pictures/services/media_preview_service.py（关键片段）
+def read_original_stream(self, photo_id: int, range_header: str | None):
+    asset = self.asset_repo.get_photo_asset(photo_id)
+    if asset is None or not Path(asset["primary_path"]).exists():
+        self.observability.emit_event(level="warning", component="api", event_type="preview.asset.missing", run_kind=None, run_id=None, message=f"photo not found: {photo_id}")
+        raise PreviewNotFound(photo_id=photo_id, error_code="preview.asset.missing")
+```
+
+- [ ] **Step 4: 运行回归，确认重建与降级行为满足 spec**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_preview_artifact_rebuild.py tests/people_gallery/test_preview_error_handling.py tests/people_gallery/test_api_contract.py::test_logs_api_filter_event_type -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/services/preview_artifact_service.py src/hikbox_pictures/services/asset_pipeline.py src/hikbox_pictures/services/media_preview_service.py src/hikbox_pictures/services/observability_service.py src/hikbox_pictures/repositories/ops_event_repo.py tests/people_gallery/test_preview_artifact_rebuild.py tests/people_gallery/test_preview_error_handling.py tests/people_gallery/fixtures_workspace.py tests/people_gallery/test_api_contract.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: add preview artifact rebuild and structured degradation events (Task 14)"
+```
+
+### Task 15: WebUI 统一预览器接入人物详情、待审核与导出预览
+
+**Depends on:** Task 11, Task 13, Task 14
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 13
+- Max added lines: 1000
+- Estimated added lines: 930
+
+**Files:**
+- Create: `src/hikbox_pictures/web/templates/components/media_viewer.html`
+- Modify: `src/hikbox_pictures/web/templates/person_detail.html`
+- Modify: `src/hikbox_pictures/web/templates/review_queue.html`
+- Modify: `src/hikbox_pictures/web/templates/export_templates.html`
+- Modify: `src/hikbox_pictures/web/templates/people.html`
+- Modify: `src/hikbox_pictures/web/static/app.js`
+- Modify: `src/hikbox_pictures/web/static/style.css`
+- Modify: `src/hikbox_pictures/api/routes_web.py`
+- Modify: `src/hikbox_pictures/services/web_query_service.py`
+- Create: `tests/people_gallery/test_webui_media_viewer.py`
+- Create: `tests/people_gallery/test_webui_export_preview_samples.py`
+- Modify: `tests/people_gallery/test_webui_content.py`
+- Modify: `README.md`
+
+- [ ] **Step 1: 写失败测试，锁定三层视图、快捷键与样例预览**
+
+```python
+def test_person_detail_contains_media_viewer(seed_workspace, client):
+    html = client.get("/people/1").text
+    assert "data-viewer-layer=\"crop\"" in html
+    assert "data-viewer-layer=\"context\"" in html
+    assert "data-viewer-layer=\"original\"" in html
+
+
+def test_review_queue_has_viewer_actions(seed_workspace, client):
+    html = client.get("/reviews").text
+    assert "data-action=\"viewer-prev\"" in html
+    assert "data-action=\"viewer-next\"" in html
+    assert "data-action=\"viewer-toggle-bbox\"" in html
+
+
+def test_export_preview_has_sample_cards(seed_workspace, client):
+    html = client.get("/exports").text
+    assert "export-preview-sample" in html
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_webui_media_viewer.py tests/people_gallery/test_webui_export_preview_samples.py tests/people_gallery/test_webui_content.py -v`
+Expected: FAIL。
+
+- [ ] **Step 3: 实现统一预览器组件与页面接入**
+
+```html
+<!-- src/hikbox_pictures/web/templates/components/media_viewer.html（关键片段） -->
+<section id="media-viewer" class="media-viewer" data-active="false">
+  <header>
+    <button data-action="viewer-prev">上一张</button>
+    <button data-action="viewer-next">下一张</button>
+    <button data-action="viewer-toggle-bbox">脸框开关</button>
+  </header>
+  <div class="viewer-layers">
+    <img data-viewer-layer="crop" alt="crop" />
+    <img data-viewer-layer="context" alt="context" />
+    <img data-viewer-layer="original" alt="original" />
+  </div>
+</section>
+```
+
+```javascript
+// src/hikbox_pictures/web/static/app.js（关键片段）
+document.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowLeft") {
+    window.hikboxViewer.prev();
+  } else if (event.key === "ArrowRight") {
+    window.hikboxViewer.next();
+  } else if (event.key.toLowerCase() === "b") {
+    window.hikboxViewer.toggleBbox();
+  }
+});
+```
+
+- [ ] **Step 4: 运行回归，确认三处页面交互语义一致**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_webui_media_viewer.py tests/people_gallery/test_webui_export_preview_samples.py tests/people_gallery/test_webui_content.py tests/people_gallery/test_web_navigation.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/web/templates/components/media_viewer.html src/hikbox_pictures/web/templates/person_detail.html src/hikbox_pictures/web/templates/review_queue.html src/hikbox_pictures/web/templates/export_templates.html src/hikbox_pictures/web/templates/people.html src/hikbox_pictures/web/static/app.js src/hikbox_pictures/web/static/style.css src/hikbox_pictures/api/routes_web.py src/hikbox_pictures/services/web_query_service.py tests/people_gallery/test_webui_media_viewer.py tests/people_gallery/test_webui_export_preview_samples.py tests/people_gallery/test_webui_content.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: integrate unified media viewer across people review and export pages (Task 15)"
+```
+
+### Task 16: WebUI 看图 P0 验收与性能烟测
+
+**Depends on:** Task 15
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 8
+- Max added lines: 1000
+- Estimated added lines: 520
+
+**Files:**
+- Create: `tests/people_gallery/test_media_viewer_acceptance.py`
+- Create: `tests/people_gallery/test_media_preview_performance_smoke.py`
+- Modify: `tests/people_gallery/test_e2e_full_system.py`
+- Modify: `tests/people_gallery/test_webui_actions_e2e.py`
+- Modify: `tests/people_gallery/fixtures_workspace.py`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定 P0 验收 10 条中的关键路径**
+
+```python
+def test_viewer_flow_person_detail_review_export(seed_workspace, client):
+    assert "data-viewer-layer=\"original\"" in client.get("/people/1").text
+    assert "data-action=\"viewer-next\"" in client.get("/reviews").text
+    assert "export-preview-sample" in client.get("/exports").text
+
+
+def test_single_image_failure_does_not_block_queue(seed_workspace, client):
+    seed_workspace.break_original_for_photo(1)
+    html = client.get("/reviews").text
+    assert "预览失败" in html
+    assert "queue-item" in html
+```
+
+- [ ] **Step 2: 写失败测试，锁定本机性能烟测门槛**
+
+```python
+def test_preview_latency_smoke(seed_workspace, client):
+    import time
+
+    start = time.perf_counter()
+    response = client.get("/api/photos/1/preview")
+    elapsed_ms = (time.perf_counter() - start) * 1000
+
+    assert response.status_code == 200
+    assert elapsed_ms <= 600
+```
+
+- [ ] **Step 3: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_viewer_acceptance.py tests/people_gallery/test_media_preview_performance_smoke.py -v`
+Expected: FAIL。
+
+- [ ] **Step 4: 补齐验收脚本、README 运维说明与计划回填**
+
+```markdown
+## WebUI 看图验收（P0）
+
+1. 人物详情支持 crop/context/original 三层查看。
+2. 待审核支持上一张/下一张、脸框开关与失败降级提示。
+3. 导出模板预览含样例照片，不仅有命中数量。
+4. 媒体 API 支持 Range 与路径越界防护。
+```
+
+- [ ] **Step 5: 运行回归并勾选 Task 13-16 完成状态**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_preview_artifact_rebuild.py tests/people_gallery/test_webui_media_viewer.py tests/people_gallery/test_media_viewer_acceptance.py tests/people_gallery/test_media_preview_performance_smoke.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add tests/people_gallery/test_media_viewer_acceptance.py tests/people_gallery/test_media_preview_performance_smoke.py tests/people_gallery/test_e2e_full_system.py tests/people_gallery/test_webui_actions_e2e.py tests/people_gallery/fixtures_workspace.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "test: add webui media viewer p0 acceptance and performance smoke coverage (Task 16)"
+```
+
+## 增补并行执行计划（补充 2）
+
+### Wave J（顺序）
+
+- 顺序执行：`Task 17`
+- 原因：该任务是独立 e2e 验证链路，依赖前置能力已就位后一次性收敛。
+- 阻塞项：无（作为增补验收任务，可在 Task 16 后执行）。
+
+### Task 17: 数字图片 + mock embedding 的全链路 e2e 集成测试
+
+**Depends on:** Task 9, Task 10, Task 15
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 7
+- Max added lines: 1000
+- Estimated added lines: 560
+
+**Files:**
+- Create: `tests/people_gallery/image_factory.py`
+- Create: `tests/people_gallery/test_e2e_mock_embedding_pipeline.py`
+- Modify: `tests/people_gallery/fixtures_workspace.py`
+- Modify: `tests/people_gallery/test_e2e_full_system.py`
+- Modify: `tests/people_gallery/test_api_contract.py`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定“无人脸源图 + mock embedding 注入 + 后续全流程”**
+
+```python
+def test_e2e_with_number_images_and_mock_embeddings(tmp_path):
+    from hikbox_pictures.cli import main
+    from tests.people_gallery.fixtures_workspace import (
+        create_number_image_dataset,
+        inject_mock_embeddings_for_assets,
+    )
+
+    workspace = tmp_path / "ws"
+    dataset = tmp_path / "digits"
+    create_number_image_dataset(dataset, names=["001.jpg", "002.jpg", "003.jpg"])
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["source", "add", "--workspace", str(workspace), "--name", "digits", "--root", str(dataset)]) == 0
+    assert main(["scan", "--workspace", str(workspace)]) == 0
+
+    inject_mock_embeddings_for_assets(
+        workspace=workspace,
+        person_specs=[
+            {"name": "人物甲", "asset_file": "001.jpg", "vector": [0.11, 0.12, 0.13, 0.14]},
+            {"name": "人物乙", "asset_file": "002.jpg", "vector": [0.21, 0.22, 0.23, 0.24]},
+        ],
+        template_name="甲乙模板",
+    )
+
+    assert main(["rebuild-artifacts", "--workspace", str(workspace)]) == 0
+    assert main(["export", "run", "--workspace", str(workspace), "--template-id", "1"]) == 0
+
+
+def test_mock_embedding_flow_visible_in_webui(seed_workspace_with_mock_embeddings, client):
+    html_people = client.get("/").text
+    html_reviews = client.get("/reviews").text
+    html_exports = client.get("/exports").text
+
+    assert "人物甲" in html_people
+    assert "人物乙" in html_people
+    assert "export-preview-sample" in html_exports
+    assert "queue-item" in html_reviews
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_e2e_mock_embedding_pipeline.py -v`
+Expected: FAIL。
+
+- [ ] **Step 3: 实现数字图片工厂与 mock embedding 注入夹具**
+
+```python
+# tests/people_gallery/image_factory.py（关键片段）
+from pathlib import Path
+from PIL import Image, ImageDraw
+
+
+def write_number_image(path: Path, text: str) -> None:
+    img = Image.new("RGB", (512, 512), color=(245, 245, 245))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((32, 32, 480, 480), outline=(30, 30, 30), width=4)
+    draw.text((180, 220), text, fill=(20, 20, 20))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(path, format="JPEG")
+```
+
+```python
+# tests/people_gallery/fixtures_workspace.py（关键片段）
+def inject_mock_embeddings_for_assets(workspace: Path, person_specs: list[dict], template_name: str) -> None:
+    conn = connect_workspace_db(workspace)
+    for spec in person_specs:
+        # 1) 根据文件名查 photo_asset
+        # 2) 写入 face_observation（mock bbox/quality/crop_path）
+        # 3) 写入 face_embedding（vector_blob 由 float32 打包）
+        # 4) 写入 person 与 person_face_assignment（manual/locked）
+        pass
+    # 写入 export_template 与 export_template_person，保证 export run 可直接执行
+    conn.commit()
+```
+
+- [ ] **Step 4: 运行回归，确认 mock 路径可覆盖后续全流程**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_e2e_mock_embedding_pipeline.py tests/people_gallery/test_media_viewer_acceptance.py tests/people_gallery/test_export_matching_and_ledger.py::test_export_preview_returns_real_only_group_counts -q`
+Expected: PASS。
+
+- [ ] **Step 5: 合并到 e2e 套件并更新文档口径**
+
+```markdown
+## E2E（Mock Embedding）说明
+
+- 集成测试允许使用“数字图片”作为输入，不依赖真实人脸检测。
+- 通过测试夹具向 `face_observation` / `face_embedding` / `person_face_assignment` 注入 mock 数据，绕过检测与 embedding 提取耗时链路。
+- 该路径用于验证“人物维护 -> 预览 -> 导出 -> 日志”后续流程稳定性，不替代真实模型链路测试。
+```
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add tests/people_gallery/image_factory.py tests/people_gallery/test_e2e_mock_embedding_pipeline.py tests/people_gallery/fixtures_workspace.py tests/people_gallery/test_e2e_full_system.py tests/people_gallery/test_api_contract.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "test: add e2e pipeline with synthetic number images and mock embeddings (Task 17)"
+```
