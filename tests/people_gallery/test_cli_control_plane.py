@@ -55,6 +55,19 @@ def test_scan_status_command(tmp_path: Path, capsys) -> None:
     assert "status=idle" in out
 
 
+def test_rebuild_artifacts_command(tmp_path: Path, capsys) -> None:
+    rc_init = main(["init", "--workspace", str(tmp_path)])
+    assert rc_init == 0
+    capsys.readouterr()
+
+    rc = main(["rebuild-artifacts", "--workspace", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ANN 与人物原型重建完成" in out
+    assert (tmp_path / ".hikbox" / "artifacts" / "ann" / "prototype_index.npz").exists()
+
+
 def test_init_does_not_import_deepface_engine(tmp_path: Path) -> None:
     sys.modules.pop("hikbox_pictures.deepface_engine", None)
 

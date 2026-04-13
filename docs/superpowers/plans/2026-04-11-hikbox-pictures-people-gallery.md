@@ -811,7 +811,7 @@ git commit -m "feat: implement person truth model and review workflow actions (T
 - Create: `tests/people_gallery/test_threshold_layers.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定 ANN 召回与多阈值语义**
+- [x] **Step 1: 写失败测试，锁定 ANN 召回与多阈值语义**
 
 ```python
 def test_ann_returns_topk_person_candidates(seed_workspace):
@@ -832,12 +832,12 @@ def test_threshold_layers_route_to_auto_or_review(seed_workspace):
     assert result_reject == "new_person_candidate"
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ann_recall.py tests/people_gallery/test_threshold_layers.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 ANN 索引与阈值分层服务，并接入 `rebuild-artifacts`**
+- [x] **Step 3: 实现 ANN 索引与阈值分层服务，并接入 `rebuild-artifacts`**
 
 ```python
 # src/hikbox_pictures/services/ann_assignment_service.py（关键片段）
@@ -860,7 +860,7 @@ def handle_rebuild_artifacts(args) -> int:
     return 0
 ```
 
-- [ ] **Step 4: 运行回归，确认 ANN 路径生效**
+- [x] **Step 4: 运行回归，确认 ANN 路径生效**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ann_recall.py tests/people_gallery/test_threshold_layers.py tests/people_gallery/test_cli_control_plane.py::test_rebuild_artifacts_command -q`
 Expected: PASS。

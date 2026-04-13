@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Literal
 
 AssetStage = Literal["metadata", "faces", "embeddings", "assignment"]
+AssignmentDecision = Literal["auto_assign", "review", "new_person_candidate"]
 AssetStatus = Literal[
     "discovered",
     "metadata_done",
@@ -10,6 +11,9 @@ AssetStatus = Literal[
     "embeddings_done",
     "assignment_done",
 ]
+
+DEFAULT_AUTO_ASSIGN_THRESHOLD = 0.25
+DEFAULT_REVIEW_THRESHOLD = 0.35
 
 STAGE_ORDER: tuple[AssetStage, ...] = ("metadata", "faces", "embeddings", "assignment")
 STATUS_ORDER: tuple[AssetStatus, ...] = (
@@ -56,3 +60,18 @@ def done_status_for_stage(stage: AssetStage) -> AssetStatus:
 def statuses_at_or_above(status: AssetStatus) -> tuple[AssetStatus, ...]:
     start = STATUS_ORDER.index(status)
     return STATUS_ORDER[start:]
+
+
+def classify_assignment_by_distance(
+    distance: float,
+    *,
+    auto_assign_threshold: float = DEFAULT_AUTO_ASSIGN_THRESHOLD,
+    review_threshold: float = DEFAULT_REVIEW_THRESHOLD,
+) -> AssignmentDecision:
+    if float(auto_assign_threshold) > float(review_threshold):
+        raise AssetPipelineError("auto_assign_threshold 不能大于 review_threshold")
+    if float(distance) <= float(auto_assign_threshold):
+        return "auto_assign"
+    if float(distance) <= float(review_threshold):
+        return "review"
+    return "new_person_candidate"

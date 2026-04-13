@@ -50,6 +50,107 @@ class PersonRepo:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_active_person_ids(self) -> list[int]:
+        rows = self.conn.execute(
+            """
+            SELECT id
+            FROM person
+            WHERE status = 'active'
+              AND ignored = 0
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def list_active_prototypes(
+        self,
+        *,
+        prototype_type: str | None = None,
+        model_key: str | None = None,
+    ) -> list[dict[str, Any]]:
+        sql = """
+            SELECT pp.id,
+                   pp.person_id,
+                   pp.prototype_type,
+                   pp.source_observation_id,
+                   pp.model_key,
+                   pp.vector_blob,
+                   pp.quality_score,
+                   pp.active,
+                   pp.updated_at
+            FROM person_prototype AS pp
+            JOIN person AS p
+              ON p.id = pp.person_id
+            WHERE pp.active = 1
+              AND p.status = 'active'
+              AND p.ignored = 0
+        """
+        params: tuple[Any, ...]
+        params_list: list[Any] = []
+        if prototype_type is not None:
+            sql += " AND pp.prototype_type = ?"
+            params_list.append(str(prototype_type))
+        if model_key is not None:
+            sql += " AND pp.model_key = ?"
+            params_list.append(str(model_key))
+        params = tuple(params_list)
+        sql += " ORDER BY pp.person_id ASC, pp.id ASC"
+        rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def deactivate_active_centroid_prototypes(self, *, person_id: int, model_key: str | None = None) -> int:
+        sql = """
+            UPDATE person_prototype
+            SET active = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE person_id = ?
+              AND prototype_type = 'centroid'
+              AND active = 1
+        """
+        params: list[Any] = [int(person_id)]
+        if model_key is not None:
+            sql += " AND model_key = ?"
+            params.append(str(model_key))
+        cursor = self.conn.execute(sql, tuple(params))
+        return int(cursor.rowcount)
+
+    def replace_centroid_prototype(
+        self,
+        *,
+        person_id: int,
+        vector_blob: bytes,
+        model_key: str = "pipeline-stub-v1",
+        quality_score: float | None = None,
+        source_observation_id: int | None = None,
+    ) -> int:
+        self.deactivate_active_centroid_prototypes(
+            person_id=int(person_id),
+            model_key=model_key,
+        )
+        cursor = self.conn.execute(
+            """
+            INSERT INTO person_prototype(
+                person_id,
+                prototype_type,
+                source_observation_id,
+                model_key,
+                vector_blob,
+                quality_score,
+                active,
+                updated_at
+            )
+            VALUES (?, 'centroid', ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+            """,
+            (
+                int(person_id),
+                int(source_observation_id) if source_observation_id is not None else None,
+                model_key,
+                vector_blob,
+                quality_score,
+            ),
+        )
+        return int(cursor.lastrowid)
+
     def mark_merged(self, source_person_id: int, target_person_id: int) -> int:
         cursor = self.conn.execute(
             """

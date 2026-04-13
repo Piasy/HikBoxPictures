@@ -423,7 +423,27 @@ def handle_scan_status(args: argparse.Namespace) -> int:
 
 
 def handle_rebuild_artifacts(args: argparse.Namespace) -> int:
-    return _not_implemented(f"rebuild-artifacts 未实现: workspace={args.workspace}")
+    from hikbox_pictures.ann import AnnIndexStore
+    from hikbox_pictures.repositories.person_repo import PersonRepo
+    from hikbox_pictures.services.prototype_service import PrototypeService
+
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        ann_store = AnnIndexStore(paths.artifacts_dir / "ann" / "prototype_index.npz")
+        prototype_service = PrototypeService(conn, PersonRepo(conn), ann_store)
+        rebuilt_count = prototype_service.rebuild_all_person_prototypes(model_key="pipeline-stub-v1")
+        indexed_count = prototype_service.rebuild_ann_index_from_active_prototypes(model_key="pipeline-stub-v1")
+        conn.commit()
+        print(f"ANN 与人物原型重建完成: prototypes={rebuilt_count} indexed={indexed_count}")
+        return 0
+    except Exception as exc:
+        conn.rollback()
+        print(f"rebuild-artifacts 失败: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
 
 
 def handle_export_run(args: argparse.Namespace) -> int:

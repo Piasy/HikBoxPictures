@@ -83,6 +83,11 @@ Task 7 回归记录（先失败后通过）：
 - 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_person_truth_actions.py tests/people_gallery/test_review_actions_contract.py -v`
 - 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_person_truth_actions.py tests/people_gallery/test_review_actions_contract.py tests/people_gallery/test_api_actions.py::test_people_rename_action_persists_to_db -q`
 
+Task 8 回归记录（先失败后通过）：
+
+- 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ann_recall.py tests/people_gallery/test_threshold_layers.py -v`
+- 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ann_recall.py tests/people_gallery/test_threshold_layers.py tests/people_gallery/test_cli_control_plane.py::test_rebuild_artifacts_command -q`
+
 Task 4 回归记录（先失败后通过）：
 
 - 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_api_contract.py tests/people_gallery/test_api_actions.py -v`
