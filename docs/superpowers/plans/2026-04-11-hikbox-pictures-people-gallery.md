@@ -215,7 +215,7 @@ git commit -m "feat: bootstrap workspace and migration framework (Task 1)"
 - Create: `tests/people_gallery/fixtures_workspace.py`
 - Create: `tests/people_gallery/test_repository_contract.py`
 
-- [ ] **Step 1: 写失败测试，锁定 repo 合同与 seed 可用性**
+- [x] **Step 1: 写失败测试，锁定 repo 合同与 seed 可用性**
 
 ```python
 from tests.people_gallery.fixtures_workspace import build_seed_workspace
@@ -239,12 +239,12 @@ def test_latest_resumable_scan_session(tmp_path):
     assert latest["status"] in {"running", "paused", "interrupted", "pending"}
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_repository_contract.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现仓储层与 seed 夹具**
+- [x] **Step 3: 实现仓储层与 seed 夹具**
 
 ```python
 # tests/people_gallery/fixtures_workspace.py（关键片段）
@@ -271,7 +271,7 @@ def latest_resumable_session(self):
     ).fetchone()
 ```
 
-- [ ] **Step 4: 运行仓储层回归**
+- [x] **Step 4: 运行仓储层回归**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_repository_contract.py -q`
 Expected: PASS。
