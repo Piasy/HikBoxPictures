@@ -994,7 +994,9 @@ git commit -m "feat: implement export matching ledger and stale delivery semanti
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定事件过滤与保留清理**
+补充说明：`test_cli_control_plane.py` 属于 logs 命令依赖性触达，本轮 `fixtures_workspace` 无必要改动。
+
+- [x] **Step 1: 写失败测试，锁定事件过滤与保留清理**
 
 ```python
 def test_logs_api_filters_by_run_kind_and_event_type(seed_workspace, client):
@@ -1008,12 +1010,12 @@ def test_logs_prune_deletes_old_rows(seed_workspace):
     assert deleted >= 1
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ops_event_filters.py tests/people_gallery/test_logs_tail_and_prune.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现结构化日志写入与 logs 命令**
+- [x] **Step 3: 实现结构化日志写入与 logs 命令**
 
 ```python
 # src/hikbox_pictures/services/observability_service.py（关键片段）
@@ -1053,7 +1055,7 @@ def handle_logs_prune(args) -> int:
     return 0
 ```
 
-- [ ] **Step 4: 运行回归，确认日志体系可用**
+- [x] **Step 4: 运行回归，确认日志体系可用**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ops_event_filters.py tests/people_gallery/test_logs_tail_and_prune.py tests/people_gallery/test_api_contract.py::test_logs_api_filter_event_type -q`
 Expected: PASS。

@@ -8,6 +8,7 @@ except ModuleNotFoundError:
     import pysqlite3 as sqlite3  # type: ignore[no-redef]
 
 from hikbox_pictures.repositories import ScanRepo, SourceRepo
+from hikbox_pictures.services.observability_service import ObservabilityService
 
 
 class ScanOrchestrator:
@@ -15,8 +16,10 @@ class ScanOrchestrator:
         self.conn = conn
         self.scan_repo = ScanRepo(conn)
         self.source_repo = SourceRepo(conn)
+        self.observability = ObservabilityService(conn)
 
     def start_or_resume(self) -> int:
+        session_id: int | None = None
         try:
             self.conn.execute("BEGIN IMMEDIATE")
 
@@ -33,6 +36,15 @@ class ScanOrchestrator:
                         session_id = int(running["id"])
                 self.scan_repo.mark_session_sources_running(session_id)
                 self.conn.execute("COMMIT")
+                self.observability.emit_event(
+                    level="info",
+                    component="scanner",
+                    event_type="scan.session.resumed",
+                    message="扫描会话已恢复",
+                    run_kind="scan",
+                    run_id=str(session_id),
+                    detail={"status": "running"},
+                )
                 return session_id
 
             try:
@@ -44,16 +56,47 @@ class ScanOrchestrator:
                 session_id = int(running["id"])
                 self.scan_repo.mark_session_sources_running(session_id)
                 self.conn.execute("COMMIT")
+                self.observability.emit_event(
+                    level="info",
+                    component="scanner",
+                    event_type="scan.session.resumed",
+                    message="扫描会话已恢复",
+                    run_kind="scan",
+                    run_id=str(session_id),
+                    detail={"status": "running"},
+                )
                 return session_id
 
             self.scan_repo.attach_sources(session_id, self.source_repo.list_active_source_ids())
             self.conn.execute("COMMIT")
+            self.observability.emit_event(
+                level="info",
+                component="scanner",
+                event_type="scan.session.started",
+                message="扫描会话已启动",
+                run_kind="scan",
+                run_id=str(session_id),
+                detail={"status": "running"},
+            )
             return session_id
-        except Exception:
+        except Exception as exc:
             try:
                 self.conn.execute("ROLLBACK")
             except Exception:
                 pass
+            self.observability.emit_event(
+                level="error",
+                component="scanner",
+                event_type="scan.session.failed",
+                message=str(exc),
+                run_kind="scan",
+                run_id=str(session_id) if session_id is not None else None,
+                detail={
+                    "status": "failed",
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+            )
             raise
 
     def write_checkpoint(
@@ -72,6 +115,22 @@ class ScanOrchestrator:
         )
         self.scan_repo.touch_source_heartbeat(session_source_id, cursor_json=cursor_json)
         self.conn.commit()
+        source_row = self.scan_repo.get_session_source(session_source_id)
+        scan_session_id = int(source_row["scan_session_id"]) if source_row is not None else None
+        self.observability.emit_event(
+            level="info",
+            component="scanner",
+            event_type="scan.session.checkpointed",
+            message="扫描检查点已写入",
+            run_kind="scan",
+            run_id=str(scan_session_id) if scan_session_id is not None else None,
+            detail={
+                "phase": phase,
+                "status": "checkpointed",
+                "pending_asset_count": pending_asset_count,
+                "scan_session_source_id": int(session_source_id),
+            },
+        )
         return checkpoint_id
 
     def get_status(self) -> dict[str, Any]:

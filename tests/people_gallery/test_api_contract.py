@@ -192,3 +192,39 @@ def test_logs_events_limit_out_of_range_returns_422(tmp_path) -> None:
         assert client.get("/api/logs/events", params={"limit": 1001}).status_code == 422
     finally:
         ws.close()
+
+
+def test_logs_api_filter_event_type(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        ws.ops_event_repo.append_event(
+            level="info",
+            component="scanner",
+            event_type="scan.session.started",
+            run_kind="scan",
+            run_id="scan-200",
+            message="scan started",
+        )
+        ws.ops_event_repo.append_event(
+            level="info",
+            component="exporter",
+            event_type="export.delivery.started",
+            run_kind="export",
+            run_id="export-200",
+            message="export started",
+        )
+        ws.conn.commit()
+
+        client = TestClient(create_app(workspace=ws.root))
+        response = client.get(
+            "/api/logs/events",
+            params={"event_type": "scan.session.started", "run_kind": "scan", "limit": 50},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["event_type"] == "scan.session.started"
+        assert body[0]["run_kind"] == "scan"
+    finally:
+        ws.close()

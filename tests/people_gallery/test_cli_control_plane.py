@@ -77,8 +77,15 @@ def test_init_does_not_import_deepface_engine(tmp_path: Path) -> None:
     assert "hikbox_pictures.deepface_engine" not in sys.modules
 
 
-def test_unimplemented_commands_return_nonzero_and_stderr(tmp_path: Path, capsys) -> None:
+def test_logs_prune_command_returns_zero_and_prints_summary(tmp_path: Path, capsys) -> None:
     rc_logs = main(["logs", "prune", "--workspace", str(tmp_path)])
+    assert rc_logs == 0
+    out_logs = capsys.readouterr().out
+    assert "logs pruned=" in out_logs
+
+
+def test_logs_prune_days_must_be_positive(tmp_path: Path, capsys) -> None:
+    rc_logs = main(["logs", "prune", "--workspace", str(tmp_path), "--days", "0"])
     assert rc_logs == 2
     err_logs = capsys.readouterr().err
-    assert "logs prune 未实现" in err_logs
+    assert "--days 必须大于 0" in err_logs

@@ -13,6 +13,7 @@ from hikbox_pictures.metadata import format_year_month, resolve_capture_datetime
 from hikbox_pictures.models import ExportBucket, ExportMatch, ExportRunResult
 from hikbox_pictures.repositories import ExportRepo
 from hikbox_pictures.services.export_match_service import ExportMatchService
+from hikbox_pictures.services.observability_service import ObservabilityService
 
 
 class ExportDeliveryService:
@@ -20,11 +21,24 @@ class ExportDeliveryService:
         self.conn = conn
         self.export_repo = ExportRepo(conn)
         self.export_match_service = ExportMatchService(conn)
+        self.observability = ObservabilityService(conn)
 
     def run_template(self, template_id: int) -> ExportRunResult:
         plan = self.export_match_service.build_template_plan(int(template_id))
         template = plan["template"]
         if not bool(template["enabled"]):
+            self.observability.emit_event(
+                level="warning",
+                component="exporter",
+                event_type="export.delivery.skipped",
+                message=f"export template {template_id} 已禁用",
+                run_kind="export",
+                run_id=f"template-{int(template_id)}",
+                detail={
+                    "template_id": int(template_id),
+                    "status": "disabled",
+                },
+            )
             raise ValueError(f"export template {template_id} 已禁用")
 
         spec_hash = str(plan["spec_hash"])
@@ -52,10 +66,38 @@ class ExportDeliveryService:
         self._begin_write_scope(use_savepoint=use_savepoint, scope_name=delivery_scope)
         try:
             run_id = self.export_repo.create_export_run(int(template["id"]), spec_hash, status="running")
-            self.export_repo.mark_other_spec_deliveries_stale(
+            self.observability.emit_event(
+                level="info",
+                component="exporter",
+                event_type="export.delivery.started",
+                message="导出任务开始",
+                run_kind="export",
+                run_id=str(run_id),
+                detail={
+                    "template_id": int(template["id"]),
+                    "matched_only_count": matched_only_count,
+                    "matched_group_count": matched_group_count,
+                    "status": "running",
+                },
+            )
+            stale_other_spec_count = self.export_repo.mark_other_spec_deliveries_stale(
                 template_id=int(template["id"]),
                 spec_hash=spec_hash,
             )
+            if stale_other_spec_count > 0:
+                self.observability.emit_event(
+                    level="info",
+                    component="exporter",
+                    event_type="export.delivery.stale_marked",
+                    message="历史 spec 导出记录已标记为 stale",
+                    run_kind="export",
+                    run_id=str(run_id),
+                    detail={
+                        "template_id": int(template["id"]),
+                        "status": "stale_marked",
+                        "stale_count": int(stale_other_spec_count),
+                    },
+                )
 
             for match in matches:
                 expected_keys.add((int(match.photo_asset_id), "primary"))
@@ -63,6 +105,7 @@ class ExportDeliveryService:
                     template_id=int(template["id"]),
                     spec_hash=spec_hash,
                     match=match,
+                    run_id=run_id,
                     asset_variant="primary",
                     source_path=match.primary_path,
                     source_fingerprint=match.primary_fingerprint,
@@ -81,6 +124,7 @@ class ExportDeliveryService:
                         template_id=int(template["id"]),
                         spec_hash=spec_hash,
                         match=match,
+                        run_id=run_id,
                         asset_variant="live_mov",
                         source_path=match.live_mov_path,
                         source_fingerprint=match.live_mov_fingerprint,
@@ -97,10 +141,26 @@ class ExportDeliveryService:
                 template_id=int(template["id"]),
                 spec_hash=spec_hash,
                 expected_keys=expected_keys,
+                run_id=str(run_id),
             )
             self._commit_write_scope(use_savepoint=use_savepoint, scope_name=delivery_scope)
-        except Exception:
+        except Exception as exc:
             self._rollback_write_scope(use_savepoint=use_savepoint, scope_name=delivery_scope)
+            self.observability.emit_event(
+                level="error",
+                component="exporter",
+                event_type="export.delivery.failed",
+                message=str(exc),
+                run_kind="export",
+                run_id=str(run_id) if run_id is not None else None,
+                detail={
+                    "template_id": int(template["id"]),
+                    "spec_hash": spec_hash,
+                    "status": "failed",
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+            )
             raise
 
         if run_id is None:
@@ -120,9 +180,41 @@ class ExportDeliveryService:
                 failed_count=failed_count,
             )
             self._commit_write_scope(use_savepoint=use_savepoint, scope_name=finalize_scope)
-        except Exception:
+        except Exception as exc:
             self._rollback_write_scope(use_savepoint=use_savepoint, scope_name=finalize_scope)
+            self.observability.emit_event(
+                level="error",
+                component="exporter",
+                event_type="export.delivery.failed",
+                message=str(exc),
+                run_kind="export",
+                run_id=str(run_id),
+                detail={
+                    "template_id": int(template["id"]),
+                    "spec_hash": spec_hash,
+                    "phase": "finalize",
+                    "status": "failed",
+                    "error_type": exc.__class__.__name__,
+                    "error_message": str(exc),
+                },
+            )
             raise
+
+        self.observability.emit_event(
+            level="error" if run_status == "failed" else "info",
+            component="exporter",
+            event_type="export.delivery.failed" if run_status == "failed" else "export.delivery.completed",
+            message="导出任务结束",
+            run_kind="export",
+            run_id=str(run_id),
+            detail={
+                "template_id": int(template["id"]),
+                "exported_count": exported_count,
+                "skipped_count": skipped_count,
+                "failed_count": failed_count,
+                "status": run_status,
+            },
+        )
 
         return ExportRunResult(
             template_id=int(template["id"]),
@@ -141,6 +233,7 @@ class ExportDeliveryService:
         template_id: int,
         spec_hash: str,
         match: ExportMatch,
+        run_id: int,
         asset_variant: str,
         source_path: Path,
         source_fingerprint: str | None,
@@ -174,6 +267,22 @@ class ExportDeliveryService:
                 source_fingerprint=source_fingerprint,
                 status="skipped",
             )
+            self.observability.emit_event(
+                level="info",
+                component="exporter",
+                event_type="export.delivery.skipped",
+                message="导出条目命中跳过条件",
+                run_kind="export",
+                run_id=str(run_id),
+                detail={
+                    "template_id": template_id,
+                    "photo_asset_id": int(match.photo_asset_id),
+                    "asset_variant": asset_variant,
+                    "target_path": str(target_path),
+                    "status": "skipped",
+                    "phase": "delivery",
+                },
+            )
             return "skipped"
 
         status = "ok"
@@ -192,6 +301,40 @@ class ExportDeliveryService:
             source_fingerprint=source_fingerprint,
             status=status,
         )
+        if status == "failed":
+            self.observability.emit_event(
+                level="error",
+                component="exporter",
+                event_type="export.delivery.failed",
+                message="导出条目写入失败",
+                run_kind="export",
+                run_id=str(run_id),
+                detail={
+                    "template_id": template_id,
+                    "photo_asset_id": int(match.photo_asset_id),
+                    "asset_variant": asset_variant,
+                    "target_path": str(target_path),
+                    "status": "failed",
+                    "phase": "delivery",
+                },
+            )
+        else:
+            self.observability.emit_event(
+                level="info",
+                component="exporter",
+                event_type="export.delivery.exported",
+                message="导出条目已写入",
+                run_kind="export",
+                run_id=str(run_id),
+                detail={
+                    "template_id": template_id,
+                    "photo_asset_id": int(match.photo_asset_id),
+                    "asset_variant": asset_variant,
+                    "target_path": str(target_path),
+                    "status": "exported",
+                    "phase": "delivery",
+                },
+            )
         return "exported" if status == "ok" else "failed"
 
     def _resolve_target_path(
@@ -264,6 +407,7 @@ class ExportDeliveryService:
         template_id: int,
         spec_hash: str,
         expected_keys: set[tuple[int, str]],
+        run_id: str,
     ) -> int:
         stale_count = 0
         rows = self.export_repo.list_deliveries_for_spec(
@@ -279,6 +423,20 @@ class ExportDeliveryService:
             stale_count += self.export_repo.mark_delivery_status(
                 delivery_id=int(row["id"]),
                 status="stale",
+            )
+            self.observability.emit_event(
+                level="info",
+                component="exporter",
+                event_type="export.delivery.stale_marked",
+                message="导出条目已标记为 stale",
+                run_kind="export",
+                run_id=run_id,
+                detail={
+                    "template_id": int(template_id),
+                    "photo_asset_id": int(row["photo_asset_id"]),
+                    "asset_variant": str(row["asset_variant"]),
+                    "status": "stale_marked",
+                },
             )
         return stale_count
 

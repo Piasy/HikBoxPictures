@@ -62,7 +62,7 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `POST /api/reviews/{id}/actions/dismiss`
 - `GET /api/export/templates`
 - `GET /api/export/templates/{template_id}/preview`
-- `GET /api/logs/events`
+- `GET /api/logs/events`（支持 `run_kind`、`event_type`、`run_id`、`level`、`limit` 过滤）
 
 当前可用扫描控制命令：
 
@@ -72,6 +72,11 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 当前可用导出控制命令：
 
 - `export run --workspace <dir> --template-id <id>`：执行指定模板，输出 `matched_only/matched_group/exported/skipped/failed` 摘要。
+
+当前可用日志控制命令：
+
+- `logs tail --workspace <dir> [--run-kind <scan|export>] [--run-id <id>] [--limit <n>]`：查看结构化 run 日志（JSON Lines）。
+- `logs prune --workspace <dir> [--days <n>]`：按天数清理 `ops_event` 历史索引记录。
 
 Task 5 回归记录（先失败后通过）：
 
@@ -97,6 +102,11 @@ Task 9 回归记录（先失败后通过）：
 
 - 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_export_matching_and_ledger.py tests/people_gallery/test_export_stale_cleanup.py tests/people_gallery/test_export_live_photo_delivery.py -v`
 - 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_export_matching_and_ledger.py tests/people_gallery/test_export_stale_cleanup.py tests/people_gallery/test_export_live_photo_delivery.py tests/people_gallery/test_api_contract.py::test_export_preview_contains_real_counts -q`
+
+Task 10 回归记录（先失败后通过）：
+
+- 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ops_event_filters.py tests/people_gallery/test_logs_tail_and_prune.py -v`
+- 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ops_event_filters.py tests/people_gallery/test_logs_tail_and_prune.py tests/people_gallery/test_api_contract.py::test_logs_api_filter_event_type -q`
 
 Task 4 回归记录（先失败后通过）：
 

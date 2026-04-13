@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Callable
@@ -9,6 +10,7 @@ from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.metadata import resolve_capture_datetime
 from hikbox_pictures.models import MatchBucket, RunSummary
 from hikbox_pictures.services.action_service import ActionService
+from hikbox_pictures.services.observability_service import ObservabilityService
 from hikbox_pictures.services.runtime import initialize_workspace
 from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
 
@@ -175,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_logs_tail.add_argument("--workspace", type=Path, required=True)
     p_logs_tail.add_argument("--run-kind")
     p_logs_tail.add_argument("--run-id")
+    p_logs_tail.add_argument("--limit", type=int, default=50)
     p_logs_tail.set_defaults(handler=handle_logs_tail)
 
     p_logs_prune = logs_sub.add_parser("prune", help="清理旧日志")
@@ -481,11 +484,44 @@ def handle_export_run(args: argparse.Namespace) -> int:
 
 
 def handle_logs_tail(args: argparse.Namespace) -> int:
-    return _not_implemented(f"logs tail 未实现: workspace={args.workspace} run_kind={args.run_kind} run_id={args.run_id}")
+    if int(args.limit) <= 0:
+        print("logs tail 的 --limit 必须大于 0", file=sys.stderr)
+        return 2
+
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        rows = ObservabilityService(conn, workspace=paths.root).tail_run_logs(
+            run_kind=args.run_kind,
+            run_id=args.run_id,
+            limit=int(args.limit),
+        )
+        for row in rows:
+            print(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+        return 0
+    except Exception as exc:
+        print(f"logs tail 失败: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
 
 
 def handle_logs_prune(args: argparse.Namespace) -> int:
-    return _not_implemented(f"logs prune 未实现: workspace={args.workspace} days={args.days}")
+    if int(args.days) <= 0:
+        print("logs prune 的 --days 必须大于 0", file=sys.stderr)
+        return 2
+
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        deleted = ObservabilityService(conn, workspace=paths.root).prune_ops_events(days=int(args.days))
+        print(f"logs pruned={deleted} days={int(args.days)}")
+        return 0
+    except Exception as exc:
+        print(f"logs prune 失败: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
 
 
 def main(argv: list[str] | None = None) -> int:
