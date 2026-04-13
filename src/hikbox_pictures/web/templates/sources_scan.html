@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>源目录与扫描</h2>
+  {% if session %}
+  <p>当前会话：#{{ session.id }} / {{ session.mode }} / {{ session.status }}</p>
+  {% else %}
+  <p>当前会话：idle</p>
+  {% endif %}
+</section>
+
+<section>
+  <h3>已注册源目录（{{ sources|length }}）</h3>
+  <ul>
+    {% for source in sources %}
+    <li>{{ source.name }} - {{ source.root_path }}</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section>
+  <h3>会话源进度（{{ session_sources|length }}）</h3>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>会话源 ID</th>
+        <th>源名称</th>
+        <th>状态</th>
+        <th>discovered</th>
+        <th>metadata_done</th>
+        <th>faces_done</th>
+        <th>embeddings_done</th>
+        <th>assignment_done</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for source in session_sources %}
+      <tr>
+        <td>{{ source.id }}</td>
+        <td>{{ source.source_name }}</td>
+        <td>{{ source.status }}</td>
+        <td>{{ source.discovered_count }}</td>
+        <td>{{ source.metadata_done_count }}</td>
+        <td>{{ source.faces_done_count }}</td>
+        <td>{{ source.embeddings_done_count }}</td>
+        <td>{{ source.assignment_done_count }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

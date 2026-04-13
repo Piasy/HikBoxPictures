@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ page_title }} - HikBox Pictures</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-page="{{ page_key }}">
+  <header class="topbar">
+    <h1 class="brand">HikBox Pictures 工作台</h1>
+    <nav class="main-nav">
+      <a href="/" data-page-link="people">人物库</a>
+      <a href="/reviews" data-page-link="reviews">待审核</a>
+      <a href="/sources" data-page-link="sources">源目录与扫描</a>
+      <a href="/exports" data-page-link="exports">导出模板</a>
+      <a href="/logs" data-page-link="logs">运行日志</a>
+    </nav>
+  </header>
+  <main class="page-content">
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

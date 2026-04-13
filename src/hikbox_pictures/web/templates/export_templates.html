@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>导出模板</h2>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>名称</th>
+        <th>输出目录</th>
+        <th>包含合照</th>
+        <th>导出 MOV</th>
+        <th>启用</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in templates %}
+      <tr>
+        <td>{{ item.id }}</td>
+        <td>{{ item.name }}</td>
+        <td>{{ item.output_root }}</td>
+        <td>{{ "是" if item.include_group else "否" }}</td>
+        <td>{{ "是" if item.export_live_mov else "否" }}</td>
+        <td>{{ "是" if item.enabled else "否" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

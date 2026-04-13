@@ -228,3 +228,23 @@ def test_logs_api_filter_event_type(tmp_path) -> None:
         assert body[0]["run_kind"] == "scan"
     finally:
         ws.close()
+
+
+def test_people_api_matches_people_page(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        people_response = client.get("/api/people")
+        page_response = client.get("/")
+
+        assert people_response.status_code == 200
+        assert page_response.status_code == 200
+
+        api_people = people_response.json()
+        html = page_response.text
+        assert html.count("person-card") == len(api_people)
+        for person in api_people:
+            assert str(person["display_name"]) in html
+            assert f"/people/{person['id']}" in html
+    finally:
+        ws.close()

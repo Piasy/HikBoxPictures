@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>人物详情</h2>
+  <article class="panel">
+    <h3>{{ person.display_name }}</h3>
+    <p>ID：{{ person.id }}</p>
+    <p>状态：{{ person.status }}</p>
+    <p>已确认：{{ "是" if person.confirmed else "否" }}</p>
+    <p>已忽略：{{ "是" if person.ignored else "否" }}</p>
+    <p>备注：{{ person.notes or "（空）" }}</p>
+  </article>
+</section>
+
+<section>
+  <h3>归属记录（{{ assignments|length }}）</h3>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Assignment ID</th>
+        <th>观测 ID</th>
+        <th>图片 ID</th>
+        <th>图片路径</th>
+        <th>来源</th>
+        <th>锁定</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for assignment in assignments %}
+      <tr>
+        <td>{{ assignment.id }}</td>
+        <td>{{ assignment.face_observation_id }}</td>
+        <td>{{ assignment.photo_asset_id }}</td>
+        <td>{{ assignment.primary_path }}</td>
+        <td>{{ assignment.assignment_source }}</td>
+        <td>{{ "是" if assignment.locked else "否" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

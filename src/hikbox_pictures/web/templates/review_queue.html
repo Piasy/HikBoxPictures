@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>待审核</h2>
+  {% for queue in queues %}
+  <article id="queue-{{ queue['review_type'] }}" class="queue-block">
+    <h3>{{ queue['title'] }}（{{ queue['items']|length }}）</h3>
+    <ul>
+      {% for item in queue['items'] %}
+      <li>
+        review #{{ item.id }}
+        类型：{{ item.review_type }}
+        优先级：{{ item.priority }}
+      </li>
+      {% endfor %}
+    </ul>
+  </article>
+  {% endfor %}
+</section>
+{% endblock %}

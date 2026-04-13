@@ -64,6 +64,25 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /api/export/templates/{template_id}/preview`
 - `GET /api/logs/events`（支持 `run_kind`、`event_type`、`run_id`、`level`、`limit` 过滤）
 
+当前可用 WebUI 路由（同一进程托管，页面数据直接读取 workspace 数据库）：
+
+- `GET /`：人物库首页
+- `GET /people/{person_id}`：人物详情维护页
+- `GET /reviews`：按类型分组的待审核队列
+- `GET /sources`：源目录与扫描进度
+- `GET /exports`：导出模板列表
+- `GET /logs`：运行日志列表
+- `GET /static/style.css`、`GET /static/app.js`：Web 静态资源
+
+WebUI 运行方式：
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspace --host 127.0.0.1 --port 7860
+```
+
+启动后访问 `http://127.0.0.1:7860/`。
+
 当前可用扫描控制命令：
 
 - `scan --workspace <dir>`：默认恢复最近可恢复会话（`pending/running/paused/interrupted`），若不存在则创建新的增量会话。

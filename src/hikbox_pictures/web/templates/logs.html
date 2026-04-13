@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<section>
+  <h2>运行日志</h2>
+  <table class="table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>时间</th>
+        <th>级别</th>
+        <th>事件类型</th>
+        <th>运行</th>
+        <th>消息</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for event in events %}
+      <tr>
+        <td>{{ event.id }}</td>
+        <td>{{ event.occurred_at }}</td>
+        <td>{{ event.level }}</td>
+        <td>{{ event.event_type }}</td>
+        <td>{{ event.run_kind or "-" }} / {{ event.run_id or "-" }}</td>
+        <td>{{ event.message or "" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

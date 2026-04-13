@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 
 from hikbox_pictures.api.routes_export import router as export_router
 from hikbox_pictures.api.routes_health import router as health_router
@@ -10,15 +12,19 @@ from hikbox_pictures.api.routes_logs import router as logs_router
 from hikbox_pictures.api.routes_people import router as people_router
 from hikbox_pictures.api.routes_reviews import router as reviews_router
 from hikbox_pictures.api.routes_scan import router as scan_router
+from hikbox_pictures.api.routes_web import router as web_router
 from hikbox_pictures.services.runtime import initialize_workspace
 
 
 def create_app(workspace: Path) -> FastAPI:
     paths = initialize_workspace(workspace)
+    web_root = Path(__file__).resolve().parent.parent / "web"
+    templates = Jinja2Templates(directory=str(web_root / "templates"))
 
     app = FastAPI(title="HikBox Pictures API")
     app.state.workspace = str(paths.root)
     app.state.db_path = str(paths.db_path)
+    app.state.templates = templates
 
     app.include_router(health_router, prefix="/api")
     app.include_router(scan_router, prefix="/api")
@@ -26,4 +32,6 @@ def create_app(workspace: Path) -> FastAPI:
     app.include_router(reviews_router, prefix="/api")
     app.include_router(export_router, prefix="/api")
     app.include_router(logs_router, prefix="/api")
+    app.include_router(web_router)
+    app.mount("/static", StaticFiles(directory=str(web_root / "static")), name="static")
     return app

@@ -29,5 +29,11 @@ dev = [
 [project.scripts]
 hikbox-pictures = "hikbox_pictures.cli:cli_entry"
 
+[tool.setuptools.package-data]
+hikbox_pictures = [
+  "web/templates/*.html",
+  "web/static/*",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

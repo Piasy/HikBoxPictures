@@ -1096,7 +1096,9 @@ git commit -m "feat: implement structured observability pipeline and log lifecyc
 - Modify: `tests/people_gallery/test_api_contract.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定页面结构、真实数据与动作闭环**
+补充说明：`web_query_service.py` 属于页面数据聚合依赖性触达，本轮 `fixtures_workspace.py` 无必要改动。
+
+- [x] **Step 1: 写失败测试，锁定页面结构、真实数据与动作闭环**
 
 ```python
 def test_people_page_has_cards_and_real_names(seed_workspace, client):
@@ -1119,12 +1121,12 @@ def test_web_action_roundtrip(seed_workspace, client):
     assert "爸爸" in client.get("/").text
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_web_navigation.py tests/people_gallery/test_webui_content.py tests/people_gallery/test_webui_actions_e2e.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 routes_web 与全量模板，接入统一导航与样式**
+- [x] **Step 3: 实现 routes_web 与全量模板，接入统一导航与样式**
 
 ```python
 # src/hikbox_pictures/api/routes_web.py（关键片段）
@@ -1170,7 +1172,7 @@ def reviews_page(request: Request):
 </body>
 ```
 
-- [ ] **Step 4: 运行回归，确认 WebUI 非占位并与 API 同步**
+- [x] **Step 4: 运行回归，确认 WebUI 非占位并与 API 同步**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_web_navigation.py tests/people_gallery/test_webui_content.py tests/people_gallery/test_webui_actions_e2e.py tests/people_gallery/test_api_contract.py::test_people_api_matches_people_page -q`
 Expected: PASS。
