@@ -71,6 +71,80 @@ class SeedWorkspace:
         self.conn.commit()
         return asset_ids
 
+    def create_assignment(
+        self,
+        *,
+        person_id: int,
+        locked: bool = False,
+        assignment_source: str = "manual",
+    ) -> int:
+        source_rows = self.source_repo.list_sources(active=True)
+        if not source_rows:
+            raise RuntimeError("缺少可用 source，无法创建 assignment 测试数据")
+        source_id = int(source_rows[0]["id"])
+        row = self.conn.execute("SELECT COUNT(*) AS c FROM photo_asset").fetchone()
+        sequence = int(row["c"]) + 1
+        asset_id = self.asset_repo.add_photo_asset(
+            source_id,
+            f"/tmp/assignment-seed-{sequence}.jpg",
+            processing_status="assignment_done",
+        )
+        observation_id = self.asset_repo.ensure_face_observation(asset_id)
+        cursor = self.conn.execute(
+            """
+            INSERT INTO person_face_assignment(
+                person_id,
+                face_observation_id,
+                assignment_source,
+                confidence,
+                locked,
+                active
+            )
+            VALUES (?, ?, ?, 1.0, ?, 1)
+            """,
+            (
+                int(person_id),
+                int(observation_id),
+                assignment_source,
+                1 if locked else 0,
+            ),
+        )
+        self.conn.commit()
+        return int(cursor.lastrowid)
+
+    def get_assignment(self, assignment_id: int) -> dict[str, object] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, person_id, face_observation_id, assignment_source, confidence, locked, active, updated_at
+            FROM person_face_assignment
+            WHERE id = ?
+            """,
+            (int(assignment_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_review_item(self, review_id: int) -> dict[str, object] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, review_type, status, resolved_at
+            FROM review_item
+            WHERE id = ?
+            """,
+            (int(review_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_person_row(self, person_id: int) -> dict[str, object] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, display_name, status, merged_into_person_id
+            FROM person
+            WHERE id = ?
+            """,
+            (int(person_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
 
 def build_seed_workspace(root: Path) -> SeedWorkspace:
     paths = ensure_workspace_layout(root)

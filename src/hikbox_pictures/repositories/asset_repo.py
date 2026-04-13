@@ -239,6 +239,104 @@ class AssetRepo:
             raise RuntimeError("face_embedding 写入失败，未找到对应记录")
         return int(row["id"])
 
+    def get_assignment(self, assignment_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, person_id, face_observation_id, assignment_source, confidence,
+                   locked, confirmed_at, active, created_at, updated_at
+            FROM person_face_assignment
+            WHERE id = ?
+            """,
+            (int(assignment_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def move_assignment(
+        self,
+        assignment_id: int,
+        *,
+        from_person_id: int,
+        to_person_id: int,
+        assignment_source: str,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person_face_assignment
+            SET person_id = ?,
+                assignment_source = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND person_id = ?
+              AND active = 1
+            """,
+            (
+                int(to_person_id),
+                assignment_source,
+                int(assignment_id),
+                int(from_person_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def move_active_assignments_for_person(
+        self,
+        *,
+        from_person_id: int,
+        to_person_id: int,
+        assignment_source: str,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person_face_assignment
+            SET person_id = ?,
+                assignment_source = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE person_id = ?
+              AND active = 1
+            """,
+            (
+                int(to_person_id),
+                assignment_source,
+                int(from_person_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def lock_assignment(self, assignment_id: int, *, person_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person_face_assignment
+            SET locked = 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND person_id = ?
+              AND active = 1
+            """,
+            (
+                int(assignment_id),
+                int(person_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def reassign_if_unlocked(self, assignment_id: int, *, candidate_person_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person_face_assignment
+            SET person_id = ?,
+                assignment_source = 'auto',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND active = 1
+              AND locked = 0
+            """,
+            (
+                int(candidate_person_id),
+                int(assignment_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM photo_asset").fetchone()
         return int(row["c"])

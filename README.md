@@ -55,7 +55,11 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `POST /api/scan/start_or_resume`
 - `GET /api/people`
 - `POST /api/people/{id}/actions/rename`
+- `POST /api/people/{id}/actions/merge`
+- `POST /api/people/{id}/actions/split`
+- `POST /api/people/{id}/actions/lock-assignment`
 - `GET /api/reviews`
+- `POST /api/reviews/{id}/actions/dismiss`
 - `GET /api/export/templates`
 - `GET /api/logs/events`
 
@@ -73,6 +77,11 @@ Task 6 回归记录（先失败后通过）：
 
 - 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_asset_stage_idempotency.py tests/people_gallery/test_scan_session_source_progress.py -v`
 - 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_asset_stage_idempotency.py tests/people_gallery/test_scan_session_source_progress.py tests/people_gallery/test_api_contract.py::test_scan_status_reports_source_progress -q`
+
+Task 7 回归记录（先失败后通过）：
+
+- 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_person_truth_actions.py tests/people_gallery/test_review_actions_contract.py -v`
+- 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_person_truth_actions.py tests/people_gallery/test_review_actions_contract.py tests/people_gallery/test_api_actions.py::test_people_rename_action_persists_to_db -q`
 
 Task 4 回归记录（先失败后通过）：
 

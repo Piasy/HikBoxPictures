@@ -707,7 +707,7 @@ git commit -m "feat: add idempotent asset stage pipeline and source progress tra
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定人物真相动作和审核处理**
+- [x] **Step 1: 写失败测试，锁定人物真相动作和审核处理**
 
 ```python
 def test_merge_people_marks_source_as_merged(seed_workspace, client):
@@ -733,12 +733,12 @@ def test_review_dismiss_sets_resolved(seed_workspace, client):
     assert row["resolved_at"] is not None
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_person_truth_actions.py tests/people_gallery/test_review_actions_contract.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 person truth 与 review workflow 服务**
+- [x] **Step 3: 实现 person truth 与 review workflow 服务**
 
 ```python
 # src/hikbox_pictures/services/person_truth_service.py（关键片段）
@@ -777,9 +777,9 @@ class ReviewWorkflowService:
         self.conn.commit()
 ```
 
-- [ ] **Step 4: 运行回归，确认人物与审核闭环成立**
+- [x] **Step 4: 运行回归，确认人物与审核闭环成立**
 
-Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_person_truth_actions.py tests/people_gallery/test_review_actions_contract.py tests/people_gallery/test_api_actions.py::test_people_rename_action_persists -q`
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_person_truth_actions.py tests/people_gallery/test_review_actions_contract.py tests/people_gallery/test_api_actions.py::test_people_rename_action_persists_to_db -q`
 Expected: PASS。
 
 **Task completion action (not a checkbox step): Commit task changes and plan progress**

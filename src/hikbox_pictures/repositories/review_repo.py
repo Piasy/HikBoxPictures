@@ -66,6 +66,31 @@ class ReviewRepo:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_item(self, review_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, review_type, payload_json, priority, status,
+                   primary_person_id, secondary_person_id, face_observation_id,
+                   created_at, resolved_at
+            FROM review_item
+            WHERE id = ?
+            """,
+            (int(review_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def dismiss_item(self, review_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE review_item
+            SET status = 'dismissed',
+                resolved_at = COALESCE(resolved_at, CURRENT_TIMESTAMP)
+            WHERE id = ?
+            """,
+            (int(review_id),),
+        )
+        return int(cursor.rowcount)
+
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM review_item").fetchone()
         return int(row["c"])

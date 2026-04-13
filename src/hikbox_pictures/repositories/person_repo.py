@@ -32,7 +32,7 @@ class PersonRepo:
     def get_person(self, person_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
-            SELECT id, display_name, status, confirmed, ignored, notes, created_at, updated_at
+            SELECT id, display_name, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
             FROM person
             WHERE id = ?
             """,
@@ -43,12 +43,26 @@ class PersonRepo:
     def list_people(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT id, display_name, status, confirmed, ignored, notes, created_at, updated_at
+            SELECT id, display_name, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
             FROM person
             ORDER BY id ASC
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def mark_merged(self, source_person_id: int, target_person_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person
+            SET status = 'merged',
+                merged_into_person_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status = 'active'
+            """,
+            (int(target_person_id), int(source_person_id)),
+        )
+        return int(cursor.rowcount)
 
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM person").fetchone()
