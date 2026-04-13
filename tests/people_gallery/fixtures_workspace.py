@@ -34,6 +34,8 @@ class SeedWorkspace:
     review_repo: ReviewRepo
     export_repo: ExportRepo
     ops_event_repo: OpsEventRepo
+    export_template_id: int
+    export_live_photo_asset_id: int | None
 
     def counts(self) -> dict[str, int]:
         tables = (
@@ -146,7 +148,7 @@ class SeedWorkspace:
         return dict(row) if row is not None else None
 
 
-def build_seed_workspace(root: Path) -> SeedWorkspace:
+def build_seed_workspace(root: Path, *, seed_export_assets: bool = False) -> SeedWorkspace:
     paths = ensure_workspace_layout(root)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
@@ -205,6 +207,155 @@ def build_seed_workspace(root: Path) -> SeedWorkspace:
     export_repo.add_template_person(template_id=template_id, person_id=person_a, position=0)
     export_repo.add_template_person(template_id=template_id, person_id=person_b, position=1)
 
+    export_live_photo_asset_id: int | None = None
+    if seed_export_assets:
+        seed_assets_dir = paths.root / "seed-assets"
+        seed_assets_dir.mkdir(parents=True, exist_ok=True)
+
+        only_primary_1 = seed_assets_dir / "IMG_ONLY_1.jpg"
+        only_primary_1.write_bytes(b"only-1")
+        only_primary_2 = seed_assets_dir / "IMG_ONLY_2.HEIC"
+        only_primary_2.write_bytes(b"only-2")
+        only_live_mov_2 = seed_assets_dir / ".IMG_ONLY_2_123456.MOV"
+        only_live_mov_2.write_bytes(b"live-2")
+        group_primary_1 = seed_assets_dir / "IMG_GROUP_1.jpg"
+        group_primary_1.write_bytes(b"group-1")
+        miss_primary_1 = seed_assets_dir / "IMG_MISS_1.jpg"
+        miss_primary_1.write_bytes(b"miss-1")
+
+        asset_only_1 = asset_repo.add_photo_asset(
+            source_a,
+            str(only_primary_1),
+            processing_status="assignment_done",
+        )
+        conn.execute(
+            """
+            UPDATE photo_asset
+            SET capture_datetime = ?,
+                capture_month = ?,
+                primary_fingerprint = ?,
+                is_heic = 0
+            WHERE id = ?
+            """,
+            ("2025-04-01T08:00:00+08:00", "2025-04", "fp-only-1", asset_only_1),
+        )
+
+        asset_only_2 = asset_repo.add_photo_asset(
+            source_a,
+            str(only_primary_2),
+            processing_status="assignment_done",
+        )
+        conn.execute(
+            """
+            UPDATE photo_asset
+            SET capture_datetime = ?,
+                capture_month = ?,
+                primary_fingerprint = ?,
+                is_heic = 1,
+                live_mov_path = ?,
+                live_mov_fingerprint = ?
+            WHERE id = ?
+            """,
+            (
+                "2025-04-02T08:00:00+08:00",
+                "2025-04",
+                "fp-only-2",
+                str(only_live_mov_2),
+                "fp-live-2",
+                asset_only_2,
+            ),
+        )
+        export_live_photo_asset_id = asset_only_2
+
+        asset_group_1 = asset_repo.add_photo_asset(
+            source_a,
+            str(group_primary_1),
+            processing_status="assignment_done",
+        )
+        conn.execute(
+            """
+            UPDATE photo_asset
+            SET capture_datetime = ?,
+                capture_month = ?,
+                primary_fingerprint = ?,
+                is_heic = 0
+            WHERE id = ?
+            """,
+            ("2025-04-03T08:00:00+08:00", "2025-04", "fp-group-1", asset_group_1),
+        )
+
+        asset_miss_1 = asset_repo.add_photo_asset(
+            source_a,
+            str(miss_primary_1),
+            processing_status="assignment_done",
+        )
+        conn.execute(
+            """
+            UPDATE photo_asset
+            SET capture_datetime = ?,
+                capture_month = ?,
+                primary_fingerprint = ?,
+                is_heic = 0
+            WHERE id = ?
+            """,
+            ("2025-04-04T08:00:00+08:00", "2025-04", "fp-miss-1", asset_miss_1),
+        )
+
+        def _insert_face_observation(photo_asset_id: int, face_area_ratio: float | None) -> int:
+            cursor = conn.execute(
+                """
+                INSERT INTO face_observation(
+                    photo_asset_id,
+                    bbox_top,
+                    bbox_right,
+                    bbox_bottom,
+                    bbox_left,
+                    face_area_ratio,
+                    active
+                )
+                VALUES (?, 0.0, 1.0, 1.0, 0.0, ?, 1)
+                """,
+                (int(photo_asset_id), face_area_ratio),
+            )
+            return int(cursor.lastrowid)
+
+        def _assign(face_observation_id: int, person_id: int) -> None:
+            conn.execute(
+                """
+                INSERT INTO person_face_assignment(
+                    person_id,
+                    face_observation_id,
+                    assignment_source,
+                    confidence,
+                    locked,
+                    active
+                )
+                VALUES (?, ?, 'manual', 1.0, 0, 1)
+                """,
+                (int(person_id), int(face_observation_id)),
+            )
+
+        obs_only_1_a = _insert_face_observation(asset_only_1, 0.24)
+        obs_only_1_b = _insert_face_observation(asset_only_1, 0.20)
+        _assign(obs_only_1_a, person_a)
+        _assign(obs_only_1_b, person_b)
+
+        obs_only_2_a = _insert_face_observation(asset_only_2, 0.22)
+        obs_only_2_b = _insert_face_observation(asset_only_2, 0.18)
+        _assign(obs_only_2_a, person_a)
+        _assign(obs_only_2_b, person_b)
+        _insert_face_observation(asset_only_2, 0.03)
+
+        obs_group_1_a = _insert_face_observation(asset_group_1, 0.23)
+        obs_group_1_b = _insert_face_observation(asset_group_1, 0.21)
+        obs_group_1_c = _insert_face_observation(asset_group_1, 0.08)
+        _assign(obs_group_1_a, person_a)
+        _assign(obs_group_1_b, person_b)
+        _assign(obs_group_1_c, person_c)
+
+        obs_miss_1_a = _insert_face_observation(asset_miss_1, 0.25)
+        _assign(obs_miss_1_a, person_a)
+
     ops_event_repo.append_event(
         level="info",
         component="seed",
@@ -227,4 +378,6 @@ def build_seed_workspace(root: Path) -> SeedWorkspace:
         review_repo=review_repo,
         export_repo=export_repo,
         ops_event_repo=ops_event_repo,
+        export_template_id=template_id,
+        export_live_photo_asset_id=export_live_photo_asset_id,
     )

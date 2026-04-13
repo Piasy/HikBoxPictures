@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import asdict
 
 try:
     import sqlite3
@@ -8,6 +9,8 @@ except ModuleNotFoundError:
     import pysqlite3 as sqlite3  # type: ignore[no-redef]
 
 from hikbox_pictures.repositories import PersonRepo
+from hikbox_pictures.services.export_delivery_service import ExportDeliveryService
+from hikbox_pictures.services.export_match_service import ExportMatchService
 from hikbox_pictures.services.person_truth_service import PersonTruthService
 from hikbox_pictures.services.review_workflow_service import ReviewWorkflowService
 
@@ -18,6 +21,8 @@ class ActionService:
         self.person_repo = PersonRepo(conn)
         self.person_truth_service = PersonTruthService(conn)
         self.review_workflow_service = ReviewWorkflowService(conn)
+        self.export_match_service = ExportMatchService(conn)
+        self.export_delivery_service = ExportDeliveryService(conn)
 
     def rename_person(self, person_id: int, display_name: str) -> dict[str, Any]:
         clean_name = display_name.strip()
@@ -85,3 +90,9 @@ class ActionService:
             "status": row["status"],
             "resolved_at": row["resolved_at"],
         }
+
+    def preview_export_template(self, template_id: int) -> dict[str, Any]:
+        return asdict(self.export_match_service.preview_template(int(template_id)))
+
+    def run_export_template(self, template_id: int) -> dict[str, Any]:
+        return asdict(self.export_delivery_service.run_template(int(template_id)))

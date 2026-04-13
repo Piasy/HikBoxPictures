@@ -8,6 +8,7 @@ from typing import Callable
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.metadata import resolve_capture_datetime
 from hikbox_pictures.models import MatchBucket, RunSummary
+from hikbox_pictures.services.action_service import ActionService
 from hikbox_pictures.services.runtime import initialize_workspace
 from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
 
@@ -165,7 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     export_sub = p_export.add_subparsers(dest="export_command", required=True)
     p_export_run = export_sub.add_parser("run", help="执行导出模板")
     p_export_run.add_argument("--workspace", type=Path, required=True)
-    p_export_run.add_argument("--template-id", type=int)
+    p_export_run.add_argument("--template-id", type=int, required=True)
     p_export_run.set_defaults(handler=handle_export_run)
 
     p_logs = sub.add_parser("logs", help="日志控制命令")
@@ -447,7 +448,36 @@ def handle_rebuild_artifacts(args: argparse.Namespace) -> int:
 
 
 def handle_export_run(args: argparse.Namespace) -> int:
-    return _not_implemented(f"export run 未实现: workspace={args.workspace} template_id={args.template_id}")
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        result = ActionService(conn).run_export_template(template_id=int(args.template_id))
+        print(
+            "export "
+            f"template_id={result['template_id']} "
+            f"run_id={result['run_id']} "
+            f"spec_hash={result['spec_hash']}"
+        )
+        print(
+            "summary "
+            f"matched_only={result['matched_only_count']} "
+            f"matched_group={result['matched_group_count']} "
+            f"exported={result['exported_count']} "
+            f"skipped={result['skipped_count']} "
+            f"failed={result['failed_count']}"
+        )
+        return 1 if int(result["failed_count"]) > 0 else 0
+    except LookupError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"export run 失败: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        conn.close()
 
 
 def handle_logs_tail(args: argparse.Namespace) -> int:

@@ -18,6 +18,11 @@ class MatchBucket(str, Enum):
     GROUP = "group"
 
 
+class ExportBucket(str, Enum):
+    ONLY = "only"
+    GROUP = "group"
+
+
 @dataclass(frozen=True)
 class CandidatePhoto:
     path: Path
@@ -85,6 +90,37 @@ class PhotoEvaluation:
     bucket: MatchBucket | None
     joint_distance: float | None = None
     best_match_pair: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class ExportMatch:
+    photo_asset_id: int
+    bucket: ExportBucket
+    primary_path: Path
+    primary_fingerprint: str | None
+    live_mov_path: Path | None = None
+    live_mov_fingerprint: str | None = None
+    capture_month: str | None = None
+
+
+@dataclass(frozen=True)
+class ExportPreview:
+    template_id: int
+    spec_hash: str
+    matched_only_count: int
+    matched_group_count: int
+
+
+@dataclass(frozen=True)
+class ExportRunResult:
+    template_id: int
+    run_id: int
+    spec_hash: str
+    matched_only_count: int
+    matched_group_count: int
+    exported_count: int
+    skipped_count: int
+    failed_count: int
 
 
 @dataclass

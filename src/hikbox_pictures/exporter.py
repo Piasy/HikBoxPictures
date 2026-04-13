@@ -35,6 +35,30 @@ def build_destination_path(source_path: Path, *, output_root: Path, bucket: Matc
         index += 1
 
 
+def build_delivery_destination_path(source_path: Path, *, output_root: Path, bucket: str, year_month: str) -> Path:
+    if bucket not in {"only", "group"}:
+        raise ValueError(f"不支持的导出桶: {bucket}")
+
+    target_dir = output_root / bucket / year_month
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    preferred = target_dir / source_path.name
+    if not preferred.exists():
+        return preferred
+
+    suffix = _collision_suffix(source_path)
+    candidate = target_dir / f"{source_path.stem}__{suffix}{source_path.suffix}"
+    if not candidate.exists():
+        return candidate
+
+    index = 1
+    while True:
+        retry = target_dir / f"{source_path.stem}__{suffix}_{index}{source_path.suffix}"
+        if not retry.exists():
+            return retry
+        index += 1
+
+
 def set_creation_time(source_path: Path, destination_path: Path) -> None:
     birthtime = read_birthtime_datetime(source_path)
     if birthtime is None:

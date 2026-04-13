@@ -97,6 +97,7 @@ def test_scan_status_reports_source_progress(tmp_path) -> None:
         session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
+        baseline_assets = ws.asset_repo.count_assets_for_source(source_id)
         ws.seed_source_assets(source_id, ["/tmp/a.jpg", "/tmp/b.jpg"])
 
         runner = AssetStageRunner(ws.conn)
@@ -112,17 +113,18 @@ def test_scan_status_reports_source_progress(tmp_path) -> None:
         source_rows = [row for row in body["sources"] if row["id"] == session_source_id]
         assert len(source_rows) == 1
         source = source_rows[0]
-        assert source["discovered_count"] == 2
-        assert source["metadata_done_count"] == 2
-        assert source["faces_done_count"] == 2
-        assert source["embeddings_done_count"] == 2
-        assert source["assignment_done_count"] == 0
+        expected = baseline_assets + 2
+        assert source["discovered_count"] == expected
+        assert source["metadata_done_count"] == expected
+        assert source["faces_done_count"] == expected
+        assert source["embeddings_done_count"] == expected
+        assert source["assignment_done_count"] == baseline_assets
         assert source["progress"] == {
-            "discovered": 2,
-            "metadata_done": 2,
-            "faces_done": 2,
-            "embeddings_done": 2,
-            "assignment_done": 0,
+            "discovered": expected,
+            "metadata_done": expected,
+            "faces_done": expected,
+            "embeddings_done": expected,
+            "assignment_done": baseline_assets,
         }
     finally:
         ws.close()
@@ -162,6 +164,21 @@ def test_people_reviews_export_and_logs_read_workspace_db(tmp_path) -> None:
         events = logs_resp.json()
         assert len(events) == ws.ops_event_repo.count()
         assert events[0]["event_type"] == "seed_ready"
+    finally:
+        ws.close()
+
+
+def test_export_preview_contains_real_counts(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        response = client.get(f"/api/export/templates/{ws.export_template_id}/preview")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["template_id"] == ws.export_template_id
+        assert body["matched_only_count"] == 2
+        assert body["matched_group_count"] == 1
     finally:
         ws.close()
 

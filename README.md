@@ -61,12 +61,17 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /api/reviews`
 - `POST /api/reviews/{id}/actions/dismiss`
 - `GET /api/export/templates`
+- `GET /api/export/templates/{template_id}/preview`
 - `GET /api/logs/events`
 
 当前可用扫描控制命令：
 
 - `scan --workspace <dir>`：默认恢复最近可恢复会话（`pending/running/paused/interrupted`），若不存在则创建新的增量会话。
 - `scan status --workspace <dir>`：查看当前可恢复会话状态；若无可恢复会话则显示 `idle`。
+
+当前可用导出控制命令：
+
+- `export run --workspace <dir> --template-id <id>`：执行指定模板，输出 `matched_only/matched_group/exported/skipped/failed` 摘要。
 
 Task 5 回归记录（先失败后通过）：
 
@@ -87,6 +92,11 @@ Task 8 回归记录（先失败后通过）：
 
 - 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ann_recall.py tests/people_gallery/test_threshold_layers.py -v`
 - 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_ann_recall.py tests/people_gallery/test_threshold_layers.py tests/people_gallery/test_cli_control_plane.py::test_rebuild_artifacts_command -q`
+
+Task 9 回归记录（先失败后通过）：
+
+- 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_export_matching_and_ledger.py tests/people_gallery/test_export_stale_cleanup.py tests/people_gallery/test_export_live_photo_delivery.py -v`
+- 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_export_matching_and_ledger.py tests/people_gallery/test_export_stale_cleanup.py tests/people_gallery/test_export_live_photo_delivery.py tests/people_gallery/test_api_contract.py::test_export_preview_contains_real_counts -q`
 
 Task 4 回归记录（先失败后通过）：
 
