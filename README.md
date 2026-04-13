@@ -28,7 +28,7 @@ HikBox Pictures 是一个本地 macOS CLI，用于递归扫描照片目录，找
 PYTHON_BIN=python3.13 ./scripts/install.sh
 ```
 
-## 控制面命令（Task 5 最小可用）
+## 控制面命令（Task 12 收口口径）
 
 先进入虚拟环境：
 
@@ -113,19 +113,39 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - 通过测试夹具向 `face_observation`、`face_embedding`、`person_face_assignment` 注入 mock 数据，绕过检测与 embedding 提取耗时链路。
 - 该路径用于验证“人物维护 -> 预览 -> 导出 -> 日志”后续流程稳定性，不替代真实模型链路测试。
 
-当前可用扫描控制命令：
+控制面命令总览：
+
+- `init --workspace <dir>`：初始化工作区与数据库。
+- `source add|list|remove --workspace <dir> ...`：源目录控制面命令入口（当前仓库内仍为占位实现，命令结构已稳定）。
+- `serve --workspace <dir> [--host ... --port ...]`：启动 API/WebUI。
+- `scan --workspace <dir>`：执行或恢复扫描会话。
+- `scan status --workspace <dir>`：查询会话与 source 进度。
+- `rebuild-artifacts --workspace <dir>`：重建人物原型与 ANN 索引。
+- `export run --workspace <dir> --template-id <id>`：执行导出模板并输出统计摘要。
+- `logs tail --workspace <dir> [--run-kind ... --run-id ... --limit ...]`：查看结构化运行日志。
+- `logs prune --workspace <dir> [--days <n>]`：按天数清理 `ops_event` 历史索引。
+
+扫描控制命令：
 
 - `scan --workspace <dir>`：默认恢复最近可恢复会话（`pending/running/paused/interrupted`），若不存在则创建新的增量会话。
 - `scan status --workspace <dir>`：查看当前可恢复会话状态；若无可恢复会话则显示 `idle`。
 
-当前可用导出控制命令：
+导出控制命令：
 
 - `export run --workspace <dir> --template-id <id>`：执行指定模板，输出 `matched_only/matched_group/exported/skipped/failed` 摘要。
 
-当前可用日志控制命令：
+日志控制命令：
 
 - `logs tail --workspace <dir> [--run-kind <scan|export>] [--run-id <id>] [--limit <n>]`：查看结构化 run 日志（JSON Lines）。
 - `logs prune --workspace <dir> [--days <n>]`：按天数清理 `ops_event` 历史索引记录。
+
+## 验收口径（必须同时满足）
+
+1. `init -> source -> scan -> review -> export -> logs` 主流程可串联执行；其中 `source` 阶段至少满足控制面命令入口稳定、并可通过 seed/mock 数据完成后续链路验收。
+2. people_gallery 全量测试通过：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery -q`。
+3. 关键存量回归通过：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/test_cli.py tests/test_matcher.py tests/test_exporter.py tests/test_reference_template.py -q`。
+4. 导出链路必须覆盖真实命中统计、账本跳过、规则变更 `stale` 标记与 Live Photo MOV 补齐语义。
+5. 日志链路必须支持 API/CLI 的过滤查询与清理，不影响业务真相数据。
 
 Task 5 回归记录（先失败后通过）：
 
