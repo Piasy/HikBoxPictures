@@ -31,3 +31,19 @@ def test_web_people_page_reflects_api_rename_action(tmp_path) -> None:
         assert "爸爸" in html
     finally:
         ws.close()
+
+
+def test_web_viewer_actions_visible_in_people_reviews_exports(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        pages = ("/people/1", "/reviews", "/exports")
+        for path in pages:
+            response = client.get(path)
+            assert response.status_code == 200
+            html = response.text
+            assert 'data-action="viewer-prev"' in html
+            assert 'data-action="viewer-next"' in html
+            assert 'data-action="viewer-toggle-bbox"' in html
+    finally:
+        ws.close()

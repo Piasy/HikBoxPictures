@@ -99,6 +99,14 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `ArrowRight`：下一张
 - `b` / `B`：切换脸框显示
 
+## WebUI 看图验收（P0）
+
+- 人物详情页需可见三层图层（`crop/context/original`）与预览器动作按钮（上一张、下一张、脸框开关）。
+- 待审核页需可见同一套预览器动作语义；即使某一张图预览失败，也不能阻塞队列页面与待审核条目展示。
+- 导出模板页需展示 `export-preview-sample` 样例卡片，不能只展示命中计数。
+- 媒体 API 需满足边界约束：原图接口支持 `Range`，并具备路径越界防护与结构化错误码。
+- 预览接口性能烟测门槛为 600ms（本地测试以 `tests/people_gallery/test_media_preview_performance_smoke.py` 为准）。
+
 当前可用扫描控制命令：
 
 - `scan --workspace <dir>`：默认恢复最近可恢复会话（`pending/running/paused/interrupted`），若不存在则创建新的增量会话。

@@ -423,7 +423,7 @@ git commit -m "feat: add control-plane cli and api bootstrap skeleton (Task 3)"
 - Modify: `src/hikbox_pictures/api/app.py`
 - Create: `tests/people_gallery/test_api_contract.py`
 - Create: `tests/people_gallery/test_api_actions.py`
-- Modify: `tests/people_gallery/fixtures_workspace.py`
+- Modify（如需）: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 
 - [x] **Step 1: 写失败测试，锁定真实读库和动作回写**
@@ -1618,13 +1618,13 @@ git commit -m "feat: integrate unified media viewer across people review and exp
 **Files:**
 - Create: `tests/people_gallery/test_media_viewer_acceptance.py`
 - Create: `tests/people_gallery/test_media_preview_performance_smoke.py`
-- Modify: `tests/people_gallery/test_e2e_full_system.py`
+- Create（若已存在则 Modify）: `tests/people_gallery/test_e2e_full_system.py`
 - Modify: `tests/people_gallery/test_webui_actions_e2e.py`
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 - Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
 
-- [ ] **Step 1: 写失败测试，锁定 P0 验收 10 条中的关键路径**
+- [x] **Step 1: 写失败测试，锁定 P0 验收 10 条中的关键路径**
 
 ```python
 def test_viewer_flow_person_detail_review_export(seed_workspace, client):
@@ -1640,7 +1640,7 @@ def test_single_image_failure_does_not_block_queue(seed_workspace, client):
     assert "queue-item" in html
 ```
 
-- [ ] **Step 2: 写失败测试，锁定本机性能烟测门槛**
+- [x] **Step 2: 写失败测试，锁定本机性能烟测门槛**
 
 ```python
 def test_preview_latency_smoke(seed_workspace, client):
@@ -1654,12 +1654,12 @@ def test_preview_latency_smoke(seed_workspace, client):
     assert elapsed_ms <= 600
 ```
 
-- [ ] **Step 3: 运行测试，确认失败**
+- [x] **Step 3: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_viewer_acceptance.py tests/people_gallery/test_media_preview_performance_smoke.py -v`
 Expected: FAIL。
 
-- [ ] **Step 4: 补齐验收脚本、README 运维说明与计划回填**
+- [x] **Step 4: 补齐验收脚本、README 运维说明与计划回填**
 
 ```markdown
 ## WebUI 看图验收（P0）
@@ -1670,7 +1670,7 @@ Expected: FAIL。
 4. 媒体 API 支持 Range 与路径越界防护。
 ```
 
-- [ ] **Step 5: 运行回归并勾选 Task 13-16 完成状态**
+- [x] **Step 5: 运行回归并勾选 Task 13-16 完成状态**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_preview_artifact_rebuild.py tests/people_gallery/test_webui_media_viewer.py tests/people_gallery/test_media_viewer_acceptance.py tests/people_gallery/test_media_preview_performance_smoke.py -q`
 Expected: PASS。
