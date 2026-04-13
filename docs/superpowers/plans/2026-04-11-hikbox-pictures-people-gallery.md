@@ -97,7 +97,7 @@
 - Create: `src/hikbox_pictures/db/migrations/0001_people_gallery.sql`
 - Create: `tests/people_gallery/test_workspace_bootstrap.py`
 
-- [ ] **Step 1: 先写失败测试，锁定工作区布局与全量核心表**
+- [x] **Step 1: 先写失败测试，锁定工作区布局与全量核心表**
 
 ```python
 from pathlib import Path
@@ -130,12 +130,12 @@ def test_workspace_layout_and_tables(tmp_path: Path) -> None:
     assert required <= table_names
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_workspace_bootstrap.py -v`
 Expected: FAIL（模块或表不存在）。
 
-- [ ] **Step 3: 落地 workspace/migration 与依赖声明**
+- [x] **Step 3: 落地 workspace/migration 与依赖声明**
 
 ```toml
 # pyproject.toml（新增依赖）
@@ -181,7 +181,7 @@ def ensure_workspace_layout(root: Path) -> WorkspacePaths:
     return WorkspacePaths(root=root, db_path=db_path, artifacts_dir=artifacts, logs_dir=logs, exports_dir=exports)
 ```
 
-- [ ] **Step 4: 运行回归，确认迁移幂等与表结构可用**
+- [x] **Step 4: 运行回归，确认迁移幂等与表结构可用**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_workspace_bootstrap.py -q`
 Expected: PASS。
