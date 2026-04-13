@@ -22,10 +22,14 @@ def find_live_photo_video(image_path: Path) -> Path | None:
     return matches[0] if matches else None
 
 
+def is_supported_photo_path(path: Path) -> bool:
+    return path.suffix.lower() in SUPPORTED_EXTENSIONS
+
+
 def iter_candidate_photos(input_root: Path) -> Iterator[CandidatePhoto]:
     for path in sorted(input_root.rglob("*")):
         if not path.is_file():
             continue
-        if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+        if not is_supported_photo_path(path):
             continue
         yield CandidatePhoto(path=path, live_photo_video=find_live_photo_video(path))

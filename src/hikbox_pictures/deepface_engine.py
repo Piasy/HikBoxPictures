@@ -177,3 +177,8 @@ class DeepFaceEngine:
 
     def is_match(self, distance: float) -> bool:
         return distance <= self.distance_threshold
+
+
+def embedding_to_blob(embedding: EmbeddingLike) -> bytes:
+    vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    return vector.tobytes()

@@ -69,6 +69,11 @@ Task 5 回归记录（先失败后通过）：
 - 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_resume_semantics.py tests/people_gallery/test_scan_owner_reaper.py -v`
 - 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_resume_semantics.py tests/people_gallery/test_scan_owner_reaper.py tests/people_gallery/test_cli_control_plane.py::test_scan_status_command -q`
 
+Task 6 回归记录（先失败后通过）：
+
+- 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_asset_stage_idempotency.py tests/people_gallery/test_scan_session_source_progress.py -v`
+- 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_asset_stage_idempotency.py tests/people_gallery/test_scan_session_source_progress.py tests/people_gallery/test_api_contract.py::test_scan_status_reports_source_progress -q`
+
 Task 4 回归记录（先失败后通过）：
 
 - 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_api_contract.py tests/people_gallery/test_api_actions.py -v`

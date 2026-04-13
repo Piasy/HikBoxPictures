@@ -39,6 +39,206 @@ class AssetRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def list_assets_for_source(self, library_source_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT id, library_source_id, primary_path, processing_status,
+                   capture_datetime, capture_month, created_at, updated_at
+            FROM photo_asset
+            WHERE library_source_id = ?
+            ORDER BY id ASC
+            """,
+            (int(library_source_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_assets_for_source_with_status(self, library_source_id: int, processing_status: str) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT id, library_source_id, primary_path, processing_status,
+                   capture_datetime, capture_month, created_at, updated_at
+            FROM photo_asset
+            WHERE library_source_id = ?
+              AND processing_status = ?
+            ORDER BY id ASC
+            """,
+            (int(library_source_id), processing_status),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_metadata_done_if_current(
+        self,
+        asset_id: int,
+        *,
+        expected_status: str = "discovered",
+        capture_datetime: str | None,
+        capture_month: str | None,
+        last_processed_session_id: int | None,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE photo_asset
+            SET capture_datetime = ?,
+                capture_month = ?,
+                processing_status = 'metadata_done',
+                last_processed_session_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND processing_status = ?
+            """,
+            (
+                capture_datetime,
+                capture_month,
+                last_processed_session_id,
+                int(asset_id),
+                expected_status,
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def mark_stage_done_if_current(
+        self,
+        asset_id: int,
+        *,
+        from_status: str,
+        to_status: str,
+        last_processed_session_id: int | None,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE photo_asset
+            SET processing_status = ?,
+                last_processed_session_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND processing_status = ?
+            """,
+            (
+                to_status,
+                last_processed_session_id,
+                int(asset_id),
+                from_status,
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def count_assets_for_source(self, library_source_id: int) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM photo_asset
+            WHERE library_source_id = ?
+            """,
+            (int(library_source_id),),
+        ).fetchone()
+        return int(row["c"])
+
+    def count_assets_for_source_with_statuses(self, library_source_id: int, statuses: tuple[str, ...]) -> int:
+        if not statuses:
+            return 0
+        placeholders = ", ".join("?" for _ in statuses)
+        params: tuple[Any, ...] = (int(library_source_id),) + tuple(statuses)
+        row = self.conn.execute(
+            f"""
+            SELECT COUNT(*) AS c
+            FROM photo_asset
+            WHERE library_source_id = ?
+              AND processing_status IN ({placeholders})
+            """,
+            params,
+        ).fetchone()
+        return int(row["c"])
+
+    def list_active_face_observation_ids(self, asset_id: int) -> list[int]:
+        rows = self.conn.execute(
+            """
+            SELECT id
+            FROM face_observation
+            WHERE photo_asset_id = ?
+              AND active = 1
+            ORDER BY id ASC
+            """,
+            (int(asset_id),),
+        ).fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def ensure_face_observation(
+        self,
+        asset_id: int,
+        *,
+        bbox_top: float = 0.0,
+        bbox_right: float = 1.0,
+        bbox_bottom: float = 1.0,
+        bbox_left: float = 0.0,
+    ) -> int:
+        row = self.conn.execute(
+            """
+            SELECT id
+            FROM face_observation
+            WHERE photo_asset_id = ?
+              AND active = 1
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (int(asset_id),),
+        ).fetchone()
+        if row is not None:
+            return int(row["id"])
+
+        cursor = self.conn.execute(
+            """
+            INSERT INTO face_observation(photo_asset_id, bbox_top, bbox_right, bbox_bottom, bbox_left, active)
+            VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (int(asset_id), float(bbox_top), float(bbox_right), float(bbox_bottom), float(bbox_left)),
+        )
+        return int(cursor.lastrowid)
+
+    def ensure_face_embedding(
+        self,
+        face_observation_id: int,
+        *,
+        vector_blob: bytes,
+        model_key: str = "pipeline-stub-v1",
+        feature_type: str = "face",
+        normalized: int = 1,
+        dimension: int = 4,
+    ) -> int:
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO face_embedding(
+                face_observation_id,
+                feature_type,
+                model_key,
+                dimension,
+                vector_blob,
+                normalized
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(face_observation_id),
+                feature_type,
+                model_key,
+                int(dimension),
+                vector_blob,
+                int(normalized),
+            ),
+        )
+        row = self.conn.execute(
+            """
+            SELECT id
+            FROM face_embedding
+            WHERE face_observation_id = ?
+              AND feature_type = ?
+            LIMIT 1
+            """,
+            (int(face_observation_id), feature_type),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("face_embedding 写入失败，未找到对应记录")
+        return int(row["id"])
+
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM photo_asset").fetchone()
         return int(row["c"])

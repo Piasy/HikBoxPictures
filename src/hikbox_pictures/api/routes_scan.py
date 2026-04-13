@@ -10,11 +10,28 @@ from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
 router = APIRouter()
 
 
+def _attach_source_progress(payload: dict[str, object]) -> dict[str, object]:
+    sources_obj = payload.get("sources")
+    if not isinstance(sources_obj, list):
+        return payload
+    for source in sources_obj:
+        if not isinstance(source, dict):
+            continue
+        source["progress"] = {
+            "discovered": int(source.get("discovered_count", 0)),
+            "metadata_done": int(source.get("metadata_done_count", 0)),
+            "faces_done": int(source.get("faces_done_count", 0)),
+            "embeddings_done": int(source.get("embeddings_done_count", 0)),
+            "assignment_done": int(source.get("assignment_done_count", 0)),
+        }
+    return payload
+
+
 @router.get("/scan/status")
 def scan_status(request: Request) -> dict[str, object]:
     conn = connect_db(Path(request.app.state.db_path))
     try:
-        return ScanOrchestrator(conn).get_status()
+        return _attach_source_progress(ScanOrchestrator(conn).get_status())
     finally:
         conn.close()
 

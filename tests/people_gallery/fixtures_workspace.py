@@ -64,6 +64,13 @@ class SeedWorkspace:
             return None
         return str(row["display_name"])
 
+    def seed_source_assets(self, source_id: int, paths: list[str]) -> list[int]:
+        asset_ids: list[int] = []
+        for path in paths:
+            asset_ids.append(self.asset_repo.add_photo_asset(source_id, path, processing_status="discovered"))
+        self.conn.commit()
+        return asset_ids
+
 
 def build_seed_workspace(root: Path) -> SeedWorkspace:
     paths = ensure_workspace_layout(root)

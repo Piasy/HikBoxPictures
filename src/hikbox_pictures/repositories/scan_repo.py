@@ -191,6 +191,37 @@ class ScanRepo:
             (cursor_json, int(session_source_id)),
         )
 
+    def update_source_progress_counts(
+        self,
+        session_source_id: int,
+        *,
+        discovered_count: int,
+        metadata_done_count: int,
+        faces_done_count: int,
+        embeddings_done_count: int,
+        assignment_done_count: int,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET discovered_count = ?,
+                metadata_done_count = ?,
+                faces_done_count = ?,
+                embeddings_done_count = ?,
+                assignment_done_count = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                int(discovered_count),
+                int(metadata_done_count),
+                int(faces_done_count),
+                int(embeddings_done_count),
+                int(assignment_done_count),
+                int(session_source_id),
+            ),
+        )
+
     def insert_checkpoint(
         self,
         session_source_id: int,

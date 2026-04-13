@@ -403,6 +403,20 @@ def handle_scan_status(args: argparse.Namespace) -> int:
             f"status={status['status']} "
             f"mode={status['mode']}"
         )
+        for source in status.get("sources", []):
+            if not isinstance(source, dict):
+                continue
+            print(
+                "source "
+                f"id={source.get('id')} "
+                f"library_source_id={source.get('library_source_id')} "
+                f"status={source.get('status')} "
+                f"discovered={source.get('discovered_count')} "
+                f"metadata_done={source.get('metadata_done_count')} "
+                f"faces_done={source.get('faces_done_count')} "
+                f"embeddings_done={source.get('embeddings_done_count')} "
+                f"assignment_done={source.get('assignment_done_count')}"
+            )
         return 0
     finally:
         conn.close()

@@ -56,3 +56,11 @@ def resolve_capture_datetime(path: Path) -> datetime:
 
 def format_year_month(moment: datetime) -> str:
     return moment.astimezone().strftime("%Y-%m")
+
+
+def resolve_capture_fields(path: Path) -> tuple[str | None, str | None]:
+    try:
+        capture_datetime = resolve_capture_datetime(path)
+    except RuntimeError:
+        return None, None
+    return capture_datetime.isoformat(), format_year_month(capture_datetime)

@@ -615,7 +615,7 @@ git commit -m "feat: implement resumable multi-source scan control plane (Task 5
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定阶段单调推进与幂等**
+- [x] **Step 1: 写失败测试，锁定阶段单调推进与幂等**
 
 ```python
 def test_asset_stage_progress_is_monotonic(seed_workspace):
@@ -641,12 +641,12 @@ def test_repeated_stage_execution_does_not_duplicate_embeddings(seed_workspace):
     assert first_count == second_count
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_asset_stage_idempotency.py tests/people_gallery/test_scan_session_source_progress.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现资产阶段 runner 与 source 进度更新**
+- [x] **Step 3: 实现资产阶段 runner 与 source 进度更新**
 
 ```python
 # src/hikbox_pictures/services/asset_stage_runner.py（关键片段）
@@ -671,7 +671,7 @@ def advance_stage(asset_repo, scan_repo, asset_id: int, target_stage: str, sessi
         asset_repo.set_processing_status(asset_id, stage, session_id)
 ```
 
-- [ ] **Step 4: 运行回归，确认幂等与进度统计正确**
+- [x] **Step 4: 运行回归，确认幂等与进度统计正确**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_asset_stage_idempotency.py tests/people_gallery/test_scan_session_source_progress.py tests/people_gallery/test_api_contract.py::test_scan_status_reports_source_progress -q`
 Expected: PASS。

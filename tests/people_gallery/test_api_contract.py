@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
+from hikbox_pictures.services.asset_stage_runner import AssetStageRunner
 
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
@@ -86,6 +87,43 @@ def test_scan_start_or_resume_creates_session_from_idle(tmp_path) -> None:
         assert body["session_id"] is not None
         assert body["status"] == "running"
         assert body["mode"] == "incremental"
+    finally:
+        ws.close()
+
+
+def test_scan_status_reports_source_progress(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
+        source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
+        session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
+        ws.seed_source_assets(source_id, ["/tmp/a.jpg", "/tmp/b.jpg"])
+
+        runner = AssetStageRunner(ws.conn)
+        runner.run_stage(session_source_id, "metadata")
+        runner.run_stage(session_source_id, "faces")
+        runner.run_stage(session_source_id, "embeddings")
+
+        client = TestClient(create_app(workspace=ws.root))
+        response = client.get("/api/scan/status")
+
+        assert response.status_code == 200
+        body = response.json()
+        source_rows = [row for row in body["sources"] if row["id"] == session_source_id]
+        assert len(source_rows) == 1
+        source = source_rows[0]
+        assert source["discovered_count"] == 2
+        assert source["metadata_done_count"] == 2
+        assert source["faces_done_count"] == 2
+        assert source["embeddings_done_count"] == 2
+        assert source["assignment_done_count"] == 0
+        assert source["progress"] == {
+            "discovered": 2,
+            "metadata_done": 2,
+            "faces_done": 2,
+            "embeddings_done": 2,
+            "assignment_done": 0,
+        }
     finally:
         ws.close()
 
