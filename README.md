@@ -42,11 +42,26 @@ source .venv/bin/activate
 PYTHONPATH=src python3 -m hikbox_pictures.cli init --workspace /path/to/workspace
 ```
 
-启动本地 API（当前已提供 `/api/health`）：
+启动本地 API（Task 4 已提供基础查询/动作路由）：
 
 ```bash
 PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspace --host 127.0.0.1 --port 7860
 ```
+
+当前可用 API（均连接 workspace 真实数据库，包含查询与动作接口）：
+
+- `GET /api/health`
+- `GET /api/scan/status`
+- `GET /api/people`
+- `POST /api/people/{id}/actions/rename`
+- `GET /api/reviews`
+- `GET /api/export/templates`
+- `GET /api/logs/events`
+
+Task 4 回归记录（先失败后通过）：
+
+- 失败阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_api_contract.py tests/people_gallery/test_api_actions.py -v`
+- 通过阶段：`source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_api_contract.py tests/people_gallery/test_api_actions.py -q`
 
 当前已建立的命令树：
 

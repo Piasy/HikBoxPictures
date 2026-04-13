@@ -426,7 +426,7 @@ git commit -m "feat: add control-plane cli and api bootstrap skeleton (Task 3)"
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定真实读库和动作回写**
+- [x] **Step 1: 写失败测试，锁定真实读库和动作回写**
 
 ```python
 from fastapi.testclient import TestClient
@@ -455,12 +455,12 @@ def test_people_rename_action_persists(tmp_path):
     assert rows[0]["display_name"] == "爸爸"
 ```
 
-- [ ] **Step 2: 运行测试，确认先失败**
+- [x] **Step 2: 运行测试，确认先失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_api_contract.py tests/people_gallery/test_api_actions.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 query/action service 并接入路由**
+- [x] **Step 3: 实现 query/action service 并接入路由**
 
 ```python
 # src/hikbox_pictures/services/web_query_service.py（关键片段）
@@ -491,7 +491,7 @@ class ActionService:
         self.conn.commit()
 ```
 
-- [ ] **Step 4: 运行 API 回归，确认真实数据与动作闭环**
+- [x] **Step 4: 运行 API 回归，确认真实数据与动作闭环**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_api_contract.py tests/people_gallery/test_api_actions.py -q`
 Expected: PASS。

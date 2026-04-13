@@ -51,6 +51,19 @@ class SeedWorkspace:
     def close(self) -> None:
         self.conn.close()
 
+    def latest_resumable_session(self) -> dict[str, object] | None:
+        row = self.scan_repo.latest_resumable_session()
+        return dict(row) if row is not None else None
+
+    def person_display_name(self, person_id: int) -> str | None:
+        row = self.conn.execute(
+            "SELECT display_name FROM person WHERE id = ?",
+            (int(person_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["display_name"])
+
 
 def build_seed_workspace(root: Path) -> SeedWorkspace:
     paths = ensure_workspace_layout(root)
