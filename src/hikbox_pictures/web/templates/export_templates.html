@@ -2,6 +2,16 @@
 {% block content %}
 <section>
   <h2>导出模板</h2>
+  {% include "components/media_viewer.html" %}
+  <div class="export-preview-list">
+    {% for sample in viewer_items %}
+    <article class="export-preview-sample">
+      <p>{{ sample.label }}</p>
+      <code>{{ sample.original_url }}</code>
+    </article>
+    {% endfor %}
+  </div>
+
   <table class="table">
     <thead>
       <tr>

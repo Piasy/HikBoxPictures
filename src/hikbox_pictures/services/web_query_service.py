@@ -133,6 +133,16 @@ class WebQueryService:
             """,
             (int(person_id),),
         ).fetchall()
+        assignment_rows = [dict(row) for row in assignments]
+        viewer_items = [
+            {
+                "label": f"assignment-{row['id']}",
+                "crop_url": f"/api/observations/{row['face_observation_id']}/crop",
+                "context_url": f"/api/observations/{row['face_observation_id']}/context",
+                "original_url": f"/api/photos/{row['photo_asset_id']}/original",
+            }
+            for row in assignment_rows
+        ]
         return {
             "person": {
                 "id": person["id"],
@@ -144,7 +154,8 @@ class WebQueryService:
                 "created_at": person["created_at"],
                 "updated_at": person["updated_at"],
             },
-            "assignments": [dict(row) for row in assignments],
+            "assignments": assignment_rows,
+            "viewer_items": viewer_items,
         }
 
     def get_sources_scan_view(self) -> dict[str, Any]:
@@ -157,3 +168,54 @@ class WebQueryService:
             "session_sources": session_sources,
             "sources": self.source_repo.list_sources(active=True),
         }
+
+    def list_viewer_samples(self, limit: int = 6) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 50))
+        rows = self.conn.execute(
+            """
+            SELECT fo.id AS observation_id,
+                   fo.photo_asset_id AS photo_id
+            FROM face_observation AS fo
+            JOIN photo_asset AS pa
+              ON pa.id = fo.photo_asset_id
+            WHERE fo.active = 1
+            ORDER BY fo.id ASC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [
+            {
+                "label": f"observation-{row['observation_id']}",
+                "crop_url": f"/api/observations/{row['observation_id']}/crop",
+                "context_url": f"/api/observations/{row['observation_id']}/context",
+                "original_url": f"/api/photos/{row['photo_id']}/original",
+            }
+            for row in rows
+        ]
+
+    def list_export_preview_samples(self, limit: int = 6) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 50))
+        rows = self.conn.execute(
+            """
+            SELECT pa.id AS photo_id,
+                   MIN(fo.id) AS observation_id
+            FROM photo_asset AS pa
+            JOIN face_observation AS fo
+              ON fo.photo_asset_id = pa.id
+             AND fo.active = 1
+            GROUP BY pa.id
+            ORDER BY pa.id ASC
+            LIMIT ?
+            """,
+            (safe_limit,),
+        ).fetchall()
+        return [
+            {
+                "label": f"export-photo-{row['photo_id']}",
+                "crop_url": f"/api/observations/{row['observation_id']}/crop",
+                "context_url": f"/api/observations/{row['observation_id']}/context",
+                "original_url": f"/api/photos/{row['photo_id']}/original",
+            }
+            for row in rows
+        ]

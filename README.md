@@ -93,6 +93,12 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 
 启动后访问 `http://127.0.0.1:7860/`。
 
+统一预览器快捷键：
+
+- `ArrowLeft`：上一张
+- `ArrowRight`：下一张
+- `b` / `B`：切换脸框显示
+
 当前可用扫描控制命令：
 
 - `scan --workspace <dir>`：默认恢复最近可恢复会话（`pending/running/paused/interrupted`），若不存在则创建新的增量会话。

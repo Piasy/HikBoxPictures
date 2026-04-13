@@ -3,6 +3,7 @@
 <section>
   <h2>人物库</h2>
   <p class="summary">共 {{ people|length }} 人</p>
+  {% include "components/media_viewer.html" %}
   <div class="person-grid">
     {% for person in people %}
     <article class="person-card">

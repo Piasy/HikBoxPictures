@@ -2,6 +2,8 @@
 {% block content %}
 <section>
   <h2>待审核</h2>
+  {% include "components/media_viewer.html" %}
+
   {% for queue in queues %}
   <article id="queue-{{ queue['review_type'] }}" class="queue-block">
     <h3>{{ queue['title'] }}（{{ queue['items']|length }}）</h3>

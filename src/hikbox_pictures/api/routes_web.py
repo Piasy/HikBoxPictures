@@ -27,6 +27,7 @@ def people_page(request: Request) -> HTMLResponse:
                 "page_title": "人物库",
                 "page_key": "people",
                 "people": service.list_people(),
+                "viewer_items": service.list_viewer_samples(limit=6),
             },
         )
     finally:
@@ -49,6 +50,7 @@ def person_detail_page(person_id: int, request: Request) -> HTMLResponse:
                 "page_key": "people",
                 "person": detail["person"],
                 "assignments": detail["assignments"],
+                "viewer_items": detail["viewer_items"],
             },
         )
     finally:
@@ -67,6 +69,7 @@ def reviews_page(request: Request) -> HTMLResponse:
                 "page_title": "待审核",
                 "page_key": "reviews",
                 "queues": service.list_review_queues(),
+                "viewer_items": service.list_viewer_samples(limit=6),
             },
         )
     finally:
@@ -106,6 +109,7 @@ def exports_page(request: Request) -> HTMLResponse:
                 "page_title": "导出模板",
                 "page_key": "exports",
                 "templates": service.list_export_templates(),
+                "viewer_items": service.list_export_preview_samples(limit=6),
             },
         )
     finally:

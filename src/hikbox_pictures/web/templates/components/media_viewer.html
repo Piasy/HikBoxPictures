@@ -1,0 +1,29 @@
+<section class="media-viewer" data-viewer-index="0">
+  <header class="viewer-toolbar">
+    <button type="button" data-action="viewer-prev">上一张</button>
+    <button type="button" data-action="viewer-next">下一张</button>
+    <button type="button" data-action="viewer-toggle-bbox">脸框开关</button>
+    <span class="viewer-status" data-viewer-status>
+      {% if viewer_items %}1 / {{ viewer_items|length }}{% else %}无样例{% endif %}
+    </span>
+  </header>
+
+  <div class="viewer-layers" data-viewer-layers>
+    {% set initial = viewer_items[0] if viewer_items else None %}
+    <img data-viewer-layer="crop" alt="crop" src="{{ initial.crop_url if initial else '' }}" {% if not initial %}class="is-empty"{% endif %} />
+    <img data-viewer-layer="context" alt="context" src="{{ initial.context_url if initial else '' }}" {% if not initial %}class="is-empty"{% endif %} />
+    <img data-viewer-layer="original" alt="original" src="{{ initial.original_url if initial else '' }}" {% if not initial %}class="is-empty"{% endif %} />
+    <div class="viewer-bbox" data-viewer-bbox hidden></div>
+  </div>
+
+  <ul class="viewer-items" hidden>
+    {% for item in viewer_items %}
+    <li
+      data-label="{{ item.label }}"
+      data-crop-url="{{ item.crop_url }}"
+      data-context-url="{{ item.context_url }}"
+      data-original-url="{{ item.original_url }}"
+    ></li>
+    {% endfor %}
+  </ul>
+</section>

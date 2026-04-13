@@ -26,6 +26,8 @@ def test_people_page_has_cards_and_real_names(tmp_path) -> None:
 
         assert "person-card" in html
         assert "进入维护" in html
+        assert 'data-viewer-layer="original"' in html
+        assert 'data-action="viewer-next"' in html
         for row in ws.person_repo.list_people():
             assert str(row["display_name"]) in html
     finally:
@@ -42,6 +44,9 @@ def test_reviews_page_has_typed_queues(tmp_path) -> None:
         assert "queue-possible_merge" in html
         assert "queue-possible_split" in html
         assert "queue-low_confidence_assignment" in html
+        assert 'data-action="viewer-prev"' in html
+        assert 'data-action="viewer-next"' in html
+        assert 'data-action="viewer-toggle-bbox"' in html
     finally:
         ws.close()
 

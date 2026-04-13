@@ -1535,7 +1535,7 @@ git commit -m "feat: add preview artifact rebuild and structured degradation eve
 - Modify: `tests/people_gallery/test_webui_content.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定三层视图、快捷键与样例预览**
+- [x] **Step 1: 写失败测试，锁定三层视图、快捷键与样例预览**
 
 ```python
 def test_person_detail_contains_media_viewer(seed_workspace, client):
@@ -1557,12 +1557,12 @@ def test_export_preview_has_sample_cards(seed_workspace, client):
     assert "export-preview-sample" in html
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_webui_media_viewer.py tests/people_gallery/test_webui_export_preview_samples.py tests/people_gallery/test_webui_content.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现统一预览器组件与页面接入**
+- [x] **Step 3: 实现统一预览器组件与页面接入**
 
 ```html
 <!-- src/hikbox_pictures/web/templates/components/media_viewer.html（关键片段） -->
@@ -1593,7 +1593,7 @@ document.addEventListener("keydown", (event) => {
 });
 ```
 
-- [ ] **Step 4: 运行回归，确认三处页面交互语义一致**
+- [x] **Step 4: 运行回归，确认三处页面交互语义一致**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_webui_media_viewer.py tests/people_gallery/test_webui_export_preview_samples.py tests/people_gallery/test_webui_content.py tests/people_gallery/test_web_navigation.py -q`
 Expected: PASS。
