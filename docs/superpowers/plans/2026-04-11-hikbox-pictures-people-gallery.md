@@ -304,7 +304,7 @@ git commit -m "feat: add repository layer and seed workspace fixtures (Task 2)"
 - Modify: `README.md`
 - Modify: `pyproject.toml`
 
-- [ ] **Step 1: 写失败测试，锁定控制面命令与 app 启动行为**
+- [x] **Step 1: 写失败测试，锁定控制面命令与 app 启动行为**
 
 ```python
 from pathlib import Path
@@ -344,12 +344,12 @@ def test_create_app_binds_workspace_and_health_route(tmp_path):
     assert resp.json()["workspace"].endswith(str(ws.root))
 ```
 
-- [ ] **Step 2: 运行测试，确认先失败**
+- [x] **Step 2: 运行测试，确认先失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_cli_control_plane.py tests/people_gallery/test_api_bootstrap.py -v`
 Expected: FAIL（缺少子命令与 app 骨架）。
 
-- [ ] **Step 3: 实现 CLI 子命令树与 FastAPI 启动骨架**
+- [x] **Step 3: 实现 CLI 子命令树与 FastAPI 启动骨架**
 
 ```python
 # src/hikbox_pictures/cli.py（关键片段）
@@ -390,7 +390,7 @@ def create_app(workspace: Path) -> FastAPI:
     return app
 ```
 
-- [ ] **Step 4: 运行回归，确认 CLI 与 app 起步可用**
+- [x] **Step 4: 运行回归，确认 CLI 与 app 起步可用**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_cli_control_plane.py tests/people_gallery/test_api_bootstrap.py -q`
 Expected: PASS。

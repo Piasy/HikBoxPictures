@@ -28,7 +28,37 @@ HikBox Pictures 是一个本地 macOS CLI，用于递归扫描照片目录，找
 PYTHON_BIN=python3.13 ./scripts/install.sh
 ```
 
-## 用法
+## 控制面命令（Task 3 骨架）
+
+先进入虚拟环境：
+
+```bash
+source .venv/bin/activate
+```
+
+初始化工作区（会自动创建目录并执行数据库迁移）：
+
+```bash
+PYTHONPATH=src python3 -m hikbox_pictures.cli init --workspace /path/to/workspace
+```
+
+启动本地 API（当前已提供 `/api/health`）：
+
+```bash
+PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspace --host 127.0.0.1 --port 7860
+```
+
+当前已建立的命令树：
+
+- `init`
+- `source add|list|remove`
+- `serve`
+- `scan`
+- `rebuild-artifacts`
+- `export run`
+- `logs tail|prune`
+
+## 旧版一次性导出用法（兼容模式）
 
 ```bash
 hikbox-pictures --input /path/to/photo-library --ref-a-dir /path/to/person-a-images --ref-b-dir /path/to/person-b-images --output /path/to/output --model-name ArcFace --detector-backend retinaface --distance-metric cosine --distance-threshold-a 0.32 --distance-threshold-b 0.36 --align

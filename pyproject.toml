@@ -21,7 +21,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+dev = [
+  "pytest>=8.0.0",
+  "httpx>=0.28.0",
+]
 
 [project.scripts]
 hikbox-pictures = "hikbox_pictures.cli:cli_entry"

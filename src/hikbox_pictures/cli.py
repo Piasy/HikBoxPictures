@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Callable
 
 from hikbox_pictures.deepface_engine import DeepFaceEngine, DeepFaceInitError
 from hikbox_pictures.exporter import export_match
@@ -12,9 +13,90 @@ from hikbox_pictures.models import MatchBucket, RunSummary
 from hikbox_pictures.reference_loader import ReferenceImageError, load_reference_embeddings
 from hikbox_pictures.reference_template import build_reference_samples_from_embeddings, build_reference_template
 from hikbox_pictures.scanner import iter_candidate_photos
+from hikbox_pictures.services.runtime import initialize_workspace
+
+
+ControlHandler = Callable[[argparse.Namespace], int]
+CONTROL_COMMANDS = {"init", "source", "serve", "scan", "rebuild-artifacts", "export", "logs"}
+LEGACY_FLAGS = {
+    "--input",
+    "--ref-a-dir",
+    "--ref-b-dir",
+    "--output",
+    "--model-name",
+    "--detector-backend",
+    "--distance-metric",
+    "--distance-threshold",
+    "--distance-threshold-a",
+    "--distance-threshold-b",
+    "--align",
+    "--no-align",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="hikbox-pictures")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_init = sub.add_parser("init", help="初始化工作区与数据库")
+    p_init.add_argument("--workspace", type=Path, required=True)
+    p_init.set_defaults(handler=handle_init)
+
+    p_source = sub.add_parser("source", help="源目录管理")
+    source_sub = p_source.add_subparsers(dest="source_command", required=True)
+    p_source_add = source_sub.add_parser("add", help="添加源目录")
+    p_source_add.add_argument("--workspace", type=Path, required=True)
+    p_source_add.add_argument("--name", required=True)
+    p_source_add.add_argument("--root-path", type=Path, required=True)
+    p_source_add.set_defaults(handler=handle_source_add)
+
+    p_source_list = source_sub.add_parser("list", help="列出源目录")
+    p_source_list.add_argument("--workspace", type=Path, required=True)
+    p_source_list.set_defaults(handler=handle_source_list)
+
+    p_source_remove = source_sub.add_parser("remove", help="移除源目录")
+    p_source_remove.add_argument("--workspace", type=Path, required=True)
+    p_source_remove.add_argument("--source-id", type=int, required=True)
+    p_source_remove.set_defaults(handler=handle_source_remove)
+
+    p_serve = sub.add_parser("serve", help="启动本地 API 服务")
+    p_serve.add_argument("--workspace", type=Path, required=True)
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=7860)
+    p_serve.set_defaults(handler=handle_serve)
+
+    p_scan = sub.add_parser("scan", help="扫描控制命令")
+    p_scan.add_argument("--workspace", type=Path, required=True)
+    p_scan.set_defaults(handler=handle_scan)
+
+    p_rebuild = sub.add_parser("rebuild-artifacts", help="重建可派生产物")
+    p_rebuild.add_argument("--workspace", type=Path, required=True)
+    p_rebuild.set_defaults(handler=handle_rebuild_artifacts)
+
+    p_export = sub.add_parser("export", help="导出控制命令")
+    export_sub = p_export.add_subparsers(dest="export_command", required=True)
+    p_export_run = export_sub.add_parser("run", help="执行导出模板")
+    p_export_run.add_argument("--workspace", type=Path, required=True)
+    p_export_run.add_argument("--template-id", type=int)
+    p_export_run.set_defaults(handler=handle_export_run)
+
+    p_logs = sub.add_parser("logs", help="日志控制命令")
+    logs_sub = p_logs.add_subparsers(dest="logs_command", required=True)
+    p_logs_tail = logs_sub.add_parser("tail", help="查看日志")
+    p_logs_tail.add_argument("--workspace", type=Path, required=True)
+    p_logs_tail.add_argument("--run-kind")
+    p_logs_tail.add_argument("--run-id")
+    p_logs_tail.set_defaults(handler=handle_logs_tail)
+
+    p_logs_prune = logs_sub.add_parser("prune", help="清理旧日志")
+    p_logs_prune.add_argument("--workspace", type=Path, required=True)
+    p_logs_prune.add_argument("--days", type=int, default=90)
+    p_logs_prune.set_defaults(handler=handle_logs_prune)
+
+    return parser
+
+
+def build_legacy_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hikbox-pictures")
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--ref-a-dir", required=True, type=Path)
@@ -75,11 +157,28 @@ def _validate_reference_directory(path: Path) -> bool:
     return path.exists() and path.is_dir()
 
 
-def main(argv: list[str] | None = None) -> int:
-    if argv is None:
-        return 0
+def _is_legacy_invocation(argv: list[str]) -> bool:
+    return any(arg in LEGACY_FLAGS for arg in argv)
 
-    args = build_parser().parse_args(argv)
+
+def _run_with_control_plane(argv: list[str]) -> int:
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code)
+
+    handler: ControlHandler = args.handler
+    return handler(args)
+
+
+def _run_legacy_matching(argv: list[str]) -> int:
+    parser = build_legacy_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return int(exc.code)
+
     if not args.input.exists():
         print(f"Path does not exist: {args.input}", file=sys.stderr)
         return 2
@@ -144,6 +243,75 @@ def main(argv: list[str] | None = None) -> int:
 
     _print_summary(summary)
     return 0
+
+
+def handle_init(args: argparse.Namespace) -> int:
+    paths = initialize_workspace(args.workspace)
+    print(f"Workspace initialized: {paths.root}")
+    print(f"Database path: {paths.db_path}")
+    return 0
+
+
+def _not_implemented(message: str) -> int:
+    print(message, file=sys.stderr)
+    return 2
+
+
+def handle_source_add(args: argparse.Namespace) -> int:
+    return _not_implemented(f"source add 未实现: workspace={args.workspace} name={args.name} root_path={args.root_path}")
+
+
+def handle_source_list(args: argparse.Namespace) -> int:
+    return _not_implemented(f"source list 未实现: workspace={args.workspace}")
+
+
+def handle_source_remove(args: argparse.Namespace) -> int:
+    return _not_implemented(f"source remove 未实现: workspace={args.workspace} source_id={args.source_id}")
+
+
+def handle_serve(args: argparse.Namespace) -> int:
+    from hikbox_pictures.api.app import create_app
+    import uvicorn
+
+    app = create_app(workspace=args.workspace)
+    uvicorn.run(app, host=args.host, port=args.port)
+    return 0
+
+
+def handle_scan(args: argparse.Namespace) -> int:
+    return _not_implemented(f"scan 未实现: workspace={args.workspace}")
+
+
+def handle_rebuild_artifacts(args: argparse.Namespace) -> int:
+    return _not_implemented(f"rebuild-artifacts 未实现: workspace={args.workspace}")
+
+
+def handle_export_run(args: argparse.Namespace) -> int:
+    return _not_implemented(f"export run 未实现: workspace={args.workspace} template_id={args.template_id}")
+
+
+def handle_logs_tail(args: argparse.Namespace) -> int:
+    return _not_implemented(f"logs tail 未实现: workspace={args.workspace} run_kind={args.run_kind} run_id={args.run_id}")
+
+
+def handle_logs_prune(args: argparse.Namespace) -> int:
+    return _not_implemented(f"logs prune 未实现: workspace={args.workspace} days={args.days}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        return 0
+
+    if len(argv) == 0:
+        build_parser().print_help()
+        return 0
+
+    first = argv[0]
+    if first in CONTROL_COMMANDS or first in {"-h", "--help"}:
+        return _run_with_control_plane(argv)
+    if _is_legacy_invocation(argv):
+        return _run_legacy_matching(argv)
+    return _run_with_control_plane(argv)
 
 
 def cli_entry() -> int:
