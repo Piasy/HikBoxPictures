@@ -39,6 +39,36 @@ class AssetRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_photo_media(self, photo_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, library_source_id, primary_path, primary_fingerprint, live_mov_path, live_mov_fingerprint,
+                   is_heic, processing_status, capture_datetime, capture_month, created_at, updated_at
+            FROM photo_asset
+            WHERE id = ?
+            """,
+            (int(photo_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_observation_media(self, observation_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT fo.id,
+                   fo.photo_asset_id,
+                   fo.crop_path,
+                   fo.active,
+                   pa.library_source_id,
+                   pa.primary_path
+            FROM face_observation AS fo
+            JOIN photo_asset AS pa
+              ON pa.id = fo.photo_asset_id
+            WHERE fo.id = ?
+            """,
+            (int(observation_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_assets_for_source(self, library_source_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """

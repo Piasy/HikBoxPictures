@@ -63,6 +63,10 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /api/export/templates`
 - `GET /api/export/templates/{template_id}/preview`
 - `GET /api/logs/events`（支持 `run_kind`、`event_type`、`run_id`、`level`、`limit` 过滤）
+- `GET /api/photos/{photo_id}/original`（支持 `Range: bytes=...`）
+- `GET /api/photos/{photo_id}/preview`
+- `GET /api/observations/{observation_id}/crop`
+- `GET /api/observations/{observation_id}/context`
 
 当前可用 WebUI 路由（同一进程托管，页面数据直接读取 workspace 数据库）：
 

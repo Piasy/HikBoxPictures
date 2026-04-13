@@ -1341,7 +1341,7 @@ git commit -m "test: add full-system e2e acceptance and finalize implementation 
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: 写失败测试，锁定 4 个媒体端点与路径越界防护**
+- [x] **Step 1: 写失败测试，锁定 4 个媒体端点与路径越界防护**
 
 ```python
 def test_crop_and_context_endpoint_returns_image(seed_workspace, client):
@@ -1370,12 +1370,12 @@ def test_path_traversal_is_blocked(seed_workspace):
         )
 ```
 
-- [ ] **Step 2: 运行测试，确认失败**
+- [x] **Step 2: 运行测试，确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_media_range_request.py tests/people_gallery/test_media_path_security.py -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现媒体读取服务、Range 返回与安全校验**
+- [x] **Step 3: 实现媒体读取服务、Range 返回与安全校验**
 
 ```python
 # src/hikbox_pictures/services/path_guard.py（关键片段）
@@ -1403,7 +1403,7 @@ def get_original(photo_id: int, request: Request):
     )
 ```
 
-- [ ] **Step 4: 运行回归，确认媒体 API 合同成立**
+- [x] **Step 4: 运行回归，确认媒体 API 合同成立**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_media_range_request.py tests/people_gallery/test_media_path_security.py tests/people_gallery/test_api_contract.py::test_people_api_matches_people_page -q`
 Expected: PASS。

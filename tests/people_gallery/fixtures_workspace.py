@@ -36,6 +36,8 @@ class SeedWorkspace:
     ops_event_repo: OpsEventRepo
     export_template_id: int
     export_live_photo_asset_id: int | None
+    media_photo_id: int | None
+    media_observation_id: int | None
 
     def counts(self) -> dict[str, int]:
         tables = (
@@ -148,7 +150,12 @@ class SeedWorkspace:
         return dict(row) if row is not None else None
 
 
-def build_seed_workspace(root: Path, *, seed_export_assets: bool = False) -> SeedWorkspace:
+def build_seed_workspace(
+    root: Path,
+    *,
+    seed_export_assets: bool = False,
+    seed_media_assets: bool = False,
+) -> SeedWorkspace:
     paths = ensure_workspace_layout(root)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
@@ -208,6 +215,8 @@ def build_seed_workspace(root: Path, *, seed_export_assets: bool = False) -> See
     export_repo.add_template_person(template_id=template_id, person_id=person_b, position=1)
 
     export_live_photo_asset_id: int | None = None
+    media_photo_id: int | None = None
+    media_observation_id: int | None = None
     if seed_export_assets:
         seed_assets_dir = paths.root / "seed-assets"
         seed_assets_dir.mkdir(parents=True, exist_ok=True)
@@ -356,6 +365,36 @@ def build_seed_workspace(root: Path, *, seed_export_assets: bool = False) -> See
         obs_miss_1_a = _insert_face_observation(asset_miss_1, 0.25)
         _assign(obs_miss_1_a, person_a)
 
+    if seed_media_assets:
+        media_dir = paths.artifacts_dir / "media-test-assets"
+        media_dir.mkdir(parents=True, exist_ok=True)
+        original_path = media_dir / "photo-1.jpg"
+        original_path.write_bytes(b"\xff\xd8" + (b"A" * 4096) + b"\xff\xd9")
+        crop_path = media_dir / "crop-1.jpg"
+        crop_path.write_bytes(b"\xff\xd8" + (b"B" * 512) + b"\xff\xd9")
+
+        media_photo_id = asset_repo.add_photo_asset(
+            source_a,
+            str(original_path),
+            processing_status="assignment_done",
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO face_observation(
+                photo_asset_id,
+                bbox_top,
+                bbox_right,
+                bbox_bottom,
+                bbox_left,
+                crop_path,
+                active
+            )
+            VALUES (?, 0.1, 0.9, 0.9, 0.1, ?, 1)
+            """,
+            (int(media_photo_id), str(crop_path)),
+        )
+        media_observation_id = int(cursor.lastrowid)
+
     ops_event_repo.append_event(
         level="info",
         component="seed",
@@ -380,4 +419,6 @@ def build_seed_workspace(root: Path, *, seed_export_assets: bool = False) -> See
         ops_event_repo=ops_event_repo,
         export_template_id=template_id,
         export_live_photo_asset_id=export_live_photo_asset_id,
+        media_photo_id=media_photo_id,
+        media_observation_id=media_observation_id,
     )
