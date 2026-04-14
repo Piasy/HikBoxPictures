@@ -10,6 +10,7 @@ from hikbox_pictures.deepface_engine import (
     DeepFaceEngine,
     DeepFaceInferenceError,
     DeepFaceInitError,
+    resolve_ann_distance_threshold,
 )
 
 
@@ -182,6 +183,26 @@ def test_is_match_hits_threshold_boundary() -> None:
 
     assert engine.is_match(0.42) is True
     assert engine.is_match(0.420001) is False
+
+
+def test_resolve_ann_distance_threshold_converts_deepface_default_cosine_threshold() -> None:
+    result = resolve_ann_distance_threshold(
+        0.68,
+        distance_metric="cosine",
+        threshold_source="deepface-default",
+    )
+
+    assert result == pytest.approx(np.sqrt(1.36))
+
+
+def test_resolve_ann_distance_threshold_keeps_explicit_threshold_unchanged() -> None:
+    result = resolve_ann_distance_threshold(
+        0.35,
+        distance_metric="cosine",
+        threshold_source="explicit",
+    )
+
+    assert result == 0.35
 
 
 def test_create_raises_when_deepface_missing(monkeypatch) -> None:

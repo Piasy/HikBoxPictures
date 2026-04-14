@@ -75,7 +75,7 @@ def test_mock_embedding_path_visible_in_webui(tmp_path) -> None:
 
     assert "人物甲" in people_html
     assert "人物乙" in people_html
-    assert "export-preview-sample" in exports_html
+    assert "export-preview-tile" in exports_html
     assert "queue-block" in reviews_html
     assert "queue-new_person" in reviews_html
     assert "review #" in reviews_html

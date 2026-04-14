@@ -1,47 +1,90 @@
 {% extends "base.html" %}
 {% block content %}
-<section>
-  <h2>人物详情</h2>
-  <article class="panel">
-    <h3>{{ person.display_name }}</h3>
-    <p>ID：{{ person.id }}</p>
-    <p>状态：{{ person.status }}</p>
-    <p>已确认：{{ "是" if person.confirmed else "否" }}</p>
-    <p>已忽略：{{ "是" if person.ignored else "否" }}</p>
-    <p>备注：{{ person.notes or "（空）" }}</p>
-  </article>
-</section>
+<section class="person-detail-page">
+  <header class="person-detail-header">
+    <p class="person-detail-kicker">人物详情</p>
+    <h2>{{ person.display_name }}</h2>
+    <p class="summary">这里展示该人物已归属样本的裁剪图、定位图和原图，方便逐张核对归属是否准确。</p>
+  </header>
 
-<section>
-  <h3>预览器</h3>
-  {% include "components/media_viewer.html" %}
-</section>
+  <div class="person-detail-top">
+    <article class="panel person-detail-meta-panel">
+      <div class="person-detail-meta-grid">
+        <article>
+          <strong>{{ person.id }}</strong>
+          <span>人物 ID</span>
+        </article>
+        <article>
+          <strong>{{ assignments|length }}</strong>
+          <span>归属记录</span>
+        </article>
+        <article>
+          <strong>{{ "已确认" if person.confirmed else "未确认" }}</strong>
+          <span>确认状态</span>
+        </article>
+        <article>
+          <strong>{{ "已忽略" if person.ignored else "正常" }}</strong>
+          <span>当前状态</span>
+        </article>
+      </div>
+      <dl class="person-detail-meta-list">
+        <div>
+          <dt>名称</dt>
+          <dd>{{ person.display_name }}</dd>
+        </div>
+        <div>
+          <dt>状态</dt>
+          <dd>{{ person.status }}</dd>
+        </div>
+        <div>
+          <dt>备注</dt>
+          <dd>{{ person.notes or "（空）" }}</dd>
+        </div>
+      </dl>
+    </article>
 
-<section>
-  <h3>归属记录（{{ assignments|length }}）</h3>
-  <table class="table">
-    <thead>
-      <tr>
-        <th>Assignment ID</th>
-        <th>观测 ID</th>
-        <th>图片 ID</th>
-        <th>图片路径</th>
-        <th>来源</th>
-        <th>锁定</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for assignment in assignments %}
-      <tr>
-        <td>{{ assignment.id }}</td>
-        <td>{{ assignment.face_observation_id }}</td>
-        <td>{{ assignment.photo_asset_id }}</td>
-        <td>{{ assignment.primary_path }}</td>
-        <td>{{ assignment.assignment_source }}</td>
-        <td>{{ "是" if assignment.locked else "否" }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+    <section class="panel person-detail-viewer-panel">
+      <div class="person-detail-viewer-head">
+        <h3>预览器</h3>
+        <p>左侧看裁剪图，右侧对照定位图和原图；点击上一张、下一张切换样本。</p>
+      </div>
+      <div class="person-detail-viewer-shell">
+        {% include "components/media_viewer.html" %}
+      </div>
+    </section>
+  </div>
+
+  <section class="panel person-detail-records">
+    <div class="person-detail-records-head">
+      <h3>归属记录（{{ assignments|length }}）</h3>
+      <p>下面是当前人物的归属明细，用来追踪每条样本来自哪张照片以及是否已锁定。</p>
+    </div>
+    <div class="person-detail-table-wrap">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Assignment ID</th>
+            <th>观测 ID</th>
+            <th>图片 ID</th>
+            <th>图片路径</th>
+            <th>来源</th>
+            <th>锁定</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for assignment in assignments %}
+          <tr>
+            <td>{{ assignment.id }}</td>
+            <td>{{ assignment.face_observation_id }}</td>
+            <td>{{ assignment.photo_asset_id }}</td>
+            <td>{{ assignment.primary_path }}</td>
+            <td>{{ assignment.assignment_source }}</td>
+            <td>{{ "是" if assignment.locked else "否" }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
 </section>
 {% endblock %}

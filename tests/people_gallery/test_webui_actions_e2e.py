@@ -44,6 +44,6 @@ def test_web_viewer_actions_visible_in_people_reviews_exports(tmp_path) -> None:
             html = response.text
             assert 'data-action="viewer-prev"' in html
             assert 'data-action="viewer-next"' in html
-            assert 'data-action="viewer-toggle-bbox"' in html
+            assert 'data-action="viewer-toggle-bbox"' not in html
     finally:
         ws.close()

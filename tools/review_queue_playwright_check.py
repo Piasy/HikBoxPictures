@@ -13,7 +13,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import ProxyHandler, build_opener
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -84,12 +84,24 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _ensure_local_no_proxy(*, host: str) -> dict[str, str]:
+    hosts = [host, "127.0.0.1", "localhost"]
+    merged_hosts = ",".join(dict.fromkeys(item for item in hosts if item))
+    no_proxy = [os.environ.get("NO_PROXY", "").strip(), merged_hosts]
+    no_proxy_lower = [os.environ.get("no_proxy", "").strip(), merged_hosts]
+    return {
+        "NO_PROXY": ",".join(part for part in no_proxy if part),
+        "no_proxy": ",".join(part for part in no_proxy_lower if part),
+    }
+
+
 def _wait_for_health(host: str, port: int, *, timeout_seconds: float = 20.0) -> None:
     deadline = time.time() + timeout_seconds
     url = f"http://{host}:{port}/api/health"
+    opener = build_opener(ProxyHandler({}))
     while time.time() < deadline:
         try:
-            with urlopen(url, timeout=1.0) as response:
+            with opener.open(url, timeout=1.0) as response:
                 payload = json.loads(response.read().decode("utf-8"))
             if payload.get("ok") is True:
                 return
@@ -102,6 +114,7 @@ def _wait_for_health(host: str, port: int, *, timeout_seconds: float = 20.0) -> 
 def _run_server(*, workspace: Path, host: str, port: int, log_path: Path):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC_ROOT)
+    env.update(_ensure_local_no_proxy(host=host))
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_file:
         process = subprocess.Popen(
@@ -338,15 +351,16 @@ def _capture_once(
     *,
     node_modules_dir: Path,
     browser_env: dict[str, str],
+    host: str,
     url: str,
     mode: str,
-    viewport: str,
     screenshot_path: Path,
 ) -> dict[str, Any]:
     report_path = screenshot_path.with_suffix(".json")
     env = os.environ.copy()
     env["NODE_PATH"] = str(node_modules_dir)
     env.update(browser_env)
+    env.update(_ensure_local_no_proxy(host=host))
     _run_command(
         [
             "node",
@@ -355,8 +369,6 @@ def _capture_once(
             url,
             "--mode",
             mode,
-            "--viewport",
-            viewport,
             "--screenshot",
             str(screenshot_path),
             "--report",
@@ -387,18 +399,10 @@ def _run_scenario(
         desktop_report = _capture_once(
             node_modules_dir=node_modules_dir,
             browser_env=browser_env,
+            host=host,
             url=url,
             mode=mode,
-            viewport="desktop",
             screenshot_path=scenario_dir / "reviews-desktop.png",
-        )
-        mobile_report = _capture_once(
-            node_modules_dir=node_modules_dir,
-            browser_env=browser_env,
-            url=url,
-            mode=mode,
-            viewport="mobile",
-            screenshot_path=scenario_dir / "reviews-mobile.png",
         )
 
     return {
@@ -407,7 +411,6 @@ def _run_scenario(
         "base_url": base_url,
         "server_log": log_path,
         "desktop": desktop_report,
-        "mobile": mobile_report,
     }
 
 
@@ -490,18 +493,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[review-visual] 汇总报告: {summary_path}")
     if requested_workspace is not None:
         workspace_result = results[0]
-        print(
-            f"[review-visual] workspace 截图: "
-            f"{workspace_result['desktop']['screenshot']} / {workspace_result['mobile']['screenshot']}"
-        )
+        print(f"[review-visual] workspace 截图: {workspace_result['desktop']['screenshot']}")
     else:
         empty_result, seeded_result = results
-        print(
-            f"[review-visual] 空库截图: {empty_result['desktop']['screenshot']} / {empty_result['mobile']['screenshot']}"
-        )
-        print(
-            f"[review-visual] seed 截图: {seeded_result['desktop']['screenshot']} / {seeded_result['mobile']['screenshot']}"
-        )
+        print(f"[review-visual] 空库截图: {empty_result['desktop']['screenshot']}")
+        print(f"[review-visual] seed 截图: {seeded_result['desktop']['screenshot']}")
     return 0
 
 

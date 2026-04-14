@@ -26,6 +26,7 @@ def test_workspace_layout_and_tables(tmp_path):
     apply_migrations(conn)
 
     table_names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    index_names = {row[1] for row in conn.execute("PRAGMA index_list('photo_asset')").fetchall()}
     required = {
         "library_source",
         "scan_session",
@@ -48,6 +49,7 @@ def test_workspace_layout_and_tables(tmp_path):
         "ops_event",
     }
     assert required <= table_names
+    assert "idx_photo_asset_source_status" in index_names
 
 
 

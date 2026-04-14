@@ -27,9 +27,9 @@ def test_review_and_export_actions_roundtrip(tmp_path) -> None:
         assert reviews.status_code == 200
         review_id = int(reviews.json()[0]["id"])
 
-        confirm_resp = client.post(f"/api/reviews/{review_id}/actions/resolve")
-        assert confirm_resp.status_code == 200
-        assert confirm_resp.json()["status"] == "resolved"
+        resolve_resp = client.post(f"/api/reviews/{review_id}/actions/resolve")
+        assert resolve_resp.status_code == 200
+        assert resolve_resp.json()["status"] == "resolved"
 
         run_resp = client.post(f"/api/export/templates/{ws.export_template_id}/actions/run")
         assert run_resp.status_code == 200
@@ -48,6 +48,8 @@ def test_web_pages_expose_review_export_action_entries(tmp_path) -> None:
         client = TestClient(create_app(workspace=ws.root))
 
         reviews_html = client.get("/reviews").text
+        assert 'data-action="review-create-person"' in reviews_html
+        assert 'data-action="review-assign-person"' in reviews_html
         assert 'data-action="review-resolve"' in reviews_html
         assert 'data-action="review-dismiss"' in reviews_html
         assert 'data-action="review-ignore"' in reviews_html

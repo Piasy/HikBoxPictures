@@ -33,9 +33,9 @@ def test_viewer_semantics_cover_person_reviews_exports_pages(tmp_path) -> None:
             assert 'data-viewer-layer="original"' in html
             assert 'data-action="viewer-prev"' in html
             assert 'data-action="viewer-next"' in html
-            assert 'data-action="viewer-toggle-bbox"' in html
+            assert 'data-action="viewer-toggle-bbox"' not in html
 
-        assert "export-preview-sample" in export_html
+        assert "export-preview-tile" in export_html
     finally:
         ws.close()
 

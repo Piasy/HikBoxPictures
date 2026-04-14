@@ -1,55 +1,288 @@
 {% extends "base.html" %}
 {% block content %}
-<section>
-  <h2>导出模板</h2>
-  <p data-export-feedback></p>
-  {% include "components/media_viewer.html" %}
-  <div class="export-preview-list">
-    {% for sample in viewer_items %}
-    <article class="export-preview-sample">
-      <p>{{ sample.label }}</p>
-      <code>{{ sample.original_url }}</code>
-    </article>
-    {% endfor %}
-  </div>
+<section class="export-page">
+  <section class="panel export-hero">
+    <div>
+      <p class="queue-kicker">Export Control</p>
+      <h2>导出模板</h2>
+      <p class="summary">
+        先选导出人物，再决定是否包含合照、Live Photo MOV 与时间范围。模板保存后可以直接执行导出。
+      </p>
+    </div>
+    <div class="export-stats">
+      <article>
+        <strong>{{ templates|length }}</strong>
+        <span>模板数</span>
+      </article>
+      <article>
+        <strong>{{ available_people|length }}</strong>
+        <span>可选人物</span>
+      </article>
+      <article>
+        <strong>{{ viewer_items|length }}</strong>
+        <span>预览样例</span>
+      </article>
+    </div>
+  </section>
 
-  <table class="table">
-    <thead>
-      <tr>
-        <th>ID</th>
-        <th>名称</th>
-        <th>输出目录</th>
-        <th>包含合照</th>
-        <th>导出 MOV</th>
-        <th>启用</th>
-        <th>最近运行</th>
-        <th>动作</th>
-      </tr>
-    </thead>
-    <tbody>
+  <p class="export-feedback" data-export-feedback></p>
+
+  <section class="panel export-editor-panel">
+    <div class="export-section-head">
+      <div>
+        <h3>新建模板</h3>
+        <p>默认导出到当前 workspace 的 `.hikbox/exports`。建议为不同模板使用不同子目录。</p>
+      </div>
+      <code>{{ default_output_root }}</code>
+    </div>
+
+    {% if available_people %}
+    <form class="export-template-form" data-export-form data-export-mode="create">
+      <div class="export-form-grid">
+        <label class="export-field">
+          <span>模板名称</span>
+          <input type="text" name="name" placeholder="例如：家庭合照" required>
+        </label>
+
+        <label class="export-field">
+          <span>输出目录</span>
+          <input type="text" name="output_root" value="{{ default_output_root }}" required>
+        </label>
+
+        <label class="export-field">
+          <span>开始时间</span>
+          <input type="text" name="start_datetime" placeholder="可空，ISO 时间">
+        </label>
+
+        <label class="export-field">
+          <span>结束时间</span>
+          <input type="text" name="end_datetime" placeholder="可空，ISO 时间">
+        </label>
+
+        <div class="export-field export-field-wide">
+          <span>导出选项</span>
+          <div class="export-toggle-row">
+            <label class="export-toggle">
+              <input type="checkbox" name="include_group" checked>
+              <span>包含合照</span>
+            </label>
+            <label class="export-toggle">
+              <input type="checkbox" name="export_live_mov">
+              <span>导出 MOV</span>
+            </label>
+            <label class="export-toggle">
+              <input type="checkbox" name="enabled" checked>
+              <span>创建后立即启用</span>
+            </label>
+          </div>
+          <p class="export-field-hint">时间范围留空表示不限制；如需填写，格式示例：`2026-04-14T00:00:00+08:00`。</p>
+        </div>
+
+        <label class="export-field export-field-wide">
+          <span>人物范围</span>
+          <div class="export-person-picker">
+            {% for person in available_people %}
+            <label class="export-person-chip">
+              <input type="checkbox" name="person_ids" value="{{ person.id }}">
+              <span>{{ person.display_name }}</span>
+              <small>{{ person.badge }}</small>
+            </label>
+            {% endfor %}
+          </div>
+        </label>
+      </div>
+
+      <div class="export-form-actions">
+        <button type="submit" data-action="export-save-template">创建模板</button>
+      </div>
+    </form>
+    {% else %}
+    <p class="review-focus-hint">当前还没有可导出人物，先去人物库或待审核页完成建档。</p>
+    {% endif %}
+  </section>
+
+  <section class="panel export-editor-panel">
+    <div class="export-section-head">
+      <div>
+        <h3>管理已有模板</h3>
+        <p>可以直接修改人物范围、输出目录与导出选项；保存后会用于后续预览和导出。</p>
+      </div>
+    </div>
+
+    {% if templates %}
+    <div class="export-template-manage-list">
       {% for item in templates %}
-      <tr>
-        <td>{{ item.id }}</td>
-        <td>{{ item.name }}</td>
-        <td>{{ item.output_root }}</td>
-        <td>{{ "是" if item.include_group else "否" }}</td>
-        <td>{{ "是" if item.export_live_mov else "否" }}</td>
-        <td>{{ "是" if item.enabled else "否" }}</td>
-        <td>
+      <article class="export-template-card">
+        <form class="export-template-form" data-export-form data-export-mode="update" data-template-id="{{ item.id }}">
+          <header class="export-template-card-head">
+            <div>
+              <p class="queue-kicker">模板 #{{ item.id }}</p>
+              <h3>{{ item.name }}</h3>
+              <p class="summary">已选人物：{{ item.selected_people_label or "未配置" }}</p>
+            </div>
+            <div class="export-template-card-meta">
+              <span class="export-template-status {{ 'is-enabled' if item.enabled else 'is-disabled' }}">
+                {{ "启用中" if item.enabled else "已停用" }}
+              </span>
+              <p>
+                {% if item.latest_run %}
+                最近运行：#{{ item.latest_run.id }} / {{ item.latest_run.status }}
+                {% else %}
+                尚未执行
+                {% endif %}
+              </p>
+            </div>
+          </header>
+
+          <div class="export-form-grid">
+            <label class="export-field">
+              <span>模板名称</span>
+              <input type="text" name="name" value="{{ item.name }}" required>
+            </label>
+
+            <label class="export-field">
+              <span>输出目录</span>
+              <input type="text" name="output_root" value="{{ item.output_root }}" required>
+            </label>
+
+            <label class="export-field">
+              <span>开始时间</span>
+              <input type="text" name="start_datetime" value="{{ item.start_datetime or '' }}" placeholder="可空，ISO 时间">
+            </label>
+
+            <label class="export-field">
+              <span>结束时间</span>
+              <input type="text" name="end_datetime" value="{{ item.end_datetime or '' }}" placeholder="可空，ISO 时间">
+            </label>
+
+            <div class="export-field export-field-wide">
+              <span>导出选项</span>
+              <div class="export-toggle-row">
+                <label class="export-toggle">
+                  <input type="checkbox" name="include_group" {% if item.include_group %}checked{% endif %}>
+                  <span>包含合照</span>
+                </label>
+                <label class="export-toggle">
+                  <input type="checkbox" name="export_live_mov" {% if item.export_live_mov %}checked{% endif %}>
+                  <span>导出 MOV</span>
+                </label>
+                <label class="export-toggle">
+                  <input type="checkbox" name="enabled" {% if item.enabled %}checked{% endif %}>
+                  <span>启用模板</span>
+                </label>
+              </div>
+            </div>
+
+            <label class="export-field export-field-wide">
+              <span>人物范围</span>
+              <div class="export-person-picker">
+                {% for person in available_people %}
+                <label class="export-person-chip {% if person.id in item.person_ids %}is-selected{% endif %}">
+                  <input
+                    type="checkbox"
+                    name="person_ids"
+                    value="{{ person.id }}"
+                    {% if person.id in item.person_ids %}checked{% endif %}
+                  >
+                  <span>{{ person.display_name }}</span>
+                  <small>{{ person.badge }}</small>
+                </label>
+                {% endfor %}
+              </div>
+            </label>
+          </div>
+
+          <div class="export-form-actions">
+            <button type="submit" data-action="export-save-template">保存配置</button>
+            <button type="button" data-action="export-run" data-template-id="{{ item.id }}">执行导出</button>
+            <button type="button" data-action="export-show-runs" data-template-id="{{ item.id }}">查看历史</button>
+            <button
+              type="button"
+              data-action="export-delete-template"
+              data-template-id="{{ item.id }}"
+              {% if item.latest_run %}disabled{% endif %}
+            >
+              删除模板
+            </button>
+          </div>
+
           {% if item.latest_run %}
-          #{{ item.latest_run.id }} / {{ item.latest_run.status }}
-          {% else %}
-          -
+          <p class="review-focus-hint">已有导出历史的模板暂不支持删除；如不再使用，直接停用即可。</p>
           {% endif %}
-        </td>
-        <td>
-          <button type="button" data-action="export-run" data-template-id="{{ item.id }}">执行导出</button>
-          <button type="button" data-action="export-show-runs" data-template-id="{{ item.id }}">查看历史</button>
-        </td>
-      </tr>
+        </form>
+      </article>
       {% endfor %}
-    </tbody>
-  </table>
-  <ul data-export-runs-list></ul>
+    </div>
+    {% else %}
+    <p class="review-focus-hint">当前还没有导出模板，先在上方创建一个。</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h3>模板预览</h3>
+    <p>这里展示各模板按当前规则命中的真实样例。点击下方原图缩略图，会把预览器切到对应照片。</p>
+    {% if templates %}
+      {% if viewer_items %}
+      {% include "components/media_viewer.html" %}
+      {% else %}
+      <p class="review-focus-hint">当前模板还没有可预览命中样例。</p>
+      {% endif %}
+
+      <div class="export-template-preview-list">
+        {% for item in templates %}
+        <article class="export-template-preview panel">
+          <header class="export-template-preview-head">
+            <div>
+              <h4>{{ item.name }}</h4>
+              <p>共 {{ item.preview_match_count }} 张命中 · only {{ item.matched_only_count }} / group {{ item.matched_group_count }}</p>
+            </div>
+            <div>
+              <p>输出目录</p>
+              <code>{{ item.output_root }}</code>
+            </div>
+          </header>
+
+          {% if item.preview_error %}
+          <p class="review-focus-hint">{{ item.preview_error }}</p>
+          {% elif item.preview_samples %}
+          <div class="export-preview-grid-shell">
+            <div class="export-preview-grid" role="list" aria-label="{{ item.name }} 命中原图列表">
+            {% for sample in item.preview_samples %}
+            <button
+              type="button"
+              class="export-preview-tile"
+              {% if sample.viewer_index is not none %}
+              data-export-focus-index="{{ sample.viewer_index }}"
+              data-export-focus-label="{{ sample.viewer_label }}"
+              {% else %}
+              disabled
+              {% endif %}
+              title="{{ sample.viewer_label }}"
+              aria-label="{{ sample.viewer_label }}"
+            >
+              <img src="{{ sample.preview_url }}" alt="{{ sample.viewer_label }}" loading="lazy">
+              <span class="export-preview-tile-badge">{{ sample.bucket_label }}</span>
+            </button>
+            {% endfor %}
+            </div>
+          </div>
+          {% else %}
+          <p class="review-focus-hint">当前规则下暂无命中样例。</p>
+          {% endif %}
+        </article>
+        {% endfor %}
+      </div>
+    {% else %}
+    <p class="review-focus-hint">当前还没有导出模板，先创建模板后再查看命中预览。</p>
+    {% endif %}
+  </section>
+
+  <section class="panel export-runs-panel">
+    <h3>运行历史</h3>
+    <p>点击任一模板的“查看历史”后，这里会展示最近 20 次导出记录。</p>
+    <ul class="export-runs-list" data-export-runs-list>
+      <li>尚未加载</li>
+    </ul>
+  </section>
 </section>
 {% endblock %}

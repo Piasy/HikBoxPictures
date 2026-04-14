@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -48,4 +49,8 @@ def test_review_queue_visual_check_smoke(tmp_path: Path) -> None:
     summary_path = output_dir / "review-queue-visual-summary.json"
     assert summary_path.exists()
     assert (output_dir / "captures" / "workspace" / "reviews-desktop.png").exists()
-    assert (output_dir / "captures" / "workspace" / "reviews-mobile.png").exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    result_entry = summary["results"][0]
+    assert result_entry["desktop"]["metrics"]["queue_open_blocks"] == 0
+    assert result_entry["desktop"]["expanded_metrics"]["first_queue_open"] is True
+    assert result_entry["desktop"]["sticky_metrics"]["item_ids"] == ["queue-new_person"]

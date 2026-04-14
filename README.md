@@ -81,6 +81,9 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `POST /api/reviews/{id}/actions/resolve`
 - `POST /api/reviews/{id}/actions/ignore`
 - `GET /api/export/templates`
+- `POST /api/export/templates`
+- `PUT /api/export/templates/{template_id}`
+- `DELETE /api/export/templates/{template_id}`
 - `GET /api/export/templates/{template_id}/preview`
 - `POST /api/export/templates/{template_id}/actions/run`
 - `GET /api/export/templates/{template_id}/runs`
@@ -100,7 +103,7 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /people/{person_id}`：人物详情维护页
 - `GET /reviews`：待审核队列
 - `GET /sources`：源目录与扫描进度
-- `GET /exports`：导出模板列表
+- `GET /exports`：导出模板创建、管理、预览与执行页
 - `GET /logs`：运行日志列表
 - `GET /static/style.css`、`GET /static/app.js`：静态资源
 

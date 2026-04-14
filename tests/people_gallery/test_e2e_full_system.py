@@ -44,7 +44,7 @@ def test_full_system_webui_flow_keeps_review_queue_available(tmp_path) -> None:
         exports_html = client.get("/exports").text
         assert 'data-viewer-layer="original"' in detail_html
         assert 'data-action="viewer-next"' in reviews_html
-        assert "export-preview-sample" in exports_html
+        assert "export-preview-tile" in exports_html
 
         ws.inject_broken_image_for_photo(int(ws.media_photo_id))
         broken_preview = client.get(f"/api/photos/{ws.media_photo_id}/preview")
@@ -72,7 +72,7 @@ def test_full_system_mock_embedding_flow_has_people_and_export_sample(tmp_path) 
 
     assert "人物甲" in people_html
     assert "人物乙" in people_html
-    assert "export-preview-sample" in exports_html
+    assert "export-preview-tile" in exports_html
     assert preview.status_code == 200
     assert preview.json()["matched_only_count"] >= 1
 
@@ -102,8 +102,8 @@ def test_full_system_control_plane_happy_path_init_to_logs(tmp_path, capsys) -> 
         review_items = reviews_before.json()
         assert len(review_items) >= 1
         review_id = int(review_items[0]["id"])
-        dismiss_resp = client.post(f"/api/reviews/{review_id}/actions/dismiss")
-        assert dismiss_resp.status_code == 200
+        ignore_resp = client.post(f"/api/reviews/{review_id}/actions/ignore")
+        assert ignore_resp.status_code == 200
         reviews_after = client.get("/api/reviews")
         assert reviews_after.status_code == 200
         assert len(reviews_after.json()) == len(review_items) - 1

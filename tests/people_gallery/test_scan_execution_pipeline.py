@@ -247,6 +247,7 @@ def test_scan_missing_source_marks_session_failed(tmp_path: Path, capsys) -> Non
 
     assert main(["scan", "--workspace", str(workspace)]) == 1
     out = capsys.readouterr().out
+    assert "scan session_id=" in out
     assert "status=failed" in out
 
     conn = _connect_workspace_db(workspace)

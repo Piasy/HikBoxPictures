@@ -24,28 +24,43 @@ def test_export_preview_has_sample_cards(tmp_path) -> None:
         client = TestClient(create_app(workspace=ws.root))
         html = client.get("/exports").text
 
-        assert "export-preview-sample" in html
+        assert "export-preview-grid" in html
+        assert "export-preview-tile" in html
+        assert "家庭模板" in html
+        assert "IMG_ONLY_1.jpg" not in html
+        assert "<code>/api/photos/1/original</code>" not in html
+        assert "/api/photos/1/preview" in html
     finally:
         ws.close()
 
 
-def test_export_preview_samples_skip_photos_without_observation_before_limit(tmp_path) -> None:
-    ws = build_seed_workspace(tmp_path)
+def test_export_preview_samples_ignore_unrelated_assets(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
     try:
         sources = ws.source_repo.list_sources(active=True)
         assert sources
         source_id = int(sources[0]["id"])
         asset_ids = ws.seed_source_assets(
             source_id,
-            [f"/tmp/no-observation-{index}.jpg" for index in range(1, 8)],
+            ["/tmp/unrelated-export-preview.jpg"],
         )
-        ws.asset_repo.ensure_face_observation(asset_ids[6])
+        ws.asset_repo.ensure_face_observation(asset_ids[0])
         ws.conn.commit()
 
         client = TestClient(create_app(workspace=ws.root))
         html = client.get("/exports").text
 
-        assert "export-preview-sample" in html
-        assert f"/api/photos/{asset_ids[6]}/original" in html
+        assert "export-preview-tile" in html
+        assert f"/api/photos/{asset_ids[0]}/original" not in html
+        assert f"/api/photos/{asset_ids[0]}/preview" not in html
     finally:
         ws.close()
+
+
+def test_export_preview_page_hides_fake_samples_without_templates(tmp_path) -> None:
+    client = TestClient(create_app(workspace=tmp_path))
+    html = client.get("/exports").text
+
+    assert "当前还没有导出模板" in html
+    assert "export-preview-tile" not in html
+    assert "export-photo-" not in html

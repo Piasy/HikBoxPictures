@@ -174,12 +174,12 @@ def test_run_stage_rollback_when_mid_stage_failed(tmp_path) -> None:
         first = ws.asset_repo.get_asset(first_asset_id)
         second = ws.asset_repo.get_asset(second_asset_id)
         assert first is not None and second is not None
-        assert first["processing_status"] == "metadata_done"
+        assert first["processing_status"] == "faces_done"
         assert second["processing_status"] == "metadata_done"
 
         first_obs_count, first_emb_count = _count_face_rows(ws, first_asset_id)
         second_obs_count, second_emb_count = _count_face_rows(ws, second_asset_id)
-        assert first_obs_count == 0
+        assert first_obs_count >= 1
         assert second_obs_count == 0
         assert first_emb_count == 0
         assert second_emb_count == 0
@@ -188,7 +188,7 @@ def test_run_stage_rollback_when_mid_stage_failed(tmp_path) -> None:
         assert source_state is not None
         assert source_state["discovered_count"] == 2
         assert source_state["metadata_done_count"] == 2
-        assert source_state["faces_done_count"] == 0
+        assert source_state["faces_done_count"] == 1
         assert source_state["embeddings_done_count"] == 0
         assert source_state["assignment_done_count"] == 0
     finally:

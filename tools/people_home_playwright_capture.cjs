@@ -25,16 +25,12 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   const url = String(args.url || "");
   const mode = String(args.mode || "");
-  const viewport = String(args.viewport || "desktop");
   const screenshotPath = String(args.screenshot || "");
   const reportPath = String(args.report || "");
   if (!url || !mode || !screenshotPath || !reportPath) {
-    throw new Error("缺少必要参数: --url --mode --viewport --screenshot --report");
+    throw new Error("缺少必要参数: --url --mode --screenshot --report");
   }
-  const viewportConfig =
-    viewport === "mobile"
-      ? { width: 390, height: 844, isMobile: true, hasTouch: true }
-      : { width: 1440, height: 1200, isMobile: false, hasTouch: false };
+  const viewportConfig = { width: 1440, height: 1200 };
 
   const consoleErrors = [];
   const pageErrors = [];
@@ -44,8 +40,6 @@ async function main() {
   const page = await browser.newPage({
     viewport: { width: viewportConfig.width, height: viewportConfig.height },
     deviceScaleFactor: 1,
-    isMobile: viewportConfig.isMobile,
-    hasTouch: viewportConfig.hasTouch,
   });
   page.on("console", (message) => {
     if (message.type() === "error") {
@@ -134,7 +128,7 @@ async function main() {
 
   const report = {
     ...metrics,
-    viewport,
+    viewport: "desktop",
     screenshot: screenshotPath,
   };
   fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf-8");

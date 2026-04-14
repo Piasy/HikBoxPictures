@@ -66,3 +66,23 @@ def test_review_dismiss_action_is_idempotent_and_keeps_first_resolved_at(tmp_pat
         assert row["resolved_at"] == first_resolved_at
     finally:
         ws.close()
+
+
+def test_review_resolve_action_supports_batch_review_ids(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+
+        response = client.post("/api/reviews/1/actions/resolve", json={"review_ids": [1, 2]})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["review_ids"] == [1, 2]
+        assert body["updated_count"] == 2
+
+        first = ws.get_review_item(1)
+        second = ws.get_review_item(2)
+        assert first is not None and first["status"] == "resolved"
+        assert second is not None and second["status"] == "resolved"
+    finally:
+        ws.close()

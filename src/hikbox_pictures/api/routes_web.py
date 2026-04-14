@@ -7,6 +7,7 @@ from fastapi.responses import HTMLResponse
 
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.services.web_query_service import WebQueryService
+from hikbox_pictures.workspace import ensure_workspace_layout
 
 router = APIRouter()
 
@@ -70,6 +71,7 @@ def reviews_page(request: Request) -> HTMLResponse:
                 "page_key": "reviews",
                 "queues": review_page["queues"],
                 "review_summary": review_page["summary"],
+                "assignable_people": review_page["assignable_people"],
                 "viewer_items": review_page["viewer_items"],
             },
         )
@@ -103,14 +105,18 @@ def exports_page(request: Request) -> HTMLResponse:
     conn = connect_db(Path(request.app.state.db_path))
     try:
         service = WebQueryService(conn)
+        export_page = service.get_export_page()
+        workspace_paths = ensure_workspace_layout(Path(request.app.state.workspace))
         return _get_templates(request).TemplateResponse(
             request=request,
             name="export_templates.html",
             context={
                 "page_title": "导出模板",
                 "page_key": "exports",
-                "templates": service.list_export_templates(),
-                "viewer_items": service.list_export_preview_samples(limit=6),
+                "templates": export_page["templates"],
+                "available_people": export_page["available_people"],
+                "viewer_items": export_page["viewer_items"],
+                "default_output_root": str(workspace_paths.exports_dir),
             },
         )
     finally:

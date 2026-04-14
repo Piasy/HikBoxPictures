@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 try:
@@ -134,7 +135,12 @@ class ScanOrchestrator:
         )
         return checkpoint_id
 
-    def execute_session(self, session_id: int) -> dict[str, int]:
+    def execute_session(
+        self,
+        session_id: int,
+        *,
+        progress_reporter: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, int]:
         execution = ScanExecutionService(
             self.conn,
             checkpoint_writer=lambda source_id, phase, cursor_json, pending: self.write_checkpoint(
@@ -143,12 +149,17 @@ class ScanOrchestrator:
                 cursor_json=cursor_json,
                 pending_asset_count=pending,
             ),
+            progress_reporter=progress_reporter,
         )
         return execution.run_session(session_id)
 
-    def start_or_resume_and_run(self) -> int:
+    def start_or_resume_and_run(
+        self,
+        *,
+        progress_reporter: Callable[[dict[str, Any]], None] | None = None,
+    ) -> int:
         session_id = self.start_or_resume()
-        self.execute_session(session_id)
+        self.execute_session(session_id, progress_reporter=progress_reporter)
         return session_id
 
     def abort(self) -> dict[str, Any]:
@@ -251,9 +262,14 @@ class ScanOrchestrator:
             )
             raise
 
-    def start_new_and_run(self, *, abandon_resumable: bool) -> int:
+    def start_new_and_run(
+        self,
+        *,
+        abandon_resumable: bool,
+        progress_reporter: Callable[[dict[str, Any]], None] | None = None,
+    ) -> int:
         session_id = self.start_new(abandon_resumable=abandon_resumable)
-        self.execute_session(session_id)
+        self.execute_session(session_id, progress_reporter=progress_reporter)
         return session_id
 
     def get_status(self) -> dict[str, Any]:

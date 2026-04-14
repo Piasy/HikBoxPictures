@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import json
 import re
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import numpy as np
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
 from hikbox_pictures.cli import main
+from hikbox_pictures.deepface_engine import embedding_to_blob
 from hikbox_pictures.services.web_query_service import WebQueryService
 from tests.people_gallery.real_image_helper import copy_raw_face_image
 
@@ -21,6 +24,69 @@ sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
 build_seed_workspace_with_mock_embeddings = _MODULE.build_seed_workspace_with_mock_embeddings
+
+
+def _append_new_person_review(ws, *, file_name: str, vector: np.ndarray) -> tuple[int, int]:
+    source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
+    asset_id = ws.asset_repo.add_photo_asset(
+        source_id,
+        str((ws.root / file_name).resolve()),
+        processing_status="assignment_done",
+    )
+    observation_id = int(
+        ws.conn.execute(
+            """
+            INSERT INTO face_observation(
+                photo_asset_id,
+                bbox_top,
+                bbox_right,
+                bbox_bottom,
+                bbox_left,
+                face_area_ratio,
+                detector_key,
+                detector_version,
+                active
+            )
+            VALUES (?, 0.1, 0.9, 0.9, 0.1, 0.22, 'retinaface', 'MockArcFace', 1)
+            RETURNING id
+            """,
+            (asset_id,),
+        ).fetchone()["id"]
+    )
+    ws.conn.execute(
+        """
+        INSERT INTO face_embedding(
+            face_observation_id,
+            feature_type,
+            model_key,
+            dimension,
+            vector_blob,
+            normalized
+        )
+        VALUES (?, 'face', 'MockArcFace@retinaface', ?, ?, 1)
+        """,
+        (
+            observation_id,
+            int(vector.size),
+            embedding_to_blob(vector),
+        ),
+    )
+    payload = json.dumps(
+        {
+            "face_observation_id": observation_id,
+            "candidates": [],
+            "model_key": "MockArcFace@retinaface",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    review_id = ws.review_repo.create_review_item(
+        "new_person",
+        payload_json=payload,
+        priority=15,
+        face_observation_id=observation_id,
+    )
+    return int(review_id), observation_id
 
 
 def test_people_page_has_cards_and_real_names(tmp_path) -> None:
@@ -70,9 +136,26 @@ def test_reviews_page_has_typed_queues(tmp_path) -> None:
         assert "queue-possible_split" in html
         assert "queue-low_confidence_assignment" in html
         assert "people-gallery-viewer" not in html
+        assert 'data-queue-toggle' in html
+        assert 'data-review-queue-sticky-stack' in html
         assert 'data-action="viewer-prev"' in html
         assert 'data-action="viewer-next"' in html
-        assert 'data-action="viewer-toggle-bbox"' in html
+        assert 'data-action="viewer-toggle-bbox"' not in html
+        assert 'data-action="review-create-person"' in html
+        assert 'data-action="review-assign-person"' in html
+        assert "P15" not in html
+        queue_tags = re.findall(r'(<details\s+id="queue-[^"]+"[^>]*>)', html)
+        assert len(queue_tags) == 4
+        assert all(" open" not in tag for tag in queue_tags)
+        new_person_section = re.search(
+            r'(<details\s+id="queue-new_person"[\s\S]*?</details>)',
+            html,
+        )
+        assert new_person_section is not None
+        assert 'data-action="review-create-person"' in new_person_section.group(1)
+        assert 'data-action="review-assign-person"' in new_person_section.group(1)
+        assert 'data-action="review-ignore"' in new_person_section.group(1)
+        assert 'data-action="review-dismiss"' not in new_person_section.group(1)
     finally:
         ws.close()
 
@@ -93,6 +176,67 @@ def test_reviews_page_links_queue_cards_to_viewer_when_samples_exist(tmp_path) -
     assert "review #1" in html
     assert "/api/observations/" in html
     assert "人物甲" in html
+
+
+def test_reviews_page_groups_similar_new_person_samples(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        review_a, _ = _append_new_person_review(
+            ws,
+            file_name="cluster-a.jpg",
+            vector=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        review_b, _ = _append_new_person_review(
+            ws,
+            file_name="cluster-b.jpg",
+            vector=np.asarray([0.98, 0.18, 0.0, 0.0], dtype=np.float32),
+        )
+        review_c, _ = _append_new_person_review(
+            ws,
+            file_name="cluster-c.jpg",
+            vector=np.asarray([0.96, 0.27, 0.0, 0.0], dtype=np.float32),
+        )
+        review_d, _ = _append_new_person_review(
+            ws,
+            file_name="cluster-d.jpg",
+            vector=np.asarray([0.94, 0.34, 0.0, 0.0], dtype=np.float32),
+        )
+        review_e, _ = _append_new_person_review(
+            ws,
+            file_name="cluster-e.jpg",
+            vector=np.asarray([-1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        ws.conn.commit()
+
+        page = WebQueryService(ws.conn).get_review_page()
+        new_person_queue = next(queue for queue in page["queues"] if queue["review_type"] == "new_person")
+        grouped_item = next(
+            item
+            for item in new_person_queue["items"]
+            if set(item["review_ids"]) == {review_a, review_b, review_c, review_d}
+        )
+
+        assert new_person_queue["raw_count"] == 6
+        assert new_person_queue["count"] == 3
+        assert grouped_item["observation_label"] == "4 张样本"
+        assert grouped_item["review_label"] == f"review #{review_a} 等 4 条"
+        assert grouped_item["preview_total_count"] == 4
+        assert grouped_item["preview_visible_count"] == 3
+        assert grouped_item["preview_summary"] == "预览 3 / 4"
+        assert len(grouped_item["preview_faces"]) == 4
+
+        client = TestClient(create_app(workspace=ws.root))
+        html = client.get("/reviews").text
+
+        assert "已自动归成" in html
+        assert f"review #{review_a} 等 4 条" in html
+        assert "预览 3 / 4" in html
+        assert 'data-preview-shift="-1"' in html
+        assert 'data-preview-shift="1"' in html
+        assert f'data-review-ids="{review_a},{review_b},{review_c},{review_d}"' in html
+        assert f"review #{review_e}" in html
+    finally:
+        ws.close()
 
 
 def test_reviews_fall_back_to_active_cover_when_review_observation_is_inactive(tmp_path) -> None:
@@ -161,7 +305,7 @@ def test_reviews_possible_merge_preview_faces_bind_distinct_viewer_targets(tmp_p
         client = TestClient(create_app(workspace=ws.root))
         html = client.get("/reviews").text
         block_match = re.search(
-            r'<article\s+id="queue-possible_merge".*?</article>',
+            r'<details\s+id="queue-possible_merge".*?</details>',
             html,
             flags=re.DOTALL,
         )
@@ -195,6 +339,12 @@ def test_sources_exports_logs_pages_bind_real_data(tmp_path) -> None:
         template = ws.export_repo.get_template(ws.export_template_id)
         assert template is not None
         assert str(template["name"]) in exports_html
+        assert "新建模板" in exports_html
+        assert "管理已有模板" in exports_html
+        assert 'data-export-form' in exports_html
+        assert 'data-export-mode="create"' in exports_html
+        assert 'data-export-mode="update"' in exports_html
+        assert 'data-action="export-delete-template"' in exports_html
 
         assert "seed_ready" in logs_html
     finally:
@@ -227,6 +377,7 @@ def test_pages_render_empty_state_with_fresh_workspace(tmp_path) -> None:
     assert "已注册源目录（0）" in sources_html
 
     assert "导出模板" in exports_html
+    assert "新建模板" in exports_html
     assert "输出目录" in exports_html
 
     assert "运行日志" in logs_html

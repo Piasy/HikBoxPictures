@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from types import SimpleNamespace
 from pathlib import Path
 
@@ -91,3 +92,66 @@ def test_source_commands_add_list_remove(tmp_path: Path, capsys) -> None:
     out_list2 = capsys.readouterr().out
     assert f"id={source_id}" in out_list2
     assert "active=0" in out_list2
+
+
+def test_scan_polls_status_snapshot_on_interval(monkeypatch, tmp_path: Path, capsys) -> None:
+    from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
+
+    workspace = tmp_path / "workspace"
+    source_root = tmp_path / "input"
+    source_root.mkdir(parents=True)
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "source",
+                "add",
+                "--workspace",
+                str(workspace),
+                "--name",
+                "sample-input",
+                "--root-path",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    monkeypatch.setattr(cli_module, "_SCAN_PROGRESS_POLL_INTERVAL_SECONDS", 0.01)
+
+    def fake_execute_session(self, session_id: int, *, progress_reporter=None) -> dict[str, int]:
+        time.sleep(0.04)
+        self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET status = 'completed',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE scan_session_id = ?
+            """,
+            (int(session_id),),
+        )
+        self.scan_repo.mark_session_completed(int(session_id))
+        self.conn.commit()
+        return {
+            "session_id": int(session_id),
+            "new_asset_count": 0,
+            "completed_source_count": 1,
+            "failed_source_count": 0,
+            "session_completed": 1,
+            "session_failed": 0,
+        }
+
+    monkeypatch.setattr(ScanOrchestrator, "execute_session", fake_execute_session)
+
+    rc_scan = main(["scan", "--workspace", str(workspace)])
+
+    assert rc_scan == 0
+    out_scan = capsys.readouterr().out
+    assert out_scan.count("scan session_id=") >= 3
+    assert "source id=" in out_scan
+    assert "status=running" in out_scan
+    assert "status=completed" in out_scan
+    assert re.search(r"source id=\d+ library_source_id=\d+ status=completed", out_scan) is not None

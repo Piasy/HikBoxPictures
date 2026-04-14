@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 
 try:
     import sqlite3
@@ -17,8 +18,10 @@ from hikbox_pictures.deepface_engine import (
     DeepFaceEngine,
     DetectedFace,
     embedding_to_blob,
+    resolve_ann_distance_threshold,
 )
 from hikbox_pictures.ann import AnnIndexStore
+from hikbox_pictures.image_io import load_oriented_image
 from hikbox_pictures.metadata import resolve_capture_fields
 from hikbox_pictures.repositories import AssetRepo, PersonRepo, ReviewRepo, ScanRepo
 from hikbox_pictures.services.ann_assignment_service import AnnAssignmentService
@@ -30,6 +33,38 @@ from hikbox_pictures.services.asset_pipeline import (
     previous_status_for_stage,
     statuses_at_or_above,
 )
+
+_PROGRESS_FLUSH_INTERVAL_SECONDS = 5.0
+_STAGE_PROGRESS_COUNT_KEY = {
+    "metadata": "metadata_done_count",
+    "faces": "faces_done_count",
+    "embeddings": "embeddings_done_count",
+    "assignment": "assignment_done_count",
+}
+
+
+@dataclass
+class _ProgressTracker:
+    progress: dict[str, int]
+    last_flush_at: float
+    dirty: bool = False
+
+    def advance_stage(self, stage_name: str) -> None:
+        key = _STAGE_PROGRESS_COUNT_KEY[stage_name]
+        self.progress[key] = int(self.progress.get(key, 0)) + 1
+        self.dirty = True
+
+    def should_flush(self, now: float) -> bool:
+        return self.dirty and (now - self.last_flush_at) >= _PROGRESS_FLUSH_INTERVAL_SECONDS
+
+    def mark_flushed(self, now: float) -> None:
+        self.last_flush_at = now
+        self.dirty = False
+
+    def replace(self, progress: dict[str, int], *, now: float) -> None:
+        self.progress = dict(progress)
+        self.last_flush_at = now
+        self.dirty = False
 
 
 class AssetStageRunner:
@@ -59,13 +94,26 @@ class AssetStageRunner:
         if self.conn.in_transaction:
             raise RuntimeError("run_stage 不支持在外部事务中调用，请在无事务上下文调用")
 
-        self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            required_status = previous_status_for_stage(stage_name)
-            assets = self.asset_repo.list_assets_for_source_with_status(library_source_id, required_status)
+        required_status = previous_status_for_stage(stage_name)
+        assets = self.asset_repo.list_assets_for_source_with_status(library_source_id, required_status)
+        tracker = _ProgressTracker(
+            progress=self._reconcile_source_progress(session_source_id, library_source_id),
+            last_flush_at=time.monotonic(),
+        )
 
-            for asset in assets:
-                asset_id = int(asset["id"])
+        for asset in assets:
+            asset_id = int(asset["id"])
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                live_asset = self.asset_repo.get_asset(asset_id)
+                if live_asset is None:
+                    raise LookupError(f"photo_asset 不存在: {asset_id}")
+                if str(live_asset["processing_status"]) != required_status:
+                    progress = self.refresh_source_progress(session_source_id, library_source_id)
+                    tracker.replace(progress, now=time.monotonic())
+                    self.conn.commit()
+                    continue
+
                 if stage_name == "metadata":
                     self._run_metadata_stage(asset_id, Path(str(asset["primary_path"])), scan_session_id)
                 elif stage_name == "faces":
@@ -75,12 +123,26 @@ class AssetStageRunner:
                 else:
                     self._run_assignment_stage(asset_id, scan_session_id)
 
-            progress = self.refresh_source_progress(session_source_id, library_source_id)
-            self.conn.commit()
-            return progress
-        except Exception:
-            self.conn.rollback()
-            raise
+                tracker.advance_stage(stage_name)
+                now = time.monotonic()
+                if tracker.should_flush(now):
+                    self._write_source_progress_snapshot(session_source_id, tracker.progress)
+                    tracker.mark_flushed(now)
+                self.conn.commit()
+            except Exception as exc:
+                self.conn.rollback()
+                try:
+                    tracker.replace(
+                        self._reconcile_source_progress(session_source_id, library_source_id),
+                        now=time.monotonic(),
+                    )
+                except Exception as reconcile_exc:
+                    exc.add_note(f"进度校准失败: {reconcile_exc}")
+                raise
+
+        final_progress = self._reconcile_source_progress(session_source_id, library_source_id)
+        tracker.replace(final_progress, now=time.monotonic())
+        return final_progress
 
     def refresh_source_progress(self, session_source_id: int, library_source_id: int) -> dict[str, int]:
         discovered_count = self.asset_repo.count_assets_for_source(library_source_id)
@@ -101,21 +163,41 @@ class AssetStageRunner:
             tuple(statuses_at_or_above("assignment_done")),
         )
 
+        return self._write_source_progress_snapshot(
+            session_source_id,
+            {
+                "discovered_count": discovered_count,
+                "metadata_done_count": metadata_done_count,
+                "faces_done_count": faces_done_count,
+                "embeddings_done_count": embeddings_done_count,
+                "assignment_done_count": assignment_done_count,
+            },
+        )
+
+    def _write_source_progress_snapshot(
+        self,
+        session_source_id: int,
+        progress: dict[str, int],
+    ) -> dict[str, int]:
         self.scan_repo.update_source_progress_counts(
             session_source_id,
-            discovered_count=discovered_count,
-            metadata_done_count=metadata_done_count,
-            faces_done_count=faces_done_count,
-            embeddings_done_count=embeddings_done_count,
-            assignment_done_count=assignment_done_count,
+            discovered_count=int(progress["discovered_count"]),
+            metadata_done_count=int(progress["metadata_done_count"]),
+            faces_done_count=int(progress["faces_done_count"]),
+            embeddings_done_count=int(progress["embeddings_done_count"]),
+            assignment_done_count=int(progress["assignment_done_count"]),
         )
-        return {
-            "discovered_count": discovered_count,
-            "metadata_done_count": metadata_done_count,
-            "faces_done_count": faces_done_count,
-            "embeddings_done_count": embeddings_done_count,
-            "assignment_done_count": assignment_done_count,
-        }
+        return dict(progress)
+
+    def _reconcile_source_progress(self, session_source_id: int, library_source_id: int) -> dict[str, int]:
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            progress = self.refresh_source_progress(session_source_id, library_source_id)
+            self.conn.commit()
+            return progress
+        except Exception:
+            self.conn.rollback()
+            raise
 
     def _run_metadata_stage(self, asset_id: int, primary_path: Path, scan_session_id: int) -> None:
         capture_datetime, capture_month = resolve_capture_fields(primary_path)
@@ -229,7 +311,14 @@ class AssetStageRunner:
     def ann_assignment_service(self) -> AnnAssignmentService:
         if self._ann_assignment_service is None:
             ann_store = AnnIndexStore(self.workspace / ".hikbox" / "artifacts" / "ann" / "prototype_index.npz")
-            review_threshold = max(DEFAULT_REVIEW_THRESHOLD, float(self.face_engine.distance_threshold))
+            review_threshold = max(
+                DEFAULT_REVIEW_THRESHOLD,
+                resolve_ann_distance_threshold(
+                    float(self.face_engine.distance_threshold),
+                    distance_metric=self.face_engine.distance_metric,
+                    threshold_source=self.face_engine.threshold_source,
+                ),
+            )
             auto_assign_threshold = min(
                 review_threshold,
                 max(DEFAULT_AUTO_ASSIGN_THRESHOLD, review_threshold * 0.75),
@@ -273,8 +362,8 @@ class AssetStageRunner:
             width, height = face.image_size
             if int(width) > 0 and int(height) > 0:
                 return int(width), int(height)
-        with Image.open(primary_path) as image:
-            width, height = image.size
+        image = load_oriented_image(primary_path)
+        width, height = image.size
         if width <= 0 or height <= 0:
             raise ValueError(f"图片尺寸非法: {primary_path}")
         return int(width), int(height)
@@ -310,13 +399,13 @@ class AssetStageRunner:
         self.face_crop_dir.mkdir(parents=True, exist_ok=True)
         out_path = self.face_crop_dir / f"obs-{observation_id}.jpg"
 
-        with Image.open(source_path) as image:
-            width, height = image.size
-            left = max(0, min(width - 1, int(float(row["bbox_left"]) * width)))
-            top = max(0, min(height - 1, int(float(row["bbox_top"]) * height)))
-            right = max(left + 1, min(width, int(float(row["bbox_right"]) * width)))
-            bottom = max(top + 1, min(height, int(float(row["bbox_bottom"]) * height)))
-            image.crop((left, top, right, bottom)).convert("RGB").save(out_path, format="JPEG")
+        image = load_oriented_image(source_path)
+        width, height = image.size
+        left = max(0, min(width - 1, int(float(row["bbox_left"]) * width)))
+        top = max(0, min(height - 1, int(float(row["bbox_top"]) * height)))
+        right = max(left + 1, min(width, int(float(row["bbox_right"]) * width)))
+        bottom = max(top + 1, min(height, int(float(row["bbox_bottom"]) * height)))
+        image.crop((left, top, right, bottom)).convert("RGB").save(out_path, format="JPEG")
 
         self.asset_repo.update_observation_crop_path(observation_id, str(out_path))
         return out_path

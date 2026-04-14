@@ -18,18 +18,30 @@ class ExportRepo:
         output_root: str,
         include_group: bool = True,
         export_live_mov: bool = False,
+        start_datetime: str | None = None,
+        end_datetime: str | None = None,
         enabled: bool = True,
     ) -> int:
         cursor = self.conn.execute(
             """
-            INSERT INTO export_template(name, output_root, include_group, export_live_mov, enabled)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO export_template(
+                name,
+                output_root,
+                include_group,
+                export_live_mov,
+                start_datetime,
+                end_datetime,
+                enabled
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 name,
                 output_root,
                 1 if include_group else 0,
                 1 if export_live_mov else 0,
+                start_datetime,
+                end_datetime,
                 1 if enabled else 0,
             ),
         )
@@ -44,6 +56,18 @@ class ExportRepo:
             (int(template_id), int(person_id), int(position)),
         )
         return int(cursor.lastrowid)
+
+    def replace_template_people(self, template_id: int, person_ids: list[int]) -> None:
+        self.conn.execute(
+            "DELETE FROM export_template_person WHERE template_id = ?",
+            (int(template_id),),
+        )
+        for position, person_id in enumerate(person_ids):
+            self.add_template_person(
+                template_id=int(template_id),
+                person_id=int(person_id),
+                position=int(position),
+            )
 
     def list_templates(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
@@ -93,6 +117,51 @@ class ExportRepo:
             WHERE id = ?
             """,
             (1 if include_group else 0, int(template_id)),
+        )
+        return int(cursor.rowcount)
+
+    def update_template(
+        self,
+        template_id: int,
+        *,
+        name: str,
+        output_root: str,
+        include_group: bool,
+        export_live_mov: bool,
+        start_datetime: str | None,
+        end_datetime: str | None,
+        enabled: bool,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE export_template
+            SET name = ?,
+                output_root = ?,
+                include_group = ?,
+                export_live_mov = ?,
+                start_datetime = ?,
+                end_datetime = ?,
+                enabled = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                name,
+                output_root,
+                1 if include_group else 0,
+                1 if export_live_mov else 0,
+                start_datetime,
+                end_datetime,
+                1 if enabled else 0,
+                int(template_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def delete_template(self, template_id: int) -> int:
+        cursor = self.conn.execute(
+            "DELETE FROM export_template WHERE id = ?",
+            (int(template_id),),
         )
         return int(cursor.rowcount)
 

@@ -120,6 +120,8 @@ def test_cli_control_plane_happy_path_covers_scan_export_logs(tmp_path: Path, ca
         out_scan = capsys.readouterr().out
         assert "scan session_id=" in out_scan
         assert "mode=incremental" in out_scan
+        assert "status=running" in out_scan
+        assert "status=completed" in out_scan
 
         rc_export = main(
             ["export", "run", "--workspace", str(workspace), "--template-id", str(ws.export_template_id)]
@@ -193,6 +195,7 @@ def test_cli_scan_executes_discover_to_completed_pipeline(tmp_path: Path, capsys
     assert rc_scan == 0
     out_scan = capsys.readouterr().out
     assert "scan session_id=" in out_scan
+    assert "status=running" in out_scan
     assert "status=completed" in out_scan
 
     rc_status = main(["scan", "status", "--workspace", str(workspace)])

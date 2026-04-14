@@ -61,12 +61,21 @@
     if (label) {
       label.textContent = item.label || "";
     }
+    root.dispatchEvent(
+      new CustomEvent("hikbox:viewer-change", {
+        bubbles: true,
+        detail: {
+          index: index,
+          total: items.length,
+          label: item.label || ""
+        }
+      })
+    );
   }
 
   function bindViewer(viewer) {
     viewer.__viewerItems = parseViewerItems(viewer);
     viewer.__viewerIndex = 0;
-    viewer.__bboxVisible = false;
     render(viewer);
 
     var actions = viewer.querySelectorAll("[data-action]");
@@ -77,8 +86,6 @@
           window.hikboxViewer.prev(viewer);
         } else if (action === "viewer-next") {
           window.hikboxViewer.next(viewer);
-        } else if (action === "viewer-toggle-bbox") {
-          window.hikboxViewer.toggleBbox(viewer);
         }
       });
     });
@@ -119,17 +126,6 @@
       nextIndex = Math.max(0, Math.min(Math.floor(nextIndex), viewer.__viewerItems.length - 1));
       viewer.__viewerIndex = nextIndex;
       render(viewer);
-    },
-    toggleBbox: function (target) {
-      var viewer = pickViewer(target);
-      if (!viewer) {
-        return;
-      }
-      viewer.__bboxVisible = !viewer.__bboxVisible;
-      var bbox = viewer.querySelector("[data-viewer-bbox]");
-      if (bbox) {
-        bbox.hidden = !viewer.__bboxVisible;
-      }
     }
   };
 
@@ -138,8 +134,6 @@
       window.hikboxViewer.prev();
     } else if (event.key === "ArrowRight") {
       window.hikboxViewer.next();
-    } else if (event.key === "b" || event.key === "B") {
-      window.hikboxViewer.toggleBbox();
     }
   });
 
@@ -227,8 +221,9 @@
     node.textContent = message || "";
   }
 
-  function bindReviewEvidenceFocus() {
-    var buttons = document.querySelectorAll("[data-review-focus-index]");
+  function bindReviewEvidenceFocus(root) {
+    var scope = root || document;
+    var buttons = scope.querySelectorAll("[data-review-focus-index]");
     buttons.forEach(function (button) {
       button.addEventListener("click", function () {
         var index = button.getAttribute("data-review-focus-index");
@@ -244,28 +239,325 @@
     });
   }
 
-  function bindReviewActions() {
-    var buttons = document.querySelectorAll("[data-action^='review-']");
+  function bindReviewPreviewScrollers(root) {
+    var scope = root || document;
+    var buttons = scope.querySelectorAll("[data-preview-shift]");
+    buttons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var shell = button.closest("[data-preview-shell]");
+        if (!shell) {
+          return;
+        }
+        var scroller = shell.querySelector("[data-preview-scroller]");
+        if (!scroller) {
+          return;
+        }
+        var shift = Number(button.getAttribute("data-preview-shift"));
+        if (!Number.isFinite(shift) || shift === 0) {
+          return;
+        }
+        var step = Math.max(scroller.clientWidth - 24, 96);
+        scroller.scrollBy({
+          left: shift * step,
+          behavior: "smooth"
+        });
+      });
+    });
+  }
+
+  function bindReviewStickyQueueStack(root) {
+    if (window.__hikboxReviewStickyCleanup) {
+      window.__hikboxReviewStickyCleanup();
+      window.__hikboxReviewStickyCleanup = null;
+    }
+
+    var scope = root || document;
+    var stack = scope.querySelector("[data-review-queue-sticky-stack]");
+    if (!stack) {
+      return;
+    }
+    var queueRoot = stack.closest(".review-queues");
+    if (!queueRoot) {
+      return;
+    }
+    var blocks = Array.prototype.slice.call(queueRoot.querySelectorAll(".queue-block"));
+    if (!blocks.length) {
+      return;
+    }
+
+    var stickyTop = 20;
+    var stickyGap = 8;
+    var frameId = 0;
+    var destroyed = false;
+
+    function toggleBlock(block) {
+      if (!block) {
+        return;
+      }
+      block.open = !block.open;
+    }
+
+    function buildStickyItem(block) {
+      var summary = block.querySelector("[data-queue-toggle]");
+      if (!summary) {
+        return null;
+      }
+      var titleText = "";
+      var countText = "";
+      var titleNode = summary.querySelector(".queue-summary-title");
+      var countNode = summary.querySelector(".queue-count");
+      if (titleNode) {
+        titleText = titleNode.textContent || "";
+      }
+      if (countNode) {
+        countText = countNode.textContent || "";
+      }
+
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "queue-summary queue-summary-clone";
+      button.setAttribute("data-review-queue-sticky-item", block.id || "");
+      button.setAttribute("data-queue-type", block.getAttribute("data-queue-type") || "");
+      button.setAttribute("aria-expanded", block.open ? "true" : "false");
+      if (block.id) {
+        button.setAttribute("aria-controls", block.id);
+      }
+
+      var title = document.createElement("span");
+      title.className = "queue-summary-title";
+      title.textContent = titleText;
+
+      var meta = document.createElement("span");
+      meta.className = "queue-summary-meta";
+
+      var count = document.createElement("span");
+      count.className = "queue-count";
+      count.textContent = countText;
+
+      var icon = document.createElement("span");
+      icon.className = "queue-toggle-icon";
+      icon.setAttribute("aria-hidden", "true");
+
+      meta.appendChild(count);
+      meta.appendChild(icon);
+      button.appendChild(title);
+      button.appendChild(meta);
+
+      button.addEventListener("click", function () {
+        toggleBlock(block);
+        scheduleSync();
+      });
+      return button;
+    }
+
+    function collectStickyBlocks() {
+      var activeBlocks = [];
+      var anchorTop = stickyTop;
+      for (var index = 0; index < blocks.length; index += 1) {
+        var block = blocks[index];
+        var summary = block.querySelector("[data-queue-toggle]");
+        if (!summary) {
+          continue;
+        }
+        var rect = summary.getBoundingClientRect();
+        var summaryHeight = Math.ceil(rect.height);
+        if (rect.top <= anchorTop) {
+          activeBlocks.push(block);
+          anchorTop += summaryHeight + stickyGap;
+          continue;
+        }
+        break;
+      }
+      return activeBlocks;
+    }
+
+    function syncStack() {
+      if (destroyed) {
+        return;
+      }
+      frameId = 0;
+      stack.textContent = "";
+
+      var activeBlocks = collectStickyBlocks();
+      if (!activeBlocks.length) {
+        return;
+      }
+
+      var fragment = document.createDocumentFragment();
+      activeBlocks.forEach(function (block) {
+        var item = buildStickyItem(block);
+        if (item) {
+          fragment.appendChild(item);
+        }
+      });
+      stack.appendChild(fragment);
+    }
+
+    function scheduleSync() {
+      if (destroyed || frameId) {
+        return;
+      }
+      frameId = window.requestAnimationFrame(syncStack);
+    }
+
+    function cleanup() {
+      if (destroyed) {
+        return;
+      }
+      destroyed = true;
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+        frameId = 0;
+      }
+      blocks.forEach(function (block) {
+        block.removeEventListener("toggle", scheduleSync);
+      });
+      window.removeEventListener("scroll", scheduleSync);
+      window.removeEventListener("resize", scheduleSync);
+    }
+
+    blocks.forEach(function (block) {
+      block.addEventListener("toggle", scheduleSync);
+    });
+    window.addEventListener("scroll", scheduleSync, { passive: true });
+    window.addEventListener("resize", scheduleSync);
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(scheduleSync).catch(function () {});
+    }
+    window.__hikboxReviewStickyCleanup = cleanup;
+    scheduleSync();
+  }
+
+  function collectOpenReviewQueueIds(root) {
+    var scope = root || document;
+    return Array.prototype.map.call(scope.querySelectorAll(".queue-block[open]"), function (block) {
+      return block.id || "";
+    }).filter(function (value) {
+      return Boolean(value);
+    });
+  }
+
+  function restoreOpenReviewQueueIds(root, queueIds) {
+    var scope = root || document;
+    (queueIds || []).forEach(function (queueId) {
+      var block = scope.querySelector("#" + queueId);
+      if (!block) {
+        return;
+      }
+      if (block.querySelector(".queue-item")) {
+        block.open = true;
+      }
+    });
+  }
+
+  function refreshReviewPagePartial() {
+    var currentHero = document.querySelector(".review-hero");
+    var currentQueues = document.querySelector(".review-queues");
+    if (!currentHero || !currentQueues) {
+      return Promise.resolve(false);
+    }
+
+    var openQueueIds = collectOpenReviewQueueIds(currentQueues);
+    return fetch("/reviews", {
+      headers: {
+        "X-Requested-With": "fetch"
+      }
+    })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("待审核页面刷新失败");
+        }
+        return response.text();
+      })
+      .then(function (html) {
+        var parser = new DOMParser();
+        var nextDocument = parser.parseFromString(html, "text/html");
+        var nextHero = nextDocument.querySelector(".review-hero");
+        var nextQueues = nextDocument.querySelector(".review-queues");
+        if (!nextHero || !nextQueues) {
+          throw new Error("待审核页面缺少可替换节点");
+        }
+
+        currentHero.replaceWith(nextHero);
+        currentQueues.replaceWith(nextQueues);
+        restoreOpenReviewQueueIds(nextQueues, openQueueIds);
+        bindReviewEvidenceFocus(nextQueues);
+        bindReviewPreviewScrollers(nextQueues);
+        bindReviewStickyQueueStack(nextQueues);
+        bindReviewActions(nextQueues);
+        return true;
+      });
+  }
+
+  function bindReviewActions(root) {
+    var scope = root || document;
+    var buttons = scope.querySelectorAll("[data-action^='review-']");
     buttons.forEach(function (button) {
       button.addEventListener("click", function () {
         var action = button.getAttribute("data-action");
         var reviewId = button.getAttribute("data-review-id");
+        var reviewIdsAttr = button.getAttribute("data-review-ids") || "";
+        var actionRoot = button.closest(".review-action-group") || button.closest(".queue-item-actions");
         if (!reviewId) {
           setReviewFeedback("失败: review_id 缺失");
           return;
         }
+        var reviewIds = reviewIdsAttr
+          .split(",")
+          .map(function (value) {
+            return Number(value);
+          })
+          .filter(function (value) {
+            return Number.isFinite(value) && value > 0;
+          });
+        if (!reviewIds.length) {
+          reviewIds = [Number(reviewId)];
+        }
         var path = "";
+        var requestPayload = null;
         if (action === "review-resolve") {
           path = "/api/reviews/" + reviewId + "/actions/resolve";
         } else if (action === "review-dismiss") {
           path = "/api/reviews/" + reviewId + "/actions/dismiss";
         } else if (action === "review-ignore") {
           path = "/api/reviews/" + reviewId + "/actions/ignore";
+        } else if (action === "review-create-person") {
+          var createNameInput = actionRoot ? actionRoot.querySelector("[data-review-create-name]") : null;
+          var displayName = createNameInput ? String(createNameInput.value || "").trim() : "";
+          if (!displayName) {
+            setReviewFeedback("失败: 新人物名称不能为空");
+            return;
+          }
+          path = "/api/reviews/" + reviewId + "/actions/create-person";
+          requestPayload = {
+            review_ids: reviewIds,
+            display_name: displayName
+          };
+        } else if (action === "review-assign-person") {
+          var assignSelect = actionRoot ? actionRoot.querySelector("[data-review-assign-person-id]") : null;
+          var personId = assignSelect ? Number(assignSelect.value) : NaN;
+          if (!Number.isFinite(personId) || personId <= 0) {
+            setReviewFeedback("失败: 请选择目标人物");
+            return;
+          }
+          path = "/api/reviews/" + reviewId + "/actions/assign-person";
+          requestPayload = {
+            review_ids: reviewIds,
+            person_id: personId
+          };
         } else {
           return;
         }
-        setReviewFeedback("执行中...");
-        fetch(path, { method: "POST" })
+        setReviewFeedback("执行中..." + (reviewIds.length > 1 ? "（批量 " + reviewIds.length + " 条）" : ""));
+        var requestInit = { method: "POST" };
+        if (requestPayload) {
+          requestInit.headers = { "Content-Type": "application/json" };
+          requestInit.body = JSON.stringify(requestPayload);
+        } else if (reviewIds.length) {
+          requestInit.headers = { "Content-Type": "application/json" };
+          requestInit.body = JSON.stringify({ review_ids: reviewIds });
+        }
+        fetch(path, requestInit)
           .then(parseJsonResponse)
           .then(function (result) {
             if (!result.ok) {
@@ -274,8 +566,29 @@
               return;
             }
             var status = result.payload && result.payload.status ? String(result.payload.status) : "unknown";
-            setReviewFeedback("完成: review_id=" + reviewId + " status=" + status);
-            window.location.reload();
+            var updatedCount =
+              result.payload && Object.prototype.hasOwnProperty.call(result.payload, "updated_count")
+                ? String(result.payload.updated_count)
+                : String(reviewIds.length || 1);
+            var personLabel = "";
+            if (result.payload && result.payload.display_name) {
+              personLabel = " person=" + String(result.payload.display_name);
+            } else if (result.payload && Object.prototype.hasOwnProperty.call(result.payload, "person_id")) {
+              personLabel = " person_id=" + String(result.payload.person_id);
+            }
+            setReviewFeedback(
+              "完成: review_id=" + reviewId + " status=" + status + " updated=" + updatedCount + personLabel
+            );
+            refreshReviewPagePartial()
+              .then(function (refreshed) {
+                if (!refreshed) {
+                  window.location.reload();
+                  return;
+                }
+              })
+              .catch(function () {
+                window.location.reload();
+              });
           })
           .catch(function (error) {
             setReviewFeedback("失败: " + (error && error.message ? error.message : "网络错误"));
@@ -290,6 +603,82 @@
       return;
     }
     node.textContent = message || "";
+  }
+
+  function collectExportPayload(form) {
+    return {
+      name: String((form.querySelector('[name="name"]') || {}).value || "").trim(),
+      output_root: String((form.querySelector('[name="output_root"]') || {}).value || "").trim(),
+      start_datetime: String((form.querySelector('[name="start_datetime"]') || {}).value || "").trim() || null,
+      end_datetime: String((form.querySelector('[name="end_datetime"]') || {}).value || "").trim() || null,
+      include_group: Boolean(form.querySelector('[name="include_group"]') && form.querySelector('[name="include_group"]').checked),
+      export_live_mov: Boolean(
+        form.querySelector('[name="export_live_mov"]') && form.querySelector('[name="export_live_mov"]').checked
+      ),
+      enabled: Boolean(form.querySelector('[name="enabled"]') && form.querySelector('[name="enabled"]').checked),
+      person_ids: Array.prototype.map
+        .call(form.querySelectorAll('input[name="person_ids"]:checked'), function (input) {
+          return Number(input.value);
+        })
+        .filter(function (value) {
+          return Number.isFinite(value) && value > 0;
+        })
+    };
+  }
+
+  function bindExportPreviewFocus() {
+    var buttons = document.querySelectorAll("[data-export-focus-index]");
+    if (!buttons.length) {
+      return;
+    }
+
+    function syncActiveButton(index, shouldScroll) {
+      var activeButton = null;
+      buttons.forEach(function (button) {
+        var isActive = button.getAttribute("data-export-focus-index") === String(index);
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
+        if (isActive) {
+          activeButton = button;
+        }
+      });
+      if (shouldScroll && activeButton && typeof activeButton.scrollIntoView === "function") {
+        activeButton.scrollIntoView({
+          block: "nearest",
+          inline: "nearest"
+        });
+      }
+    }
+
+    buttons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var index = button.getAttribute("data-export-focus-index");
+        if (!index) {
+          return;
+        }
+        window.hikboxViewer.select(undefined, index);
+        syncActiveButton(index, true);
+        var label = button.getAttribute("data-export-focus-label");
+        if (label) {
+          setExportFeedback("已定位样例: " + label);
+        }
+      });
+    });
+
+    var exportPage = document.querySelector(".export-page");
+    if (exportPage) {
+      exportPage.addEventListener("hikbox:viewer-change", function (event) {
+        if (!event.detail || !Number.isFinite(event.detail.index)) {
+          return;
+        }
+        syncActiveButton(event.detail.index, true);
+      });
+    }
+
+    var viewer = document.querySelector(".export-page .media-viewer");
+    if (viewer && Number.isFinite(viewer.__viewerIndex)) {
+      syncActiveButton(viewer.__viewerIndex, false);
+    }
   }
 
   function renderExportRuns(runs) {
@@ -309,9 +698,57 @@
       item.textContent =
         "#" + String(run.id) +
         " status=" + String(run.status || "unknown") +
+        " started_at=" + String(run.started_at || "-") +
         " exported=" + String(run.exported_count || 0) +
         " failed=" + String(run.failed_count || 0);
       list.appendChild(item);
+    });
+  }
+
+  function bindExportForms() {
+    var forms = document.querySelectorAll("[data-export-form]");
+    forms.forEach(function (form) {
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var mode = form.getAttribute("data-export-mode");
+        var templateId = form.getAttribute("data-template-id");
+        var payload = collectExportPayload(form);
+        var path = "/api/export/templates";
+        var method = "POST";
+        if (mode === "update") {
+          if (!templateId) {
+            setExportFeedback("失败: template_id 缺失");
+            return;
+          }
+          path = "/api/export/templates/" + templateId;
+          method = "PUT";
+        }
+        setExportFeedback(mode === "update" ? "保存中..." : "创建中...");
+        fetch(path, {
+          method: method,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+          .then(parseJsonResponse)
+          .then(function (result) {
+            if (!result.ok) {
+              var detail = result.payload && result.payload.detail ? String(result.payload.detail) : "请求失败";
+              setExportFeedback("失败: " + detail);
+              return;
+            }
+            var savedTemplateId =
+              result.payload && Object.prototype.hasOwnProperty.call(result.payload, "id")
+                ? String(result.payload.id)
+                : templateId || "-";
+            setExportFeedback(
+              (mode === "update" ? "已保存模板" : "已创建模板") + ": template_id=" + savedTemplateId
+            );
+            window.location.reload();
+          })
+          .catch(function (error) {
+            setExportFeedback("失败: " + (error && error.message ? error.message : "网络错误"));
+          });
+      });
     });
   }
 
@@ -371,14 +808,48 @@
           });
       });
     });
+
+    var deleteButtons = document.querySelectorAll('[data-action="export-delete-template"]');
+    deleteButtons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var templateId = button.getAttribute("data-template-id");
+        if (!templateId) {
+          setExportFeedback("失败: template_id 缺失");
+          return;
+        }
+        if (!window.confirm("确认删除模板 #" + templateId + " 吗？")) {
+          return;
+        }
+        setExportFeedback("删除中...");
+        fetch("/api/export/templates/" + templateId, { method: "DELETE" })
+          .then(parseJsonResponse)
+          .then(function (result) {
+            if (!result.ok) {
+              var detail = result.payload && result.payload.detail ? String(result.payload.detail) : "请求失败";
+              setExportFeedback("失败: " + detail);
+              return;
+            }
+            setExportFeedback("已删除模板: template_id=" + templateId);
+            window.location.reload();
+          })
+          .catch(function (error) {
+            setExportFeedback("失败: " + (error && error.message ? error.message : "网络错误"));
+          });
+      });
+    });
   }
 
   if (page === "sources") {
     bindScanActions();
   } else if (page === "reviews") {
-    bindReviewEvidenceFocus();
-    bindReviewActions();
+    var reviewQueues = document.querySelector(".review-queues");
+    bindReviewEvidenceFocus(reviewQueues || document);
+    bindReviewPreviewScrollers(reviewQueues || document);
+    bindReviewStickyQueueStack(reviewQueues || document);
+    bindReviewActions(reviewQueues || document);
   } else if (page === "exports") {
+    bindExportPreviewFocus();
+    bindExportForms();
     bindExportActions();
   }
 })();

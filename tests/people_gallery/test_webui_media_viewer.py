@@ -24,12 +24,14 @@ def test_person_detail_contains_media_viewer_layers_and_actions(tmp_path) -> Non
         client = TestClient(create_app(workspace=ws.root))
         html = client.get("/people/1").text
 
+        assert "person-detail-page" in html
+        assert "person-detail-viewer-shell" in html
         assert 'data-viewer-layer="crop"' in html
         assert 'data-viewer-layer="context"' in html
         assert 'data-viewer-layer="original"' in html
 
         assert 'data-action="viewer-prev"' in html
         assert 'data-action="viewer-next"' in html
-        assert 'data-action="viewer-toggle-bbox"' in html
+        assert 'data-action="viewer-toggle-bbox"' not in html
     finally:
         ws.close()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 try:
     import sqlite3
@@ -24,11 +25,13 @@ class ScanExecutionService:
         conn: sqlite3.Connection,
         *,
         checkpoint_writer: Callable[[int, str, str | None, int], int] | None = None,
+        progress_reporter: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.conn = conn
         self.scan_repo = ScanRepo(conn)
         self.asset_repo = AssetRepo(conn)
         self._checkpoint_writer = checkpoint_writer
+        self._progress_reporter = progress_reporter
 
     def run_session(self, session_id: int) -> dict[str, int]:
         total_new_assets = 0
@@ -46,6 +49,7 @@ class ScanExecutionService:
             self.conn.commit()
             if updated == 0:
                 continue
+            self._report_progress(session_source_id)
 
             try:
                 live_source = self.scan_repo.get_session_source(session_source_id)
@@ -82,6 +86,7 @@ class ScanExecutionService:
                 self.scan_repo.mark_session_source_completed(session_source_id)
                 self.conn.commit()
                 completed_sources += 1
+                self._report_progress(session_source_id)
             except Exception as exc:
                 if self.conn.in_transaction:
                     self.conn.rollback()
@@ -92,6 +97,7 @@ class ScanExecutionService:
                 self.conn.commit()
                 if marked_failed > 0:
                     failed_sources += 1
+                    self._report_progress(session_source_id)
 
         final_status = self.scan_repo.finalize_session_if_all_sources_terminal(session_id)
         self.conn.commit()
@@ -185,8 +191,13 @@ class ScanExecutionService:
                 pending_asset_count=pending_asset_count,
             )
             self.conn.commit()
-            return
-        self._checkpoint_writer(session_source_id, phase, cursor_json, pending_asset_count)
+        else:
+            self._checkpoint_writer(session_source_id, phase, cursor_json, pending_asset_count)
+        self._report_progress(
+            session_source_id,
+            phase=phase,
+            pending_asset_count=pending_asset_count,
+        )
 
     def _stage_pending_count(self, progress: dict[str, int], stage: str) -> int:
         discovered = int(progress.get("discovered_count", 0))
@@ -202,3 +213,66 @@ class ScanExecutionService:
         if source_row is None:
             return True
         return str(source_row["status"]) in _SOURCE_TERMINAL_STATUSES
+
+    def _report_progress(
+        self,
+        session_source_id: int,
+        *,
+        phase: str | None = None,
+        pending_asset_count: int | None = None,
+    ) -> None:
+        if self._progress_reporter is None:
+            return
+
+        source_row = self.scan_repo.get_session_source(session_source_id)
+        if source_row is None:
+            return
+
+        discovered_count = int(source_row.get("discovered_count") or 0)
+        metadata_done_count = int(source_row.get("metadata_done_count") or 0)
+        faces_done_count = int(source_row.get("faces_done_count") or 0)
+        embeddings_done_count = int(source_row.get("embeddings_done_count") or 0)
+        assignment_done_count = int(source_row.get("assignment_done_count") or 0)
+
+        payload: dict[str, Any] = {
+            "session_id": int(source_row["scan_session_id"]),
+            "session_source_id": int(source_row["id"]),
+            "library_source_id": int(source_row["library_source_id"]),
+            "status": str(source_row["status"]),
+            "discovered_count": discovered_count,
+            "metadata_done_count": metadata_done_count,
+            "faces_done_count": faces_done_count,
+            "embeddings_done_count": embeddings_done_count,
+            "assignment_done_count": assignment_done_count,
+            "pending_asset_count": (
+                int(pending_asset_count)
+                if pending_asset_count is not None
+                else self._infer_pending_asset_count(
+                    discovered_count=discovered_count,
+                    metadata_done_count=metadata_done_count,
+                    faces_done_count=faces_done_count,
+                    embeddings_done_count=embeddings_done_count,
+                    assignment_done_count=assignment_done_count,
+                )
+            ),
+        }
+        if phase is not None:
+            payload["phase"] = phase
+        self._progress_reporter(payload)
+
+    def _infer_pending_asset_count(
+        self,
+        *,
+        discovered_count: int,
+        metadata_done_count: int,
+        faces_done_count: int,
+        embeddings_done_count: int,
+        assignment_done_count: int,
+    ) -> int:
+        if metadata_done_count < discovered_count:
+            return max(0, discovered_count - metadata_done_count)
+        if faces_done_count < discovered_count:
+            return max(0, discovered_count - faces_done_count)
+        if embeddings_done_count < discovered_count:
+            return max(0, discovered_count - embeddings_done_count)
+        return max(0, discovered_count - assignment_done_count)

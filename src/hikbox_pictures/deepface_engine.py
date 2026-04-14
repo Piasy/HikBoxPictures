@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Iterable, Literal, Mapping, Protocol, Sequence, TypeAlias
 
@@ -254,6 +255,21 @@ class DeepFaceEngine:
 
     def is_match(self, distance: float) -> bool:
         return distance <= self.distance_threshold
+
+
+def resolve_ann_distance_threshold(
+    distance_threshold: float,
+    *,
+    distance_metric: str,
+    threshold_source: ThresholdSource,
+) -> float:
+    threshold = float(distance_threshold)
+    # DeepFace 默认给出的 cosine 阈值处在 cosine distance 空间，
+    # 但图库检索/聚类当前使用的是归一化向量上的 L2 距离。
+    # 对默认阈值做一次换算，避免真实模型下阈值被错误收紧。
+    if threshold_source == "deepface-default" and str(distance_metric) == "cosine":
+        return float(math.sqrt(max(0.0, min(2.0, 2.0 * threshold))))
+    return threshold
 
 
 def embedding_to_blob(embedding: EmbeddingLike) -> bytes:

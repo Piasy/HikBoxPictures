@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -10,6 +11,7 @@ from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.services.runtime import initialize_workspace
 
 ControlHandler = Callable[[argparse.Namespace], int]
+_SCAN_PROGRESS_POLL_INTERVAL_SECONDS = 5.0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -286,6 +288,109 @@ def handle_serve(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_scan_session_line(*, session_id: object, status: object, mode: object) -> None:
+    resolved_mode = "unknown" if mode is None else str(mode)
+    print(f"scan session_id={session_id} status={status} mode={resolved_mode}", flush=True)
+
+
+def _print_scan_status_snapshot(status: dict[str, object]) -> None:
+    _print_scan_session_line(
+        session_id=status.get("session_id"),
+        status=status.get("status"),
+        mode=status.get("mode"),
+    )
+    for source in status.get("sources", []):
+        if not isinstance(source, dict):
+            continue
+        print(
+            "source "
+            f"id={source.get('id')} "
+            f"library_source_id={source.get('library_source_id')} "
+            f"status={source.get('status')} "
+            f"discovered={source.get('discovered_count')} "
+            f"metadata_done={source.get('metadata_done_count')} "
+            f"faces_done={source.get('faces_done_count')} "
+            f"embeddings_done={source.get('embeddings_done_count')} "
+            f"assignment_done={source.get('assignment_done_count')}",
+            flush=True,
+        )
+
+
+def _load_scan_status_snapshot(db_path: Path) -> dict[str, object]:
+    from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
+
+    conn = connect_db(db_path)
+    try:
+        return ScanOrchestrator(conn).get_status()
+    finally:
+        conn.close()
+
+
+class _ScanStatusPoller:
+    def __init__(self, *, db_path: Path, session_id: int, interval_seconds: float | None = None) -> None:
+        self._db_path = db_path
+        self._session_id = int(session_id)
+        resolved_interval = _SCAN_PROGRESS_POLL_INTERVAL_SECONDS if interval_seconds is None else interval_seconds
+        self._interval_seconds = max(float(resolved_interval), 0.01)
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"scan-status-poller-{self._session_id}",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=self._interval_seconds + 1.0)
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            try:
+                status = _load_scan_status_snapshot(self._db_path)
+            except Exception:
+                continue
+            session_id = status.get("session_id")
+            if session_id is None or int(session_id) != self._session_id:
+                continue
+            _print_scan_status_snapshot(status)
+
+
+def _run_scan_and_print_progress(orchestrator, *, db_path: Path, session_id: int) -> int:
+    session = orchestrator.scan_repo.get_session(session_id)
+    if session is None:
+        _print_scan_session_line(session_id=session_id, status="unknown", mode="unknown")
+        return 0
+
+    _print_scan_session_line(session_id=session_id, status=session["status"], mode=session["mode"])
+    poller = _ScanStatusPoller(db_path=db_path, session_id=session_id)
+    poller.start()
+    try:
+        orchestrator.execute_session(session_id)
+    finally:
+        poller.stop()
+
+    try:
+        final_status = _load_scan_status_snapshot(db_path)
+    except Exception:
+        final_status = {}
+
+    final_session_id = final_status.get("session_id")
+    if final_session_id is not None and int(final_session_id) == session_id:
+        _print_scan_status_snapshot(final_status)
+        return 1 if str(final_status.get("status")) == "failed" else 0
+
+    session = orchestrator.scan_repo.get_session(session_id)
+    if session is None:
+        _print_scan_session_line(session_id=session_id, status="unknown", mode="unknown")
+        return 0
+
+    _print_scan_session_line(session_id=session_id, status=session["status"], mode=session["mode"])
+    return 1 if str(session["status"]) == "failed" else 0
+
+
 def handle_scan(args: argparse.Namespace) -> int:
     from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
 
@@ -296,13 +401,8 @@ def handle_scan(args: argparse.Namespace) -> int:
     conn = connect_db(paths.db_path)
     try:
         orchestrator = ScanOrchestrator(conn)
-        session_id = orchestrator.start_or_resume_and_run()
-        session = orchestrator.scan_repo.get_session(session_id)
-        if session is None:
-            print(f"scan session_id={session_id} status=unknown mode=unknown")
-            return 0
-        print(f"scan session_id={session_id} status={session['status']} mode={session['mode']}")
-        return 1 if str(session["status"]) == "failed" else 0
+        session_id = orchestrator.start_or_resume()
+        return _run_scan_and_print_progress(orchestrator, db_path=paths.db_path, session_id=session_id)
     finally:
         conn.close()
 
@@ -314,26 +414,7 @@ def handle_scan_status(args: argparse.Namespace) -> int:
     conn = connect_db(paths.db_path)
     try:
         status = ScanOrchestrator(conn).get_status()
-        print(
-            "scan "
-            f"session_id={status['session_id']} "
-            f"status={status['status']} "
-            f"mode={status['mode']}"
-        )
-        for source in status.get("sources", []):
-            if not isinstance(source, dict):
-                continue
-            print(
-                "source "
-                f"id={source.get('id')} "
-                f"library_source_id={source.get('library_source_id')} "
-                f"status={source.get('status')} "
-                f"discovered={source.get('discovered_count')} "
-                f"metadata_done={source.get('metadata_done_count')} "
-                f"faces_done={source.get('faces_done_count')} "
-                f"embeddings_done={source.get('embeddings_done_count')} "
-                f"assignment_done={source.get('assignment_done_count')}"
-            )
+        _print_scan_status_snapshot(status)
         return 0
     finally:
         conn.close()
@@ -364,13 +445,8 @@ def handle_scan_new(args: argparse.Namespace) -> int:
     conn = connect_db(paths.db_path)
     try:
         orchestrator = ScanOrchestrator(conn)
-        session_id = orchestrator.start_new_and_run(abandon_resumable=bool(args.abandon_resumable))
-        session = orchestrator.scan_repo.get_session(session_id)
-        if session is None:
-            print(f"scan session_id={session_id} status=unknown mode=unknown")
-            return 0
-        print(f"scan session_id={session_id} status={session['status']} mode={session['mode']}")
-        return 1 if str(session["status"]) == "failed" else 0
+        session_id = orchestrator.start_new(abandon_resumable=bool(args.abandon_resumable))
+        return _run_scan_and_print_progress(orchestrator, db_path=paths.db_path, session_id=session_id)
     except ValueError as exc:
         print(f"scan new 失败: {exc}", file=sys.stderr)
         return 2
