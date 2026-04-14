@@ -10,11 +10,21 @@ except ModuleNotFoundError:
 
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.db.migrator import apply_migrations
-from hikbox_pictures.workspace import WorkspacePaths, ensure_workspace_layout
+from hikbox_pictures.workspace import WorkspacePaths, init_workspace_layout, load_workspace_paths
 
 
 def initialize_workspace(workspace: Path) -> WorkspacePaths:
-    paths = ensure_workspace_layout(workspace)
+    paths = load_workspace_paths(workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        apply_migrations(conn)
+    finally:
+        conn.close()
+    return paths
+
+
+def initialize_new_workspace(workspace: Path, external_root: Path) -> WorkspacePaths:
+    paths = init_workspace_layout(workspace, external_root)
     conn = connect_db(paths.db_path)
     try:
         apply_migrations(conn)
@@ -24,7 +34,7 @@ def initialize_workspace(workspace: Path) -> WorkspacePaths:
 
 
 def resolve_media_allowed_roots(workspace: Path) -> list[Path]:
-    paths = ensure_workspace_layout(workspace)
+    paths = load_workspace_paths(workspace)
     roots: list[Path] = [paths.artifacts_dir.resolve()]
 
     conn = connect_db(paths.db_path)

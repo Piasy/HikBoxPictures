@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from hikbox_pictures.db.connection import connect_db
-from hikbox_pictures.services.runtime import initialize_workspace
+from hikbox_pictures.services.runtime import initialize_new_workspace, initialize_workspace
 
 ControlHandler = Callable[[argparse.Namespace], int]
 _SCAN_PROGRESS_POLL_INTERVAL_SECONDS = 5.0
@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_init = sub.add_parser("init", help="初始化工作区与数据库")
     p_init.add_argument("--workspace", type=Path, required=True)
+    p_init.add_argument("--external-root", type=Path, required=True)
     p_init.set_defaults(handler=handle_init)
 
     p_source = sub.add_parser("source", help="源目录管理")
@@ -103,7 +104,7 @@ def _run_with_control_plane(argv: list[str]) -> int:
 
 
 def handle_init(args: argparse.Namespace) -> int:
-    paths = initialize_workspace(args.workspace)
+    paths = initialize_new_workspace(args.workspace, args.external_root)
     print(f"Workspace initialized: {paths.root}")
     print(f"Database path: {paths.db_path}")
     return 0

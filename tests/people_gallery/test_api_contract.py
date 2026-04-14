@@ -20,6 +20,7 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+build_empty_workspace = _MODULE.build_empty_workspace
 build_seed_workspace_with_mock_embeddings = _MODULE.build_seed_workspace_with_mock_embeddings
 
 
@@ -45,7 +46,8 @@ def test_scan_status_reads_real_session(tmp_path) -> None:
 
 
 def test_scan_status_returns_idle_when_no_resumable_session(tmp_path) -> None:
-    client = TestClient(create_app(workspace=tmp_path))
+    workspace = build_empty_workspace(tmp_path)
+    client = TestClient(create_app(workspace=workspace))
     response = client.get("/api/scan/status")
     assert response.status_code == 200
     body = response.json()
@@ -407,7 +409,7 @@ def test_api_contract_real_source_pipeline_without_seed_injection(tmp_path: Path
     copy_raw_face_image(source_root / "1.jpg", index=0)
     copy_raw_face_image(source_root / "2.jpg", index=1)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [

@@ -36,11 +36,19 @@ PYTHON_BIN=python3.13 ./scripts/install.sh
 source .venv/bin/activate
 ```
 
-初始化 workspace（自动创建目录并执行数据库迁移）：
+初始化 workspace（本地保存数据库与配置，并在 external root 下创建运行文件目录）：
 
 ```bash
-PYTHONPATH=src python3 -m hikbox_pictures.cli init --workspace /path/to/workspace
+PYTHONPATH=src python3 -m hikbox_pictures.cli init \
+  --workspace /path/to/local-workspace \
+  --external-root /path/to/external-root
 ```
+
+其中：
+
+- `workspace` 必须是本地目录，只保存 `.hikbox/library.db` 和 `.hikbox/config.json`
+- `external-root` 用于保存 `artifacts/`、`logs/`、`exports/`
+- 若希望所有文件都放在同一本地目录，可把 `--external-root` 设为与 `--workspace` 相同
 
 启动本地 API/WebUI：
 
@@ -52,7 +60,7 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 
 ## CLI 命令
 
-- `init --workspace <dir>`：初始化工作区与数据库。
+- `init --workspace <dir> --external-root <dir>`：初始化工作区、本地数据库与外部运行目录。
 - `source add|list|remove --workspace <dir> ...`：源目录管理（添加、查看、移除）。
 - `serve --workspace <dir> [--host ... --port ...]`：启动 API/WebUI。
 - `scan --workspace <dir>`：执行或恢复扫描会话，并完成 source 发现、阶段推进与会话收口；若存在失败 source，会返回非零退出码。
@@ -95,7 +103,7 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 
 其中 `GET /api/scan/status` 会返回最近一次扫描会话，不会在 completed/failed 后回退成 `idle`。`POST /api/scan/start_or_resume` 会同步执行 discover 与四阶段流水线，响应中的 `status` 即最终会话状态。
 
-`GET /api/observations/{observation_id}/context` 不再直出原图，而是返回 workspace 下生成的局部上下文 artifact：包含 bbox 周边区域与高亮框，文件写入 `.hikbox/artifacts/context/`。
+`GET /api/observations/{observation_id}/context` 不再直出原图，而是返回 external root 下生成的局部上下文 artifact：包含 bbox 周边区域与高亮框，文件写入 `artifacts/context/`。
 
 ## WebUI 路由
 

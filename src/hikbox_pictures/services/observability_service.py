@@ -20,6 +20,7 @@ from hikbox_pictures.logging_config import (
     sanitize_log_token,
 )
 from hikbox_pictures.repositories import OpsEventRepo
+from hikbox_pictures.workspace import load_workspace_paths, load_workspace_paths_from_db_path
 
 
 class ObservabilityService:
@@ -144,7 +145,7 @@ class ObservabilityService:
 
     def _resolve_logs_dir(self, workspace: Path | None) -> Path | None:
         if workspace is not None:
-            logs_dir = Path(workspace) / ".hikbox" / "logs"
+            logs_dir = load_workspace_paths(Path(workspace)).logs_dir
             logs_dir.mkdir(parents=True, exist_ok=True)
             return logs_dir
 
@@ -155,7 +156,7 @@ class ObservabilityService:
         db_file = row["file"] if isinstance(row, sqlite3.Row) else row[2]
         if not db_file:
             return None
-        logs_dir = Path(str(db_file)).resolve().parent / "logs"
+        logs_dir = load_workspace_paths_from_db_path(Path(str(db_file))).logs_dir
         logs_dir.mkdir(parents=True, exist_ok=True)
         return logs_dir
 

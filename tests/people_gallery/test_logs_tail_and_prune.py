@@ -133,6 +133,28 @@ def test_emit_event_writes_run_jsonl_and_app_log_with_core_fields(tmp_path) -> N
         ws.close()
 
 
+def test_emit_event_writes_logs_under_external_root(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    ws = build_seed_workspace(workspace, external_root=external_root)
+    try:
+        service = ObservabilityService(ws.conn, workspace=ws.root)
+        service.emit_event(
+            level="info",
+            component="scanner",
+            event_type="scan.session.started",
+            run_kind="scan",
+            run_id="scan-external-1",
+            message="scan started",
+        )
+
+        assert (external_root / "logs" / "runs" / "scan-scan-external-1.jsonl").exists()
+        assert (external_root / "logs" / "app.log").exists()
+        assert not (workspace / ".hikbox" / "logs" / "runs" / "scan-scan-external-1.jsonl").exists()
+    finally:
+        ws.close()
+
+
 def test_observability_service_prune_ops_event_by_days(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path)
     try:
@@ -294,6 +316,19 @@ def test_scan_start_or_resume_emits_key_event_and_visible_in_ops_event(tmp_path)
         ws.close()
 
 
+def test_scan_start_or_resume_writes_run_log_under_external_root(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    ws = build_seed_workspace(workspace, external_root=external_root)
+    try:
+        session_id = ScanOrchestrator(ws.conn).start_or_resume()
+
+        assert (external_root / "logs" / "runs" / f"scan-{session_id}.jsonl").exists()
+        assert not (workspace / ".hikbox" / "logs" / "runs" / f"scan-{session_id}.jsonl").exists()
+    finally:
+        ws.close()
+
+
 def test_export_run_emits_started_and_terminal_events_in_ops_and_run_jsonl(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path, seed_export_assets=True)
     try:
@@ -310,6 +345,20 @@ def test_export_run_emits_started_and_terminal_events_in_ops_and_run_jsonl(tmp_p
         run_event_types = {str(row["event_type"]) for row in run_rows}
         assert "export.delivery.started" in run_event_types
         assert "export.delivery.completed" in run_event_types or "export.delivery.failed" in run_event_types
+    finally:
+        ws.close()
+
+
+def test_export_run_writes_run_log_under_external_root(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    ws = build_seed_workspace(workspace, seed_export_assets=True, external_root=external_root)
+    try:
+        summary = ActionService(ws.conn).run_export_template(template_id=ws.export_template_id)
+        run_id = str(summary["run_id"])
+
+        assert (external_root / "logs" / "runs" / f"export-{run_id}.jsonl").exists()
+        assert not (workspace / ".hikbox" / "logs" / "runs" / f"export-{run_id}.jsonl").exists()
     finally:
         ws.close()
 

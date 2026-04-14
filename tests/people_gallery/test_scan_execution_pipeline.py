@@ -29,7 +29,7 @@ def test_scan_discovers_source_files_and_completes_session(tmp_path: Path) -> No
     _write_real_photo(source_root / "a.jpg", index=0)
     _write_real_photo(source_root / "nested" / "b.jpg", index=1, group=True)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [
@@ -110,7 +110,7 @@ def test_scan_pipeline_is_idempotent_on_duplicate_paths(tmp_path: Path) -> None:
     _write_real_photo(source_root / "a.jpg", index=0)
     _write_real_photo(source_root / "b.jpg", index=1)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [
@@ -164,7 +164,7 @@ def test_api_scan_start_or_resume_executes_real_pipeline(tmp_path: Path) -> None
     _write_real_photo(source_root / "1.jpg", index=0)
     _write_real_photo(source_root / "2.jpg", index=1)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [
@@ -224,7 +224,7 @@ def test_scan_missing_source_marks_session_failed(tmp_path: Path, capsys) -> Non
     source_root = tmp_path / "input"
     _write_real_photo(source_root / "a.jpg", index=0)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [
@@ -284,7 +284,7 @@ def test_scan_stops_after_source_becomes_abandoned(tmp_path: Path) -> None:
     _write_real_photo(source_root / "1.jpg", index=0)
     _write_real_photo(source_root / "2.jpg", index=1)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [

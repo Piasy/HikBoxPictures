@@ -21,11 +21,36 @@ _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
 
 
+def _init_args(workspace: Path, *, external_root: Path | None = None) -> list[str]:
+    resolved_external_root = workspace if external_root is None else external_root
+    return [
+        "init",
+        "--workspace",
+        str(workspace),
+        "--external-root",
+        str(resolved_external_root),
+    ]
+
+
 def test_cli_init_creates_workspace_and_db(tmp_path: Path) -> None:
-    rc = main(["init", "--workspace", str(tmp_path)])
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    rc = main(_init_args(workspace, external_root=external_root))
 
     assert rc == 0
-    assert (tmp_path / ".hikbox" / "library.db").exists()
+    assert (workspace / ".hikbox" / "library.db").exists()
+    assert (workspace / ".hikbox" / "config.json").exists()
+    assert (external_root / "artifacts" / "ann").exists()
+    assert (external_root / "logs" / "runs").exists()
+    assert (external_root / "exports").exists()
+
+
+def test_cli_init_requires_external_root(capsys) -> None:
+    rc = main(["init", "--workspace", "/tmp/ws"])
+
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "--external-root" in err
 
 
 def test_cli_help_contains_control_plane_commands(capsys) -> None:
@@ -60,7 +85,7 @@ def test_cli_export_help_contains_run(capsys) -> None:
 
 
 def test_scan_status_command(tmp_path: Path, capsys) -> None:
-    rc_init = main(["init", "--workspace", str(tmp_path)])
+    rc_init = main(_init_args(tmp_path, external_root=tmp_path / ".hikbox"))
     assert rc_init == 0
 
     rc_status = main(["scan", "status", "--workspace", str(tmp_path)])
@@ -71,7 +96,7 @@ def test_scan_status_command(tmp_path: Path, capsys) -> None:
 
 
 def test_rebuild_artifacts_command(tmp_path: Path, capsys) -> None:
-    rc_init = main(["init", "--workspace", str(tmp_path)])
+    rc_init = main(_init_args(tmp_path, external_root=tmp_path / ".hikbox"))
     assert rc_init == 0
     capsys.readouterr()
 
@@ -86,13 +111,16 @@ def test_rebuild_artifacts_command(tmp_path: Path, capsys) -> None:
 def test_init_does_not_import_deepface_engine(tmp_path: Path) -> None:
     sys.modules.pop("hikbox_pictures.deepface_engine", None)
 
-    rc = main(["init", "--workspace", str(tmp_path)])
+    rc = main(_init_args(tmp_path, external_root=tmp_path / ".hikbox"))
 
     assert rc == 0
     assert "hikbox_pictures.deepface_engine" not in sys.modules
 
 
 def test_logs_prune_command_returns_zero_and_prints_summary(tmp_path: Path, capsys) -> None:
+    assert main(_init_args(tmp_path, external_root=tmp_path / ".hikbox")) == 0
+    capsys.readouterr()
+
     rc_logs = main(["logs", "prune", "--workspace", str(tmp_path)])
     assert rc_logs == 0
     out_logs = capsys.readouterr().out
@@ -108,7 +136,7 @@ def test_logs_prune_days_must_be_positive(tmp_path: Path, capsys) -> None:
 
 def test_cli_control_plane_happy_path_covers_scan_export_logs(tmp_path: Path, capsys) -> None:
     workspace = tmp_path / "workspace"
-    rc_init = main(["init", "--workspace", str(workspace)])
+    rc_init = main(_init_args(workspace, external_root=workspace / ".hikbox"))
     assert rc_init == 0
     capsys.readouterr()
 
@@ -173,7 +201,7 @@ def test_cli_scan_executes_discover_to_completed_pipeline(tmp_path: Path, capsys
     copy_raw_face_image(source_root / "x.jpg", index=0)
     copy_raw_face_image(source_root / "y.jpeg", index=1)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(_init_args(workspace, external_root=workspace / ".hikbox")) == 0
     assert (
         main(
             [

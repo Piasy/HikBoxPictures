@@ -24,6 +24,7 @@ def create_app(workspace: Path) -> FastAPI:
     templates = Jinja2Templates(directory=str(web_root / "templates"))
 
     app = FastAPI(title="HikBox Pictures API")
+    app.state.workspace_paths = paths
     app.state.workspace = str(paths.root)
     app.state.db_path = str(paths.db_path)
     app.state.templates = templates

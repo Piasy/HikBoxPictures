@@ -17,7 +17,7 @@ def test_embeddings_are_generated_by_real_deepface_pipeline(tmp_path: Path) -> N
     portrait_path = copy_raw_face_image(source_root / "person-a.jpg", index=0)
     group_path = copy_group_face_image(source_root / "family-group.jpg", index=0)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [
@@ -94,7 +94,7 @@ def test_blank_photo_does_not_create_face_observation(tmp_path: Path) -> None:
     Image.new("RGB", (128, 96), color=(255, 255, 255)).save(blank_path, format="JPEG")
     portrait_path = copy_raw_face_image(source_root / "person-a.jpg", index=0)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [

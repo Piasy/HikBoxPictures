@@ -79,7 +79,7 @@ def test_full_system_mock_embedding_flow_has_people_and_export_sample(tmp_path) 
 
 def test_full_system_control_plane_happy_path_init_to_logs(tmp_path, capsys) -> None:
     workspace = tmp_path / "workspace"
-    rc_init = main(["init", "--workspace", str(workspace)])
+    rc_init = main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")])
     assert rc_init == 0
     capsys.readouterr()
 
@@ -148,7 +148,7 @@ def test_full_system_real_source_flow_without_seed_injection(tmp_path) -> None:
     copy_raw_face_image(bind_root / "solo.jpg", index=0)
     copy_group_face_image(bind_root / "group.jpg", index=0)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [

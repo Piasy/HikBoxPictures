@@ -8,19 +8,30 @@ from hikbox_pictures.db import connection as db_connection
 from hikbox_pictures.db import migrator as db_migrator
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.db.migrator import apply_migrations
-from hikbox_pictures.workspace import ensure_workspace_layout
+from hikbox_pictures.workspace import init_workspace_layout, load_workspace_paths
+
+
+def _init_paths(tmp_path):
+    return init_workspace_layout(tmp_path / "workspace", tmp_path / "external-root")
 
 
 def test_workspace_layout_and_tables(tmp_path):
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
 
-    assert paths.db_path == tmp_path / ".hikbox" / "library.db"
+    assert paths.root == (tmp_path / "workspace").resolve()
+    assert paths.external_root == (tmp_path / "external-root").resolve()
+    assert paths.config_path == tmp_path / "workspace" / ".hikbox" / "config.json"
+    assert paths.db_path == tmp_path / "workspace" / ".hikbox" / "library.db"
     assert paths.db_path.exists()
-    assert (tmp_path / ".hikbox" / "artifacts" / "ann").exists()
-    assert (tmp_path / ".hikbox" / "artifacts" / "thumbs").exists()
-    assert (tmp_path / ".hikbox" / "artifacts" / "face-crops").exists()
-    assert (tmp_path / ".hikbox" / "logs" / "runs").exists()
-    assert (tmp_path / ".hikbox" / "exports").exists()
+    assert paths.config_path.exists()
+    assert (tmp_path / "external-root" / "artifacts" / "ann").exists()
+    assert (tmp_path / "external-root" / "artifacts" / "thumbs").exists()
+    assert (tmp_path / "external-root" / "artifacts" / "face-crops").exists()
+    assert (tmp_path / "external-root" / "logs" / "runs").exists()
+    assert (tmp_path / "external-root" / "exports").exists()
+
+    loaded = load_workspace_paths(tmp_path / "workspace")
+    assert loaded == paths
 
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
@@ -52,9 +63,23 @@ def test_workspace_layout_and_tables(tmp_path):
     assert "idx_photo_asset_source_status" in index_names
 
 
+def test_workspace_and_external_root_can_be_same_path(tmp_path):
+    paths = init_workspace_layout(tmp_path, tmp_path)
+
+    assert paths.db_path == tmp_path / ".hikbox" / "library.db"
+    assert paths.artifacts_dir == tmp_path / "artifacts"
+    assert paths.logs_dir == tmp_path / "logs"
+    assert paths.exports_dir == tmp_path / "exports"
+
+
+def test_load_workspace_paths_requires_config_json(tmp_path):
+    with pytest.raises(FileNotFoundError, match="config.json"):
+        load_workspace_paths(tmp_path)
+
+
 
 def test_scan_session_only_single_running_allowed(tmp_path):
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
 
@@ -66,7 +91,7 @@ def test_scan_session_only_single_running_allowed(tmp_path):
 
 
 def test_assignment_active_uniqueness_keeps_inactive_history(tmp_path):
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
 
@@ -113,7 +138,7 @@ def test_assignment_active_uniqueness_keeps_inactive_history(tmp_path):
 
 
 def test_library_source_allows_same_root_when_old_row_inactive(tmp_path):
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
 
@@ -137,7 +162,7 @@ def test_library_source_allows_same_root_when_old_row_inactive(tmp_path):
     ],
 )
 def test_enum_checks_reject_invalid_values(tmp_path, sql: str):
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
 
@@ -154,7 +179,7 @@ def test_enum_checks_reject_invalid_values(tmp_path, sql: str):
 
 
 def test_apply_migrations_is_idempotent(tmp_path):
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
 
     apply_migrations(conn)
@@ -179,7 +204,7 @@ def test_apply_migrations_rolls_back_partial_failed_script(tmp_path, monkeypatch
 
     monkeypatch.setattr(db_migrator, "_migration_dir", lambda: migration_dir)
 
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
 
     with pytest.raises(RuntimeError):
@@ -201,7 +226,7 @@ def test_apply_migrations_rejects_duplicate_versions(tmp_path, monkeypatch):
 
     monkeypatch.setattr(db_migrator, "_migration_dir", lambda: migration_dir)
 
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
 
     with pytest.raises(ValueError, match="迁移版本重复"):
@@ -215,7 +240,7 @@ def test_apply_migrations_rejects_invalid_migration_filename(tmp_path, monkeypat
 
     monkeypatch.setattr(db_migrator, "_migration_dir", lambda: migration_dir)
 
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
 
     with pytest.raises(ValueError, match="迁移文件命名非法"):
@@ -246,7 +271,7 @@ def test_apply_migrations_supports_trigger_statement(tmp_path, monkeypatch):
 
     monkeypatch.setattr(db_migrator, "_migration_dir", lambda: migration_dir)
 
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
 
@@ -258,7 +283,7 @@ def test_apply_migrations_supports_trigger_statement(tmp_path, monkeypatch):
 
 
 def test_connect_db_concurrent_initialization_is_stable(tmp_path):
-    paths = ensure_workspace_layout(tmp_path)
+    paths = _init_paths(tmp_path)
 
     def open_and_close() -> None:
         conn = connect_db(paths.db_path)

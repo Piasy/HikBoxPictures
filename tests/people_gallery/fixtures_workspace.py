@@ -26,7 +26,7 @@ from hikbox_pictures.repositories import (
     ScanRepo,
     SourceRepo,
 )
-from hikbox_pictures.workspace import WorkspacePaths, ensure_workspace_layout
+from hikbox_pictures.workspace import WorkspacePaths, init_workspace_layout
 
 _IMAGE_FACTORY_PATH = Path(__file__).with_name("image_factory.py")
 _IMAGE_FACTORY_SPEC = spec_from_file_location("people_gallery_image_factory", _IMAGE_FACTORY_PATH)
@@ -216,8 +216,10 @@ def build_seed_workspace(
     *,
     seed_export_assets: bool = False,
     seed_media_assets: bool = False,
+    external_root: Path | None = None,
 ) -> SeedWorkspace:
-    paths = ensure_workspace_layout(root)
+    resolved_external_root = root / ".hikbox" if external_root is None else external_root
+    paths = init_workspace_layout(root, resolved_external_root)
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
 
@@ -485,6 +487,17 @@ def build_seed_workspace(
     )
 
 
+def build_empty_workspace(root: Path, *, external_root: Path | None = None) -> Path:
+    resolved_external_root = root / ".hikbox" if external_root is None else external_root
+    paths = init_workspace_layout(root, resolved_external_root)
+    conn = connect_db(paths.db_path)
+    try:
+        apply_migrations(conn)
+    finally:
+        conn.close()
+    return paths.root
+
+
 def create_number_image_dataset(
     dataset_dir: Path,
     *,
@@ -525,7 +538,7 @@ def inject_mock_embeddings_for_assets(
     if not person_specs:
         raise ValueError("person_specs 不能为空")
 
-    paths = ensure_workspace_layout(workspace)
+    paths = init_workspace_layout(workspace, workspace / ".hikbox")
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
     source_repo = SourceRepo(conn)

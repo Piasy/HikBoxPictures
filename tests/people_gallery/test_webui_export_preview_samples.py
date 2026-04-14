@@ -17,6 +17,7 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+build_empty_workspace = _MODULE.build_empty_workspace
 
 
 def test_export_preview_has_sample_cards(tmp_path) -> None:
@@ -59,7 +60,8 @@ def test_export_preview_samples_ignore_unrelated_assets(tmp_path) -> None:
 
 
 def test_export_preview_page_hides_fake_samples_without_templates(tmp_path) -> None:
-    client = TestClient(create_app(workspace=tmp_path))
+    workspace = build_empty_workspace(tmp_path)
+    client = TestClient(create_app(workspace=workspace))
     html = client.get("/exports").text
 
     assert "当前还没有导出模板" in html

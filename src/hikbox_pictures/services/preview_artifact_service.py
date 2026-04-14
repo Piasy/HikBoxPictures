@@ -10,6 +10,7 @@ from hikbox_pictures.repositories import AssetRepo
 from hikbox_pictures.services.asset_pipeline import PREVIEW_CONTEXT_REBUILD_FAILED_ERROR
 from hikbox_pictures.services.observability_service import ObservabilityService
 from hikbox_pictures.services.path_guard import ensure_safe_asset_path
+from hikbox_pictures.workspace import load_workspace_paths
 
 LEGACY_CONTEXT_MAX_SIDE = 48
 CONTEXT_PREVIEW_MIN_SIDE = 160
@@ -30,6 +31,7 @@ class PreviewArtifactService:
     def __init__(self, *, db_path: Path, workspace: Path) -> None:
         self.db_path = Path(db_path)
         self.workspace = Path(workspace)
+        self.paths = load_workspace_paths(self.workspace)
 
     def ensure_crop(self, observation_id: int) -> str:
         conn = connect_db(self.db_path)
@@ -101,7 +103,7 @@ class PreviewArtifactService:
             if row is None:
                 raise LookupError(f"observation {observation_id} 不存在")
 
-            context_path = self.workspace / ".hikbox" / "artifacts" / "context" / f"obs-{int(observation_id)}.jpg"
+            context_path = self.paths.artifacts_dir / "context" / f"obs-{int(observation_id)}.jpg"
             if context_path.exists() and context_path.is_file() and self._is_context_artifact_usable(row, context_path):
                 return str(context_path)
 
@@ -208,7 +210,7 @@ class PreviewArtifactService:
         return (min_x, min_y, max_x, max_y)
 
     def _rebuild_crop(self, row: dict[str, object]) -> Path:
-        output_dir = self.workspace / ".hikbox" / "artifacts" / "face-crops" / "rebuilt"
+        output_dir = self.paths.artifacts_dir / "face-crops" / "rebuilt"
         output_dir.mkdir(parents=True, exist_ok=True)
         out_path = output_dir / f"obs-{int(row['id'])}.jpg"
 
@@ -296,7 +298,7 @@ class PreviewArtifactService:
         return self._dedupe_paths(roots)
 
     def _artifacts_root(self) -> Path:
-        return (self.workspace / ".hikbox" / "artifacts").resolve()
+        return self.paths.artifacts_dir.resolve()
 
     @staticmethod
     def _dedupe_paths(paths: list[Path]) -> list[Path]:

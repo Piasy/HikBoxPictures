@@ -16,7 +16,7 @@ _DATASET_ROOT = Path("tests/data/e2e-face-input").resolve()
 def test_e2e_real_source_pipeline_without_seed_injection(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [

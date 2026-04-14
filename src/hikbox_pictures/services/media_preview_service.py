@@ -17,6 +17,7 @@ from hikbox_pictures.services.observability_service import ObservabilityService
 from hikbox_pictures.services.path_guard import ensure_safe_asset_path
 from hikbox_pictures.services.preview_artifact_service import PreviewArtifactError, PreviewArtifactService
 from hikbox_pictures.services.runtime import resolve_media_allowed_roots
+from hikbox_pictures.workspace import load_workspace_paths
 
 
 class MediaRangeError(Exception):
@@ -66,6 +67,7 @@ class MediaPreviewService:
     ) -> None:
         self.db_path = Path(db_path)
         self.workspace = Path(workspace)
+        self.paths = load_workspace_paths(self.workspace)
         self.allowed_roots_resolver = allowed_roots_resolver or resolve_media_allowed_roots
         self.preview_artifact_service = PreviewArtifactService(db_path=self.db_path, workspace=self.workspace)
 
@@ -226,7 +228,7 @@ class MediaPreviewService:
         return self._dedupe_paths(roots)
 
     def _artifact_allowed_roots(self) -> list[Path]:
-        return [(self.workspace / ".hikbox" / "artifacts").resolve()]
+        return [self.paths.artifacts_dir.resolve()]
 
     @staticmethod
     def _dedupe_paths(paths: list[Path]) -> list[Path]:

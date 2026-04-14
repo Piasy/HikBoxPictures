@@ -5,6 +5,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import pytest
 
 from hikbox_pictures.api.app import create_app
 
@@ -19,7 +20,10 @@ build_seed_workspace = _MODULE.build_seed_workspace
 
 
 def test_create_app_binds_workspace_and_health_route(tmp_path) -> None:
-    app = create_app(workspace=tmp_path)
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    build_seed_workspace(workspace, external_root=external_root).close()
+    app = create_app(workspace=workspace)
     client = TestClient(app)
 
     response = client.get("/api/health")
@@ -27,8 +31,13 @@ def test_create_app_binds_workspace_and_health_route(tmp_path) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["workspace"] == str(tmp_path.resolve())
+    assert body["workspace"] == str(workspace.resolve())
     assert body["db_path"].endswith(".hikbox/library.db")
+
+
+def test_create_app_requires_initialized_workspace(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="config.json"):
+        create_app(workspace=tmp_path)
 
 
 def test_create_app_exposes_seed_workspace_core_routes(tmp_path: Path) -> None:

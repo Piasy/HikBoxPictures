@@ -24,7 +24,7 @@ build_seed_workspace_with_mock_embeddings = _MODULE.build_seed_workspace_with_mo
 def test_number_images_mock_embedding_pipeline_end_to_end(tmp_path) -> None:
     workspace = tmp_path / "ws"
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     seeded = build_seed_workspace_with_mock_embeddings(workspace)
     template_id = int(seeded["template_id"])
 
@@ -61,7 +61,7 @@ def test_number_images_mock_embedding_pipeline_end_to_end(tmp_path) -> None:
 
 def test_mock_embedding_path_visible_in_webui(tmp_path) -> None:
     workspace = tmp_path / "ws"
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     seeded = build_seed_workspace_with_mock_embeddings(workspace)
     template_id = int(seeded["template_id"])
     review_id = int(seeded["review_id"])
@@ -97,7 +97,7 @@ def test_mock_embedding_path_visible_in_webui(tmp_path) -> None:
 
 def test_mock_embedding_repeat_injection_is_idempotent(tmp_path) -> None:
     workspace = tmp_path / "ws"
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
 
     first = build_seed_workspace_with_mock_embeddings(workspace)
     second = build_seed_workspace_with_mock_embeddings(workspace)

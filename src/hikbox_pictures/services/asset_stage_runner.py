@@ -33,6 +33,7 @@ from hikbox_pictures.services.asset_pipeline import (
     previous_status_for_stage,
     statuses_at_or_above,
 )
+from hikbox_pictures.workspace import load_workspace_paths_from_db_path
 
 _PROGRESS_FLUSH_INTERVAL_SECONDS = 5.0
 _STAGE_PROGRESS_COUNT_KEY = {
@@ -75,8 +76,9 @@ class AssetStageRunner:
         self.review_repo = ReviewRepo(conn)
         self.scan_repo = ScanRepo(conn)
         self.db_path = self._resolve_db_path()
-        self.workspace = self.db_path.parent.parent
-        self.face_crop_dir = self.workspace / ".hikbox" / "artifacts" / "face-crops" / "scan"
+        self.paths = load_workspace_paths_from_db_path(self.db_path)
+        self.workspace = self.paths.root
+        self.face_crop_dir = self.paths.artifacts_dir / "face-crops" / "scan"
         self._face_engine: DeepFaceEngine | None = None
         self._ann_assignment_service: AnnAssignmentService | None = None
 
@@ -310,7 +312,7 @@ class AssetStageRunner:
     @property
     def ann_assignment_service(self) -> AnnAssignmentService:
         if self._ann_assignment_service is None:
-            ann_store = AnnIndexStore(self.workspace / ".hikbox" / "artifacts" / "ann" / "prototype_index.npz")
+            ann_store = AnnIndexStore(self.paths.artifacts_dir / "ann" / "prototype_index.npz")
             review_threshold = max(
                 DEFAULT_REVIEW_THRESHOLD,
                 resolve_ann_distance_threshold(

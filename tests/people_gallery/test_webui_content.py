@@ -23,6 +23,7 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+build_empty_workspace = _MODULE.build_empty_workspace
 build_seed_workspace_with_mock_embeddings = _MODULE.build_seed_workspace_with_mock_embeddings
 
 
@@ -402,7 +403,8 @@ def test_sources_exports_logs_pages_bind_real_data(tmp_path) -> None:
 
 
 def test_pages_render_empty_state_with_fresh_workspace(tmp_path) -> None:
-    client = TestClient(create_app(workspace=tmp_path))
+    workspace = build_empty_workspace(tmp_path)
+    client = TestClient(create_app(workspace=workspace))
 
     people_html = client.get("/").text
     reviews_html = client.get("/reviews").text
@@ -435,7 +437,8 @@ def test_pages_render_empty_state_with_fresh_workspace(tmp_path) -> None:
 
 
 def test_people_page_empty_state_hides_random_samples(tmp_path) -> None:
-    client = TestClient(create_app(workspace=tmp_path))
+    workspace = build_empty_workspace(tmp_path)
+    client = TestClient(create_app(workspace=workspace))
     html = client.get("/").text
 
     assert "person-empty-state" in html
@@ -452,7 +455,7 @@ def test_sources_page_keeps_latest_completed_session_visible(tmp_path: Path) -> 
     source_root.mkdir(parents=True, exist_ok=True)
     copy_raw_face_image(source_root / "a.jpg", index=0)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     assert (
         main(
             [

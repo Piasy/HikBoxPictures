@@ -7,7 +7,6 @@ from fastapi.responses import HTMLResponse
 
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.services.web_query_service import WebQueryService
-from hikbox_pictures.workspace import ensure_workspace_layout
 
 router = APIRouter()
 
@@ -106,7 +105,7 @@ def exports_page(request: Request) -> HTMLResponse:
     try:
         service = WebQueryService(conn)
         export_page = service.get_export_page()
-        workspace_paths = ensure_workspace_layout(Path(request.app.state.workspace))
+        workspace_paths = request.app.state.workspace_paths
         return _get_templates(request).TemplateResponse(
             request=request,
             name="export_templates.html",

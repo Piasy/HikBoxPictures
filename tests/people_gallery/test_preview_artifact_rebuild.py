@@ -137,6 +137,30 @@ def test_missing_crop_is_rebuilt_on_demand(tmp_path) -> None:
         ws.close()
 
 
+def test_missing_crop_is_rebuilt_under_external_root(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    ws = build_seed_workspace(workspace, seed_media_assets=True, external_root=external_root)
+    try:
+        assert ws.media_observation_id is not None
+        ws.break_crop_for_observation(int(ws.media_observation_id))
+        client = TestClient(create_app(workspace=ws.root))
+
+        response = client.get(f"/api/observations/{ws.media_observation_id}/crop")
+
+        assert response.status_code == 200
+        row = ws.conn.execute(
+            "SELECT crop_path FROM face_observation WHERE id = ?",
+            (int(ws.media_observation_id),),
+        ).fetchone()
+        assert row is not None
+        rebuilt_path = Path(str(row["crop_path"]))
+        assert rebuilt_path.is_relative_to(external_root.resolve())
+        assert not rebuilt_path.is_relative_to((workspace / ".hikbox").resolve())
+    finally:
+        ws.close()
+
+
 def test_stale_exif_oriented_crop_and_context_are_rebuilt_on_access(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path)
     try:

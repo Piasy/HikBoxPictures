@@ -34,9 +34,13 @@ def test_init_command_invokes_workspace_initializer(monkeypatch, tmp_path: Path,
     db_path = tmp_path / "state" / "people_gallery.sqlite3"
     fake_paths = SimpleNamespace(root=tmp_path, db_path=db_path)
 
-    monkeypatch.setattr(cli_module, "initialize_workspace", lambda workspace: fake_paths)
+    monkeypatch.setattr(
+        cli_module,
+        "initialize_new_workspace",
+        lambda workspace, external_root: fake_paths,
+    )
 
-    exit_code = main(["init", "--workspace", str(tmp_path)])
+    exit_code = main(["init", "--workspace", str(tmp_path), "--external-root", str(tmp_path / ".hikbox")])
 
     captured = capsys.readouterr()
     assert exit_code == 0
@@ -49,7 +53,7 @@ def test_source_commands_add_list_remove(tmp_path: Path, capsys) -> None:
     source_root = tmp_path / "input"
     source_root.mkdir(parents=True)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     capsys.readouterr()
 
     rc_add = main(
@@ -101,7 +105,7 @@ def test_scan_polls_status_snapshot_on_interval(monkeypatch, tmp_path: Path, cap
     source_root = tmp_path / "input"
     source_root.mkdir(parents=True)
 
-    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
     capsys.readouterr()
     assert (
         main(
