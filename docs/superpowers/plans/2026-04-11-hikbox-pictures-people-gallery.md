@@ -1829,3 +1829,704 @@ Expected: PASS。
 git add tests/people_gallery/image_factory.py tests/people_gallery/test_e2e_mock_embedding_pipeline.py tests/people_gallery/fixtures_workspace.py tests/people_gallery/test_e2e_full_system.py tests/people_gallery/test_api_contract.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
 git commit -m "test: add e2e pipeline with synthetic number images and mock embeddings (Task 17)"
 ```
+
+---
+
+## 增补并行执行计划（补充 3）
+
+### Wave K（核心扫描闭环，串行）
+
+- 顺序执行：`Task 18 -> Task 19 -> Task 20`
+- 原因：先打通“真实 source 扫描执行与会话收口”，再替换检测/embedding 占位，最后接入 ANN 归属与审核分流。
+- 阻塞项：`Task 21` 依赖 Task 18；`Task 22` 依赖 Task 19；`Task 23` 依赖 Task 20。
+
+### Wave L（控制面与预览并行）
+
+- 并行执行：`Task 21` 与 `Task 22`
+- 并行依据：
+- `Task 21` 主要写入 scan 控制面（`cli.py`、`routes_scan.py`、`scan_repo.py`、`sources_scan.html`）。
+- `Task 22` 主要写入媒体预览链路（`media_preview_service.py`、`preview_artifact_service.py`、`routes_media.py`）。
+- 两任务依赖分别已满足，且写入集合不重叠。
+- 阻塞项：`Task 23` 依赖 `Task 20 + Task 21 + Task 22`。
+
+### Wave M（验收收口，串行）
+
+- 顺序执行：`Task 23 -> Task 24`
+- 原因：先补齐 Web/API 动作闭环，再用“无 seed/mock 注入”的端到端验收封口。
+- 阻塞项：无（本轮收口）。
+
+### Task 18: 真实扫描执行闭环（discover -> stage -> completed）
+
+**Depends on:** Task 17
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 10
+- Max added lines: 1000
+- Estimated added lines: 820
+
+**Files:**
+- Create: `src/hikbox_pictures/services/scan_execution_service.py`
+- Modify: `src/hikbox_pictures/services/scan_orchestrator.py`
+- Modify: `src/hikbox_pictures/repositories/asset_repo.py`
+- Modify: `src/hikbox_pictures/repositories/scan_repo.py`
+- Modify: `src/hikbox_pictures/cli.py`
+- Modify: `src/hikbox_pictures/api/routes_scan.py`
+- Create: `tests/people_gallery/test_scan_execution_pipeline.py`
+- Modify: `tests/people_gallery/test_cli_control_plane.py`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定“source 真实入库 + scan 完成态”**
+
+```python
+def test_scan_discovers_source_files_and_completes_session(tmp_path):
+    from pathlib import Path
+    import sqlite3
+    from hikbox_pictures.cli import main
+
+    workspace = tmp_path / "ws"
+    source_root = tmp_path / "input"
+    source_root.mkdir(parents=True, exist_ok=True)
+    (source_root / "a.jpg").write_bytes(b"a")
+    (source_root / "b.jpg").write_bytes(b"b")
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(
+        [
+            "source",
+            "add",
+            "--workspace",
+            str(workspace),
+            "--name",
+            "sample-input",
+            "--root-path",
+            str(source_root),
+        ]
+    ) == 0
+    assert main(["scan", "--workspace", str(workspace)]) == 0
+
+    conn = sqlite3.connect(workspace / ".hikbox" / "library.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        asset_count = conn.execute("SELECT COUNT(*) AS c FROM photo_asset").fetchone()["c"]
+        done_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM photo_asset WHERE processing_status = 'assignment_done'"
+        ).fetchone()["c"]
+        latest_session = conn.execute(
+            "SELECT status FROM scan_session ORDER BY id DESC LIMIT 1"
+        ).fetchone()["status"]
+        assert asset_count == 2
+        assert done_count == 2
+        assert latest_session == "completed"
+    finally:
+        conn.close()
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_execution_pipeline.py::test_scan_discovers_source_files_and_completes_session -v`
+Expected: FAIL（当前 `scan` 仅创建/恢复会话，不执行发现与阶段推进）。
+
+- [ ] **Step 3: 实现 scan 执行服务并接入 CLI/API**
+
+```python
+# src/hikbox_pictures/services/scan_execution_service.py（关键片段）
+from hikbox_pictures.scanner import iter_candidate_photos
+from hikbox_pictures.services.asset_stage_runner import AssetStageRunner
+
+
+class ScanExecutionService:
+    def run_session(self, session_id: int) -> dict[str, int]:
+        sources = self.scan_repo.list_session_sources(session_id)
+        stage_runner = AssetStageRunner(self.conn)
+        total_discovered = 0
+        for source in sources:
+            session_source_id = int(source["id"])
+            source_id = int(source["library_source_id"])
+            root_path = Path(str(source["source_root_path"]))
+            if not root_path.exists():
+                self.scan_repo.mark_session_source_failed(session_source_id, reason="source_not_found")
+                continue
+
+            discovered = 0
+            for candidate in iter_candidate_photos(root_path):
+                self.asset_repo.upsert_photo_asset_from_scan(
+                    library_source_id=source_id,
+                    primary_path=str(candidate.path),
+                    live_mov_path=str(candidate.live_photo_video) if candidate.live_photo_video else None,
+                )
+                discovered += 1
+            total_discovered += discovered
+            self.scan_repo.touch_source_discovered(session_source_id, discovered_count=discovered)
+            self.scan_orchestrator.write_checkpoint(
+                session_source_id,
+                phase="discover",
+                cursor_json=None,
+                pending_asset_count=max(discovered, 0),
+            )
+
+            for stage in ("metadata", "faces", "embeddings", "assignment"):
+                stage_runner.run_stage(session_source_id, stage)
+                self.scan_orchestrator.write_checkpoint(
+                    session_source_id,
+                    phase=stage,
+                    cursor_json=None,
+                    pending_asset_count=0,
+                )
+            self.scan_repo.mark_session_source_completed(session_source_id)
+
+        self.scan_repo.mark_session_completed_if_all_sources_terminal(session_id)
+        return {"session_id": session_id, "discovered_count": total_discovered}
+```
+
+```python
+# src/hikbox_pictures/services/scan_orchestrator.py（关键片段）
+def start_or_resume_and_run(self) -> int:
+    session_id = self.start_or_resume()
+    ScanExecutionService(self.conn, scan_orchestrator=self).run_session(session_id)
+    return session_id
+```
+
+```python
+# src/hikbox_pictures/cli.py（关键片段）
+def handle_scan(args: argparse.Namespace) -> int:
+    ...
+    session_id = orchestrator.start_or_resume_and_run()
+    session = orchestrator.scan_repo.get_session(session_id)
+    print(f"scan session_id={session_id} status={session['status']} mode={session['mode']}")
+```
+
+- [ ] **Step 4: 运行回归，确认 scan 已真实执行并收口**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_execution_pipeline.py tests/people_gallery/test_cli_control_plane.py::test_scan_status_command -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/services/scan_execution_service.py src/hikbox_pictures/services/scan_orchestrator.py src/hikbox_pictures/repositories/asset_repo.py src/hikbox_pictures/repositories/scan_repo.py src/hikbox_pictures/cli.py src/hikbox_pictures/api/routes_scan.py tests/people_gallery/test_scan_execution_pipeline.py tests/people_gallery/test_cli_control_plane.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: run real source scan execution pipeline and complete sessions (Task 18)"
+```
+
+### Task 19: 替换检测与 embedding 占位实现为真实 DeepFace 链路
+
+**Depends on:** Task 18
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 9
+- Max added lines: 1000
+- Estimated added lines: 900
+
+**Files:**
+- Modify: `src/hikbox_pictures/services/asset_stage_runner.py`
+- Modify: `src/hikbox_pictures/repositories/asset_repo.py`
+- Modify: `src/hikbox_pictures/deepface_engine.py`
+- Modify: `src/hikbox_pictures/services/preview_artifact_service.py`
+- Modify: `src/hikbox_pictures/services/scan_execution_service.py`
+- Create: `tests/people_gallery/test_real_face_pipeline.py`
+- Modify: `tests/people_gallery/test_asset_stage_idempotency.py`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定“非合成向量 + 多脸观测 + 真实 detector 元信息”**
+
+```python
+def test_embeddings_are_generated_by_deepface_pipeline(tmp_path):
+    from hikbox_pictures.cli import main
+    from hikbox_pictures.db.connection import connect_db
+
+    workspace = tmp_path / "ws"
+    source_root = Path("tests/data/e2e-face-input").resolve()
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(
+        ["source", "add", "--workspace", str(workspace), "--name", "sample", "--root-path", str(source_root)]
+    ) == 0
+    assert main(["scan", "--workspace", str(workspace)]) == 0
+
+    conn = connect_db(workspace / ".hikbox" / "library.db")
+    try:
+        row = conn.execute(
+            """
+            SELECT fe.dimension, fe.model_key, fo.detector_key
+            FROM face_embedding fe
+            JOIN face_observation fo ON fo.id = fe.face_observation_id
+            ORDER BY fe.id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert row is not None
+        assert int(row["dimension"]) >= 128
+        assert row["model_key"] != "pipeline-stub-v1"
+        assert row["detector_key"] in {"retinaface", "yunet", "mtcnn"}
+    finally:
+        conn.close()
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_real_face_pipeline.py::test_embeddings_are_generated_by_deepface_pipeline -v`
+Expected: FAIL（当前 embedding 维度固定为 4，`model_key` 仍为 stub）。
+
+- [ ] **Step 3: 用 DeepFaceEngine 驱动 faces/embeddings 阶段**
+
+```python
+# src/hikbox_pictures/services/asset_stage_runner.py（关键片段）
+class AssetStageRunner:
+    def __init__(self, conn):
+        ...
+        self.face_engine = DeepFaceEngine.create(model_name="ArcFace", detector_backend="retinaface")
+
+    def _run_faces_stage(self, asset_id: int, scan_session_id: int) -> None:
+        asset = self.asset_repo.get_asset(asset_id)
+        faces = self.face_engine.detect_faces(Path(str(asset["primary_path"])))
+        self.asset_repo.replace_face_observations(
+            asset_id=asset_id,
+            faces=faces,
+            detector_key=self.face_engine.detector_backend,
+            detector_version=self.face_engine.model_name,
+        )
+        self.asset_repo.mark_stage_done_if_current(...)
+
+    def _run_embeddings_stage(self, asset_id: int, scan_session_id: int) -> None:
+        observations = self.asset_repo.list_active_observations(asset_id)
+        for observation in observations:
+            crop_path = self.preview_artifact_service.ensure_crop(int(observation["id"]))
+            embedding = self.face_engine.detect_faces(Path(crop_path))[0].embedding
+            self.asset_repo.upsert_face_embedding(
+                face_observation_id=int(observation["id"]),
+                vector_blob=embedding_to_blob(embedding),
+                dimension=int(embedding.shape[0]),
+                model_key=f"{self.face_engine.model_name}@{self.face_engine.detector_backend}",
+            )
+        self.asset_repo.mark_stage_done_if_current(...)
+```
+
+- [ ] **Step 4: 运行回归，确认真实模型链路生效**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_real_face_pipeline.py tests/people_gallery/test_asset_stage_idempotency.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/services/asset_stage_runner.py src/hikbox_pictures/repositories/asset_repo.py src/hikbox_pictures/deepface_engine.py src/hikbox_pictures/services/preview_artifact_service.py src/hikbox_pictures/services/scan_execution_service.py tests/people_gallery/test_real_face_pipeline.py tests/people_gallery/test_asset_stage_idempotency.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: replace stub face pipeline with real deepface detection and embeddings (Task 19)"
+```
+
+### Task 20: 接入 ANN 召回与阈值分层归属（auto/review/new_person）
+
+**Depends on:** Task 19
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 10
+- Max added lines: 1000
+- Estimated added lines: 940
+
+**Files:**
+- Modify: `src/hikbox_pictures/services/asset_stage_runner.py`
+- Modify: `src/hikbox_pictures/services/ann_assignment_service.py`
+- Modify: `src/hikbox_pictures/services/prototype_service.py`
+- Modify: `src/hikbox_pictures/repositories/review_repo.py`
+- Modify: `src/hikbox_pictures/repositories/person_repo.py`
+- Modify: `src/hikbox_pictures/cli.py`
+- Create: `tests/people_gallery/test_assignment_with_ann_thresholds.py`
+- Modify: `tests/people_gallery/test_person_truth_actions.py`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定 auto/review/new_person 三分流与 locked 保护**
+
+```python
+def test_assignment_stage_routes_to_auto_review_and_new_person(seed_workspace):
+    runner = seed_workspace.build_real_assignment_runner()
+    result = runner.run_assignment_once_for_test()
+
+    assert result["auto_assigned"] >= 1
+    assert result["review_queued"] >= 1
+    assert result["new_person_queued"] >= 1
+    assert result["locked_skipped"] >= 1
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_assignment_with_ann_thresholds.py -v`
+Expected: FAIL（当前 assignment 阶段仅默认挂到首个 active person）。
+
+- [ ] **Step 3: 在 assignment 阶段接入 ANN 召回 + 阈值分层**
+
+```python
+# src/hikbox_pictures/services/asset_stage_runner.py（关键片段）
+def _run_assignment_stage(self, asset_id: int, scan_session_id: int) -> None:
+    for observation in self.asset_repo.list_active_observations(asset_id):
+        embedding = self.asset_repo.load_embedding(observation_id=int(observation["id"]), feature_type="face")
+        candidates = self.ann_assignment_service.recall_person_candidates(embedding, top_k=5)
+        if not candidates:
+            self.review_repo.create_review_item(
+                review_type="new_person",
+                payload_json=json.dumps({"face_observation_id": int(observation["id"])}),
+                priority=10,
+            )
+            continue
+
+        decision = self.ann_assignment_service.classify_distance(float(candidates[0]["distance"]))
+        if decision == "auto_assign":
+            self.asset_repo.upsert_auto_assignment(...)
+        elif decision == "review":
+            self.review_repo.create_review_item(
+                review_type="low_confidence_assignment",
+                payload_json=json.dumps({"face_observation_id": int(observation["id"]), "candidates": candidates}),
+                priority=20,
+            )
+        else:
+            self.review_repo.create_review_item(
+                review_type="new_person",
+                payload_json=json.dumps({"face_observation_id": int(observation["id"]), "candidates": candidates}),
+                priority=15,
+            )
+    self.asset_repo.mark_stage_done_if_current(...)
+```
+
+- [ ] **Step 4: 运行回归，确认 ANN 归属链路生效**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_assignment_with_ann_thresholds.py tests/people_gallery/test_person_truth_actions.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/services/asset_stage_runner.py src/hikbox_pictures/services/ann_assignment_service.py src/hikbox_pictures/services/prototype_service.py src/hikbox_pictures/repositories/review_repo.py src/hikbox_pictures/repositories/person_repo.py src/hikbox_pictures/cli.py tests/people_gallery/test_assignment_with_ann_thresholds.py tests/people_gallery/test_person_truth_actions.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: integrate ann-based assignment routing with review queues (Task 20)"
+```
+
+### Task 21: 补齐 scan 控制面（abort / abandon-old / new scan）
+
+**Depends on:** Task 18
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 10
+- Max added lines: 1000
+- Estimated added lines: 760
+
+**Files:**
+- Modify: `src/hikbox_pictures/cli.py`
+- Modify: `src/hikbox_pictures/services/scan_orchestrator.py`
+- Modify: `src/hikbox_pictures/repositories/scan_repo.py`
+- Modify: `src/hikbox_pictures/api/routes_scan.py`
+- Modify: `src/hikbox_pictures/services/web_query_service.py`
+- Modify: `src/hikbox_pictures/web/templates/sources_scan.html`
+- Modify: `src/hikbox_pictures/web/static/app.js`
+- Create: `tests/people_gallery/test_scan_abort_and_restart.py`
+- Modify: `tests/people_gallery/test_api_contract.py`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定 abort 与“放弃旧任务并新建扫描”**
+
+```python
+def test_scan_abort_and_new_command(tmp_path, capsys):
+    from hikbox_pictures.cli import main
+
+    workspace = tmp_path / "ws"
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(["scan", "--workspace", str(workspace)]) == 0
+    capsys.readouterr()
+
+    assert main(["scan", "abort", "--workspace", str(workspace)]) == 0
+    out_abort = capsys.readouterr().out
+    assert "status=interrupted" in out_abort
+
+    assert main(["scan", "new", "--workspace", str(workspace), "--abandon-resumable"]) == 0
+    out_new = capsys.readouterr().out
+    assert "status=running" in out_new or "status=completed" in out_new
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_abort_and_restart.py -v`
+Expected: FAIL（当前无 `scan abort/new` 子命令和 API）。
+
+- [ ] **Step 3: 实现 CLI/API/Web scan 控制动作**
+
+```python
+# src/hikbox_pictures/cli.py（关键片段）
+p_scan_abort = scan_sub.add_parser("abort", help="中断当前扫描会话")
+p_scan_abort.add_argument("--workspace", type=Path, required=True)
+p_scan_abort.set_defaults(handler=handle_scan_abort)
+
+p_scan_new = scan_sub.add_parser("new", help="放弃旧会话并启动新扫描")
+p_scan_new.add_argument("--workspace", type=Path, required=True)
+p_scan_new.add_argument("--abandon-resumable", action="store_true")
+p_scan_new.set_defaults(handler=handle_scan_new)
+```
+
+```python
+# src/hikbox_pictures/api/routes_scan.py（关键片段）
+@router.post("/scan/abort")
+def scan_abort(request: Request) -> dict[str, object]:
+    ...
+
+
+@router.post("/scan/start_new")
+def scan_start_new(request: Request, abandon_resumable: bool = True) -> dict[str, object]:
+    ...
+```
+
+```html
+<!-- src/hikbox_pictures/web/templates/sources_scan.html（关键片段） -->
+<button type="button" data-action="scan-resume">恢复未完成任务</button>
+<button type="button" data-action="scan-abort">停止当前扫描</button>
+<button type="button" data-action="scan-start-new">放弃旧任务并新建扫描</button>
+```
+
+- [ ] **Step 4: 运行回归，确认控制面闭环可用**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_scan_abort_and_restart.py tests/people_gallery/test_api_contract.py::test_scan_status_reports_source_progress tests/people_gallery/test_webui_actions_e2e.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/cli.py src/hikbox_pictures/services/scan_orchestrator.py src/hikbox_pictures/repositories/scan_repo.py src/hikbox_pictures/api/routes_scan.py src/hikbox_pictures/services/web_query_service.py src/hikbox_pictures/web/templates/sources_scan.html src/hikbox_pictures/web/static/app.js tests/people_gallery/test_scan_abort_and_restart.py tests/people_gallery/test_api_contract.py docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: add scan abort and restart control-plane commands (Task 21)"
+```
+
+### Task 22: `context` 预览改为带框局部图（非原图直出）
+
+**Depends on:** Task 19
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 7
+- Max added lines: 1000
+- Estimated added lines: 540
+
+**Files:**
+- Modify: `src/hikbox_pictures/services/preview_artifact_service.py`
+- Modify: `src/hikbox_pictures/services/media_preview_service.py`
+- Modify: `src/hikbox_pictures/api/routes_media.py`
+- Create: `tests/people_gallery/test_context_preview_with_bbox.py`
+- Modify: `tests/people_gallery/test_media_api_contract.py`
+- Modify: `README.md`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定 context 输出为带框局部图**
+
+```python
+def test_context_endpoint_returns_bbox_highlighted_region(seed_workspace, client):
+    observation_id = int(seed_workspace.first_observation_id)
+    context_resp = client.get(f"/api/observations/{observation_id}/context")
+    original_resp = client.get(f"/api/photos/{seed_workspace.first_photo_id}/original")
+
+    assert context_resp.status_code == 200
+    assert original_resp.status_code == 200
+    assert len(context_resp.content) < len(original_resp.content)
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_context_preview_with_bbox.py -v`
+Expected: FAIL（当前 `context` 直接返回原图流）。
+
+- [ ] **Step 3: 实现 context artifact 构建与读取**
+
+```python
+# src/hikbox_pictures/services/preview_artifact_service.py（关键片段）
+def ensure_context(self, observation_id: int) -> str:
+    row = repo.get_observation_with_source(observation_id)
+    ...
+    out_path = self.workspace / ".hikbox" / "artifacts" / "context" / f"obs-{observation_id}.jpg"
+    with Image.open(source_path) as image:
+        context = crop_with_margin(image, row, margin=0.25)
+        draw_bbox(context, row, color=(255, 64, 64), width=4)
+        context.convert("RGB").save(out_path, format="JPEG")
+    return str(out_path)
+```
+
+```python
+# src/hikbox_pictures/services/media_preview_service.py（关键片段）
+def read_observation_context(self, observation_id: int) -> MediaStreamPayload:
+    context_path = self.preview_artifact_service.ensure_context(int(observation_id))
+    return self._build_stream_payload(source_path=context_path, range_header=None)
+```
+
+- [ ] **Step 4: 运行回归，确认 context 行为符合设计**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_context_preview_with_bbox.py tests/people_gallery/test_media_api_contract.py tests/people_gallery/test_preview_artifact_rebuild.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/services/preview_artifact_service.py src/hikbox_pictures/services/media_preview_service.py src/hikbox_pictures/api/routes_media.py tests/people_gallery/test_context_preview_with_bbox.py tests/people_gallery/test_media_api_contract.py README.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: serve observation context as bbox-highlighted region artifact (Task 22)"
+```
+
+### Task 23: 补齐审核与导出控制面真实动作（API + Web）
+
+**Depends on:** Task 20, Task 21, Task 22
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 12
+- Max added lines: 1000
+- Estimated added lines: 980
+
+**Files:**
+- Modify: `src/hikbox_pictures/services/action_service.py`
+- Modify: `src/hikbox_pictures/repositories/review_repo.py`
+- Modify: `src/hikbox_pictures/repositories/export_repo.py`
+- Modify: `src/hikbox_pictures/api/routes_reviews.py`
+- Modify: `src/hikbox_pictures/api/routes_export.py`
+- Modify: `src/hikbox_pictures/services/web_query_service.py`
+- Modify: `src/hikbox_pictures/web/templates/review_queue.html`
+- Modify: `src/hikbox_pictures/web/templates/export_templates.html`
+- Modify: `src/hikbox_pictures/web/static/app.js`
+- Create: `tests/people_gallery/test_review_export_actions_end_to_end.py`
+- Modify: `tests/people_gallery/test_api_actions.py`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+
+- [ ] **Step 1: 写失败测试，锁定 review/export 动作闭环**
+
+```python
+def test_review_and_export_actions_roundtrip(seed_workspace, client):
+    review = client.get("/api/reviews").json()[0]
+    review_id = int(review["id"])
+
+    confirm_resp = client.post(f"/api/reviews/{review_id}/actions/resolve")
+    assert confirm_resp.status_code == 200
+
+    run_resp = client.post("/api/export/templates/1/actions/run")
+    assert run_resp.status_code == 200
+    run_id = int(run_resp.json()["run_id"])
+
+    runs_resp = client.get("/api/export/templates/1/runs")
+    assert runs_resp.status_code == 200
+    assert any(int(item["id"]) == run_id for item in runs_resp.json())
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_review_export_actions_end_to_end.py -v`
+Expected: FAIL（当前缺少 `review resolve`、`export run` API、模板执行历史 API）。
+
+- [ ] **Step 3: 实现 review/export 动作与页面交互入口**
+
+```python
+# src/hikbox_pictures/api/routes_reviews.py（关键片段）
+@router.post("/reviews/{review_id}/actions/resolve")
+def resolve_review(review_id: int, request: Request) -> dict[str, object]:
+    ...
+
+@router.post("/reviews/{review_id}/actions/ignore")
+def ignore_review(review_id: int, request: Request) -> dict[str, object]:
+    ...
+```
+
+```python
+# src/hikbox_pictures/api/routes_export.py（关键片段）
+@router.post("/export/templates/{template_id}/actions/run")
+def run_template(template_id: int, request: Request) -> dict[str, object]:
+    ...
+
+@router.get("/export/templates/{template_id}/runs")
+def list_template_runs(template_id: int, request: Request) -> list[dict[str, object]]:
+    ...
+```
+
+```html
+<!-- src/hikbox_pictures/web/templates/review_queue.html（关键片段） -->
+<button type="button" data-action="review-resolve" data-review-id="{{ item.id }}">确认</button>
+<button type="button" data-action="review-dismiss" data-review-id="{{ item.id }}">驳回</button>
+<button type="button" data-action="review-ignore" data-review-id="{{ item.id }}">忽略</button>
+```
+
+- [ ] **Step 4: 运行回归，确认 Web/API 动作闭环**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_review_export_actions_end_to_end.py tests/people_gallery/test_api_actions.py tests/people_gallery/test_webui_actions_e2e.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add src/hikbox_pictures/services/action_service.py src/hikbox_pictures/repositories/review_repo.py src/hikbox_pictures/repositories/export_repo.py src/hikbox_pictures/api/routes_reviews.py src/hikbox_pictures/api/routes_export.py src/hikbox_pictures/services/web_query_service.py src/hikbox_pictures/web/templates/review_queue.html src/hikbox_pictures/web/templates/export_templates.html src/hikbox_pictures/web/static/app.js tests/people_gallery/test_review_export_actions_end_to_end.py tests/people_gallery/test_api_actions.py docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md
+git commit -m "feat: complete review and export control-plane actions in api and webui (Task 23)"
+```
+
+### Task 24: 端到端验收改为“无 seed/mock 注入”为必过门槛
+
+**Depends on:** Task 20, Task 21, Task 22, Task 23
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 8
+- Max added lines: 1000
+- Estimated added lines: 620
+
+**Files:**
+- Create: `tests/data/e2e-face-input/manifest.json`（以及该目录下的测试图片资产）
+- Create: `tests/people_gallery/test_e2e_real_source_pipeline.py`
+- Modify: `tests/people_gallery/test_e2e_full_system.py`
+- Modify: `tests/people_gallery/test_cli_control_plane.py`
+- Modify: `tests/people_gallery/test_api_contract.py`
+- Modify: `README.md`
+- Modify: `docs/superpowers/specs/2026-04-11-hikbox-pictures-people-gallery-design.md`
+- Modify: `docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md`
+- Modify: `pyproject.toml`
+
+- [ ] **Step 1: 写失败测试，锁定“使用 tests/data/e2e-face-input 的无注入主链路”**
+
+```python
+def test_e2e_real_source_pipeline_without_seed_injection(tmp_path):
+    from hikbox_pictures.cli import main
+    from hikbox_pictures.db.connection import connect_db
+    from pathlib import Path
+
+    workspace = tmp_path / "ws"
+    source_root = Path("tests/data/e2e-face-input").resolve()
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert main(
+        ["source", "add", "--workspace", str(workspace), "--name", "sample-input", "--root-path", str(source_root)]
+    ) == 0
+    assert main(["scan", "--workspace", str(workspace)]) == 0
+
+    conn = connect_db(workspace / ".hikbox" / "library.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM photo_asset").fetchone()[0] > 0
+        assert conn.execute("SELECT COUNT(*) FROM face_observation").fetchone()[0] > 0
+        assert conn.execute("SELECT COUNT(*) FROM face_embedding").fetchone()[0] > 0
+    finally:
+        conn.close()
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_e2e_real_source_pipeline.py -v`
+Expected: FAIL（在本轮补齐前，真实 source 扫描链路不会产出人物数据）。
+
+- [ ] **Step 3: 调整验收基线，移除对 seed/mock 的主流程依赖**
+
+```markdown
+## 验收口径（补充）
+
+1. 主流程验收必须包含无 seed/mock 注入路径：`init -> source add -> scan -> review/export/logs`。
+2. `tests/people_gallery/test_e2e_full_system.py` 的 happy path 不允许通过夹具直接写入 `photo_asset/face_observation/face_embedding` 替代 source+scan 阶段。
+3. mock embedding 路径仅保留为“性能隔离与后续链路稳定性”附加测试，不可作为主验收通过依据。
+4. e2e 主流程必须使用仓库内固定数据集：`tests/data/e2e-face-input`，不得回退到 `sample/input` 或临时 seed 目录。
+```
+
+- [ ] **Step 4: 运行最终回归，确认新验收门槛可通过**
+
+Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_e2e_real_source_pipeline.py tests/people_gallery/test_e2e_full_system.py tests/people_gallery/test_cli_control_plane.py tests/people_gallery/test_api_contract.py -q`
+Expected: PASS。
+
+**Task completion action (not a checkbox step): Commit task changes and plan progress**
+
+```bash
+git add tests/data/e2e-face-input tests/people_gallery/test_e2e_real_source_pipeline.py tests/people_gallery/test_e2e_full_system.py tests/people_gallery/test_cli_control_plane.py tests/people_gallery/test_api_contract.py README.md docs/superpowers/specs/2026-04-11-hikbox-pictures-people-gallery-design.md docs/superpowers/plans/2026-04-11-hikbox-pictures-people-gallery.md pyproject.toml
+git commit -m "test: enforce real-source no-mock e2e acceptance baseline (Task 24)"
+```

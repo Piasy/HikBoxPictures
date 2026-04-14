@@ -266,14 +266,21 @@ def test_project_metadata_points_to_existing_files() -> None:
     assert Path("README.md").is_file()
     assert Path("src/hikbox_pictures/cli.py").is_file()
     assert Path("scripts/install.sh").is_file()
-    assert Path("scripts/inspect_distances.py").is_file()
+    assert not Path("scripts/inspect_distances.py").exists()
+    assert not Path("scripts/extract_faces.py").exists()
+    assert not Path("scripts/calibrate_thresholds.py").exists()
 
     readme = Path("README.md").read_text(encoding="utf-8")
     install_script = Path("scripts/install.sh").read_text(encoding="utf-8")
     install_script_lower = install_script.lower()
 
     assert "./scripts/install.sh" in readme
-    assert "inspect_distances.py" in readme
+    assert "--input" not in readme
+    assert "--ref-a-dir" not in readme
+    assert "--ref-b-dir" not in readme
+    assert "inspect_distances.py" not in readme
+    assert "extract_faces.py" not in readme
+    assert "calibrate_thresholds.py" not in readme
 
     assert "deepface" in install_script_lower
     assert "tf-keras" in install_script_lower

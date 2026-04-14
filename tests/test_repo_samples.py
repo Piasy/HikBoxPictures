@@ -37,25 +37,29 @@ def test_readme_mentions_deepface_runtime_basics() -> None:
     assert "onnxruntime" not in readme_lower
     assert "face_recognition" not in readme_lower
 
-    for flag in ("--model-name", "--detector-backend", "--distance-metric", "--distance-threshold"):
-        assert flag in readme
-    assert "--align" in readme
-    assert "--no-align" in readme
-
-    assert "首次运行" in readme
-    assert "下载" in readme
-    assert "联网" in readme
-
-    assert "许可" in readme
-    assert "核对" in readme
+    for command_snippet in (
+        "init --workspace",
+        "serve --workspace",
+        "scan --workspace",
+        "scan status --workspace",
+        "rebuild-artifacts --workspace",
+        "export run --workspace",
+        "logs tail --workspace",
+        "logs prune --workspace",
+    ):
+        assert command_snippet in readme
 
     assert ("Pillow" in readme and "pillow-heif" in readme) or ("pyproject.toml" in readme)
 
 
-def test_readme_mentions_template_calibration_workflow() -> None:
+def test_readme_removes_legacy_matching_and_debug_scripts() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
-    assert "calibrate_thresholds.py" in readme
-    assert "--distance-threshold-a" in readme
-    assert "--distance-threshold-b" in readme
-    assert "joint_distance" in readme
+    assert "--input" not in readme
+    assert "--ref-a-dir" not in readme
+    assert "--ref-b-dir" not in readme
+    assert "--distance-threshold-a" not in readme
+    assert "--distance-threshold-b" not in readme
+    assert "inspect_distances.py" not in readme
+    assert "extract_faces.py" not in readme
+    assert "calibrate_thresholds.py" not in readme
