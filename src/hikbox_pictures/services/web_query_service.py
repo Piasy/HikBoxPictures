@@ -21,7 +21,7 @@ class WebQueryService:
         self.ops_event_repo = OpsEventRepo(conn)
 
     def get_scan_status(self) -> dict[str, Any]:
-        session = self.scan_repo.latest_resumable_session()
+        session = self.scan_repo.latest_session()
         if session is None:
             return {
                 "session_id": None,
@@ -43,7 +43,66 @@ class WebQueryService:
         }
 
     def list_people(self) -> list[dict[str, Any]]:
-        rows = self.person_repo.list_people()
+        rows = self.conn.execute(
+            """
+            SELECT p.id,
+                   p.display_name,
+                   p.status,
+                   p.confirmed,
+                   p.ignored,
+                   p.notes,
+                   p.created_at,
+                   p.updated_at,
+                   COALESCE(
+                       (
+                           SELECT fo.id
+                           FROM face_observation AS fo
+                           WHERE fo.id = p.cover_observation_id
+                             AND fo.active = 1
+                       ),
+                       (
+                           SELECT pfa.face_observation_id
+                           FROM person_face_assignment AS pfa
+                           JOIN face_observation AS fo
+                             ON fo.id = pfa.face_observation_id
+                           WHERE pfa.person_id = p.id
+                             AND pfa.active = 1
+                             AND fo.active = 1
+                           ORDER BY pfa.locked DESC, pfa.id ASC
+                           LIMIT 1
+                       )
+                   ) AS cover_observation_id,
+                   (
+                       SELECT COUNT(*)
+                       FROM person_face_assignment AS pfa
+                       JOIN face_observation AS fo
+                         ON fo.id = pfa.face_observation_id
+                       WHERE pfa.person_id = p.id
+                         AND pfa.active = 1
+                         AND fo.active = 1
+                   ) AS sample_count,
+                   (
+                       SELECT COUNT(DISTINCT fo.photo_asset_id)
+                       FROM person_face_assignment AS pfa
+                       JOIN face_observation AS fo
+                         ON fo.id = pfa.face_observation_id
+                       WHERE pfa.person_id = p.id
+                         AND pfa.active = 1
+                         AND fo.active = 1
+                   ) AS photo_count,
+                   (
+                       SELECT COUNT(*)
+                       FROM review_item AS ri
+                       WHERE ri.status = 'open'
+                         AND (
+                             ri.primary_person_id = p.id
+                             OR ri.secondary_person_id = p.id
+                         )
+                   ) AS pending_review_count
+            FROM person AS p
+            ORDER BY p.id ASC
+            """
+        ).fetchall()
         return [
             {
                 "id": row["id"],
@@ -54,6 +113,15 @@ class WebQueryService:
                 "notes": row["notes"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
+                "cover_observation_id": int(row["cover_observation_id"]) if row["cover_observation_id"] is not None else None,
+                "cover_crop_url": (
+                    f"/api/observations/{row['cover_observation_id']}/crop"
+                    if row["cover_observation_id"] is not None
+                    else None
+                ),
+                "sample_count": int(row["sample_count"]),
+                "photo_count": int(row["photo_count"]),
+                "pending_review_count": int(row["pending_review_count"]),
             }
             for row in rows
         ]
@@ -90,6 +158,12 @@ class WebQueryService:
 
     def list_export_templates(self) -> list[dict[str, Any]]:
         rows = self.export_repo.list_templates()
+        runs_by_template: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            template_id = int(row["id"])
+            runs = self.export_repo.list_runs_by_template(template_id, limit=1)
+            if runs:
+                runs_by_template[template_id] = runs[0]
         return [
             {
                 "id": row["id"],
@@ -98,6 +172,7 @@ class WebQueryService:
                 "include_group": bool(row["include_group"]),
                 "export_live_mov": bool(row["export_live_mov"]),
                 "enabled": bool(row["enabled"]),
+                "latest_run": runs_by_template.get(int(row["id"])),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
@@ -159,7 +234,7 @@ class WebQueryService:
         }
 
     def get_sources_scan_view(self) -> dict[str, Any]:
-        session = self.scan_repo.latest_resumable_session()
+        session = self.scan_repo.latest_session()
         session_sources: list[dict[str, Any]] = []
         if session is not None:
             session_sources = self.scan_repo.list_session_sources(int(session["id"]))

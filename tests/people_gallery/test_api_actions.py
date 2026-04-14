@@ -58,3 +58,43 @@ def test_people_rename_action_rejects_blank_display_name(tmp_path) -> None:
         assert response.status_code == 422
     finally:
         ws.close()
+
+
+def test_review_resolve_and_ignore_actions_update_review_status(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+
+        resolve_resp = client.post("/api/reviews/1/actions/resolve")
+        assert resolve_resp.status_code == 200
+        assert resolve_resp.json()["status"] == "resolved"
+
+        ignore_resp = client.post("/api/reviews/2/actions/ignore")
+        assert ignore_resp.status_code == 200
+        assert ignore_resp.json()["status"] == "dismissed"
+
+        review1 = ws.get_review_item(1)
+        review2 = ws.get_review_item(2)
+        assert review1 is not None and review1["status"] == "resolved"
+        assert review2 is not None and review2["status"] == "dismissed"
+    finally:
+        ws.close()
+
+
+def test_export_run_and_runs_api_roundtrip(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+
+        run_resp = client.post(f"/api/export/templates/{ws.export_template_id}/actions/run")
+        assert run_resp.status_code == 200
+        run_payload = run_resp.json()
+        assert int(run_payload["template_id"]) == int(ws.export_template_id)
+        run_id = int(run_payload["run_id"])
+
+        list_resp = client.get(f"/api/export/templates/{ws.export_template_id}/runs")
+        assert list_resp.status_code == 200
+        runs = list_resp.json()
+        assert any(int(row["id"]) == run_id for row in runs)
+    finally:
+        ws.close()

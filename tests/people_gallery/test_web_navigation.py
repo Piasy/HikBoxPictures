@@ -41,6 +41,8 @@ def test_web_navigation_routes_and_static_assets(tmp_path) -> None:
         js = client.get("/static/app.js")
         assert css.status_code == 200
         assert js.status_code == 200
+        assert ".people-gallery-viewer .viewer-layers" in css.text
+        assert 'img[data-viewer-layer="context"]' in css.text
     finally:
         ws.close()
 

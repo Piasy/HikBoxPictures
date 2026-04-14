@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from hikbox_pictures.api.app import create_app
 
@@ -16,6 +18,17 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+
+
+def _has_bbox_highlight(image: Image.Image) -> bool:
+    rgb = image.convert("RGB")
+    pixels = rgb.load()
+    for y in range(rgb.height):
+        for x in range(rgb.width):
+            r, g, b = pixels[x, y]
+            if r >= 180 and g <= 130 and b <= 130:
+                return True
+    return False
 
 
 def test_media_endpoints_return_images_from_workspace_data(tmp_path) -> None:
@@ -42,6 +55,13 @@ def test_media_endpoints_return_images_from_workspace_data(tmp_path) -> None:
 
         assert len(original.content) > 0
         assert len(crop.content) > 0
+        assert len(context.content) < len(original.content)
+
+        original_image = Image.open(io.BytesIO(original.content)).convert("RGB")
+        context_image = Image.open(io.BytesIO(context.content)).convert("RGB")
+        assert context_image.width < original_image.width
+        assert context_image.height < original_image.height
+        assert _has_bbox_highlight(context_image) is True
     finally:
         ws.close()
 

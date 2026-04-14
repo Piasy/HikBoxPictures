@@ -7,6 +7,8 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
+from hikbox_pictures.cli import main
+from tests.people_gallery.real_image_helper import copy_raw_face_image
 
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
@@ -25,11 +27,28 @@ def test_people_page_has_cards_and_real_names(tmp_path) -> None:
         html = client.get("/").text
 
         assert "person-card" in html
+        assert "people-gallery-viewer" in html
         assert "进入维护" in html
         assert 'data-viewer-layer="original"' in html
         assert 'data-action="viewer-next"' in html
         for row in ws.person_repo.list_people():
             assert str(row["display_name"]) in html
+    finally:
+        ws.close()
+
+
+def test_people_page_shows_cover_and_metrics_when_assignments_exist(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        html = client.get("/").text
+
+        assert 'class="person-card-cover"' in html
+        assert 'class="person-card-image"' in html
+        assert 'alt="人物A 封面"' in html
+        assert "待审核 2" in html
+        assert "照片 4 · 样本 4" in html
+        assert "/api/observations/" in html
     finally:
         ws.close()
 
@@ -44,6 +63,7 @@ def test_reviews_page_has_typed_queues(tmp_path) -> None:
         assert "queue-possible_merge" in html
         assert "queue-possible_split" in html
         assert "queue-low_confidence_assignment" in html
+        assert "people-gallery-viewer" not in html
         assert 'data-action="viewer-prev"' in html
         assert 'data-action="viewer-next"' in html
         assert 'data-action="viewer-toggle-bbox"' in html
@@ -96,3 +116,36 @@ def test_pages_render_empty_state_with_fresh_workspace(tmp_path) -> None:
 
     assert "运行日志" in logs_html
     assert "事件类型" in logs_html
+
+
+def test_sources_page_keeps_latest_completed_session_visible(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source_root = tmp_path / "scan-input"
+    source_root.mkdir(parents=True, exist_ok=True)
+    copy_raw_face_image(source_root / "a.jpg", index=0)
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert (
+        main(
+            [
+                "source",
+                "add",
+                "--workspace",
+                str(workspace),
+                "--name",
+                "scan-source",
+                "--root-path",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+    assert main(["scan", "--workspace", str(workspace)]) == 0
+
+    client = TestClient(create_app(workspace=workspace))
+    html = client.get("/sources").text
+
+    assert "当前会话：" in html
+    assert "completed" in html
+    assert "scan-source" in html
+    assert ">1<" in html

@@ -5,10 +5,12 @@ import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
 from hikbox_pictures.cli import main
+from tests.people_gallery.real_image_helper import bind_real_source_roots
 
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
@@ -83,6 +85,7 @@ def test_full_system_control_plane_happy_path_init_to_logs(tmp_path, capsys) -> 
 
     ws = build_seed_workspace(workspace, seed_export_assets=True, seed_media_assets=True)
     try:
+        bind_real_source_roots(ws, tmp_path / "scan-input")
         client = TestClient(create_app(workspace=workspace))
         sources_html = client.get("/sources").text
         assert "iCloud" in sources_html
@@ -131,3 +134,46 @@ def test_full_system_control_plane_happy_path_init_to_logs(tmp_path, capsys) -> 
         assert "days=90" in out_logs
     finally:
         ws.close()
+
+
+@pytest.mark.real_face_engine
+def test_full_system_real_source_flow_without_seed_injection(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    source_root = tmp_path / "real-input"
+    bind_root = source_root / "scan-root"
+    bind_root.mkdir(parents=True, exist_ok=True)
+
+    from tests.people_gallery.real_image_helper import copy_group_face_image, copy_raw_face_image
+
+    copy_raw_face_image(bind_root / "solo.jpg", index=0)
+    copy_group_face_image(bind_root / "group.jpg", index=0)
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert (
+        main(
+            [
+                "source",
+                "add",
+                "--workspace",
+                str(workspace),
+                "--name",
+                "real-input",
+                "--root-path",
+                str(bind_root),
+            ]
+        )
+        == 0
+    )
+    assert main(["scan", "--workspace", str(workspace)]) == 0
+
+    client = TestClient(create_app(workspace=workspace))
+    people_html = client.get("/").text
+    reviews_html = client.get("/reviews").text
+    sources_html = client.get("/sources").text
+    logs_response = client.get("/api/logs/events", params={"run_kind": "scan", "limit": 200})
+
+    assert "queue-new_person" in reviews_html
+    assert "completed" in sources_html
+    assert people_html is not None
+    assert logs_response.status_code == 200
+    assert any(item["event_type"] == "scan.session.started" for item in logs_response.json())

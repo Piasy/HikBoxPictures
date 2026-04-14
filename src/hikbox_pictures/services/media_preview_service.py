@@ -144,16 +144,17 @@ class MediaPreviewService:
         return self._build_stream_payload(source_path=crop_path, range_header=None)
 
     def read_observation_context(self, observation_id: int) -> MediaStreamPayload:
-        conn = connect_db(self.db_path)
         try:
-            repo = AssetRepo(conn)
-            row = repo.get_observation_media(int(observation_id))
-        finally:
-            conn.close()
-
-        if row is None:
-            raise LookupError(f"observation {observation_id} 不存在")
-        return self._build_stream_payload(source_path=str(row["primary_path"]), range_header=None)
+            context_path = self.preview_artifact_service.ensure_context(int(observation_id))
+        except PreviewArtifactError as exc:
+            raise MediaBusinessError(
+                status_code=exc.status_code,
+                error_code=exc.error_code,
+                message=exc.message,
+            ) from exc
+        except LookupError:
+            raise
+        return self._build_stream_payload(source_path=context_path, range_header=None)
 
     def _build_stream_payload(self, *, source_path: str, range_header: str | None) -> MediaStreamPayload:
         allowed_roots = [str(path) for path in self.allowed_roots_resolver(self.workspace)]

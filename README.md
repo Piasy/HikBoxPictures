@@ -55,9 +55,11 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `init --workspace <dir>`：初始化工作区与数据库。
 - `source add|list|remove --workspace <dir> ...`：源目录管理（添加、查看、移除）。
 - `serve --workspace <dir> [--host ... --port ...]`：启动 API/WebUI。
-- `scan --workspace <dir>`：执行或恢复扫描会话。
-- `scan status --workspace <dir>`：查看会话与 source 进度。
-- `rebuild-artifacts --workspace <dir>`：重建人物原型与 ANN 索引。
+- `scan --workspace <dir>`：执行或恢复扫描会话，并完成 source 发现、阶段推进与会话收口；若存在失败 source，会返回非零退出码。
+- `scan status --workspace <dir>`：查看最近一次会话与 source 进度，完成态与失败态也会保留可见。
+- `scan abort --workspace <dir>`：中断最近一个未完成扫描会话。
+- `scan new --workspace <dir> --abandon-resumable`：放弃旧会话并启动新扫描。
+- `rebuild-artifacts --workspace <dir>`：按当前 `face_embedding.model_key` 重建人物原型与 ANN 索引。
 - `export run --workspace <dir> --template-id <id>`：执行导出模板并输出统计摘要。
 - `logs tail --workspace <dir> [--run-kind ... --run-id ... --limit ...]`：查看结构化运行日志。
 - `logs prune --workspace <dir> [--days <n>]`：按天数清理 `ops_event` 历史索引。
@@ -67,6 +69,8 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /api/health`
 - `GET /api/scan/status`
 - `POST /api/scan/start_or_resume`
+- `POST /api/scan/abort`
+- `POST /api/scan/start_new`
 - `GET /api/people`
 - `POST /api/people/{id}/actions/rename`
 - `POST /api/people/{id}/actions/merge`
@@ -74,13 +78,21 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `POST /api/people/{id}/actions/lock-assignment`
 - `GET /api/reviews`
 - `POST /api/reviews/{id}/actions/dismiss`
+- `POST /api/reviews/{id}/actions/resolve`
+- `POST /api/reviews/{id}/actions/ignore`
 - `GET /api/export/templates`
 - `GET /api/export/templates/{template_id}/preview`
+- `POST /api/export/templates/{template_id}/actions/run`
+- `GET /api/export/templates/{template_id}/runs`
 - `GET /api/logs/events`
 - `GET /api/photos/{photo_id}/original`
 - `GET /api/photos/{photo_id}/preview`
 - `GET /api/observations/{observation_id}/crop`
 - `GET /api/observations/{observation_id}/context`
+
+其中 `GET /api/scan/status` 会返回最近一次扫描会话，不会在 completed/failed 后回退成 `idle`。`POST /api/scan/start_or_resume` 会同步执行 discover 与四阶段流水线，响应中的 `status` 即最终会话状态。
+
+`GET /api/observations/{observation_id}/context` 不再直出原图，而是返回 workspace 下生成的局部上下文 artifact：包含 bbox 周边区域与高亮框，文件写入 `.hikbox/artifacts/context/`。
 
 ## WebUI 路由
 
@@ -107,3 +119,15 @@ PYTHONPATH=src python3 -m pytest -q
 source .venv/bin/activate
 PYTHONPATH=src python3 -m pytest tests/people_gallery -q
 ```
+
+如需验证真实 DeepFace 主链路，推荐至少运行以下组合：
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python3 -m pytest \
+  tests/people_gallery/test_real_face_pipeline.py \
+  tests/people_gallery/test_assignment_with_ann_thresholds.py \
+  tests/people_gallery/test_e2e_real_source_pipeline.py -q
+```
+
+主流程验收已要求包含无 seed/mock 注入路径，固定数据集位于 `tests/data/e2e-face-input`。

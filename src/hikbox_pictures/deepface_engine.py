@@ -20,20 +20,25 @@ DeepFace = _DeepFace
 verification = _verification
 
 BBoxTLBR: TypeAlias = tuple[int, int, int, int]
+ImageSize: TypeAlias = tuple[int, int]
 EmbeddingArray: TypeAlias = npt.NDArray[np.float32]
 EmbeddingLike: TypeAlias = Sequence[float] | npt.NDArray[np.float32]
 ThresholdSource: TypeAlias = Literal["deepface-default", "explicit"]
+DEFAULT_FACE_MODEL_NAME = "ArcFace"
+DEFAULT_FACE_DETECTOR_BACKEND = "retinaface"
+DEFAULT_FACE_DISTANCE_METRIC = "cosine"
 
 
 class DeepFaceModuleProtocol(Protocol):
     def represent(
         self,
         *,
-        img_path: str,
+        img_path: object,
         model_name: str,
         detector_backend: str,
         align: bool,
         enforce_detection: bool,
+        l2_normalize: bool,
     ) -> object: ...
 
 
@@ -56,6 +61,7 @@ class DetectedFace:
     # (上, 右, 下, 左)
     bbox: BBoxTLBR
     embedding: EmbeddingArray
+    image_size: ImageSize | None = None
 
 
 @dataclass
@@ -73,9 +79,9 @@ class DeepFaceEngine:
     def create(
         cls,
         *,
-        model_name: str = "ArcFace",
-        detector_backend: str = "retinaface",
-        distance_metric: str = "cosine",
+        model_name: str = DEFAULT_FACE_MODEL_NAME,
+        detector_backend: str = DEFAULT_FACE_DETECTOR_BACKEND,
+        distance_metric: str = DEFAULT_FACE_DISTANCE_METRIC,
         align: bool = True,
         distance_threshold: float | None = None,
     ) -> DeepFaceEngine:
@@ -105,9 +111,14 @@ class DeepFaceEngine:
             verification_module=verification_module,
         )
 
+    @property
+    def model_key(self) -> str:
+        return build_face_model_key(self.model_name, self.detector_backend)
+
     def detect_faces(self, image_path: Path) -> list[DetectedFace]:
         try:
             loaded_rgb = load_rgb_image(image_path)
+            height, width = loaded_rgb.shape[:2]
             loaded_bgr = loaded_rgb[:, :, ::-1]
             results = self.deepface_module.represent(
                 img_path=loaded_bgr,
@@ -115,6 +126,7 @@ class DeepFaceEngine:
                 detector_backend=self.detector_backend,
                 align=self.align,
                 enforce_detection=False,
+                l2_normalize=True,
             )
             if isinstance(results, Mapping):
                 payloads: list[object] = [results]
@@ -141,11 +153,49 @@ class DeepFaceEngine:
                 embedding = np.asarray(payload["embedding"], dtype=np.float32)
                 if embedding.ndim != 1 or embedding.size == 0:
                     raise ValueError("embedding 为空或维度非法")
+                if self._is_no_face_fallback_payload(
+                    payload,
+                    width=width,
+                    height=height,
+                    x=x,
+                    y=y,
+                    w=w,
+                    h=h,
+                ):
+                    continue
 
-                faces.append(DetectedFace(bbox=bbox, embedding=embedding))
+                faces.append(DetectedFace(bbox=bbox, embedding=embedding, image_size=(width, height)))
             return faces
         except Exception as exc:
             raise DeepFaceInferenceError(f"DeepFace 推理失败: {exc}") from exc
+
+    def represent_face(self, image_path: Path) -> EmbeddingArray:
+        try:
+            loaded_rgb = load_rgb_image(image_path)
+            loaded_bgr = loaded_rgb[:, :, ::-1]
+            results = self.deepface_module.represent(
+                img_path=loaded_bgr,
+                model_name=self.model_name,
+                detector_backend="skip",
+                align=False,
+                enforce_detection=False,
+                l2_normalize=True,
+            )
+            if isinstance(results, Mapping):
+                payload = results
+            else:
+                payloads = list(results)
+                if not payloads:
+                    raise ValueError("embedding 结果为空")
+                payload = payloads[0]
+            if not isinstance(payload, Mapping) or "embedding" not in payload:
+                raise ValueError("embedding 字段缺失")
+            embedding = np.asarray(payload["embedding"], dtype=np.float32)
+            if embedding.ndim != 1 or embedding.size == 0:
+                raise ValueError("embedding 为空或维度非法")
+            return embedding
+        except Exception as exc:
+            raise DeepFaceInferenceError(f"DeepFace embedding 推理失败: {exc}") from exc
 
     @staticmethod
     def _required_int(mapping: Mapping[str, object], key: str) -> int:
@@ -155,6 +205,33 @@ class DeepFaceEngine:
             return int(mapping[key])
         except (TypeError, ValueError) as exc:
             raise ValueError(f"facial_area.{key} 非法") from exc
+
+    @staticmethod
+    def _is_no_face_fallback_payload(
+        payload: Mapping[str, object],
+        *,
+        width: int,
+        height: int,
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+    ) -> bool:
+        confidence = payload.get("face_confidence")
+        if confidence is None:
+            return False
+        try:
+            face_confidence = float(confidence)
+        except (TypeError, ValueError):
+            return False
+        if face_confidence > 0.0:
+            return False
+        return (
+            x <= 0
+            and y <= 0
+            and int(w) >= max(int(width) - 1, 1)
+            and int(h) >= max(int(height) - 1, 1)
+        )
 
     def distance(self, lhs: EmbeddingLike, rhs: EmbeddingLike) -> float:
         return float(self.verification_module.find_distance(lhs, rhs, self.distance_metric))
@@ -182,3 +259,7 @@ class DeepFaceEngine:
 def embedding_to_blob(embedding: EmbeddingLike) -> bytes:
     vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
     return vector.tobytes()
+
+
+def build_face_model_key(model_name: str, detector_backend: str) -> str:
+    return f"{model_name}@{detector_backend}"

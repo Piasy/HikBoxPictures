@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import re
+import sqlite3
 import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
+
 from hikbox_pictures.cli import main
+from tests.people_gallery.real_image_helper import bind_real_source_roots, copy_raw_face_image
 
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace_cli_control_plane", _FIXTURE_PATH)
@@ -110,6 +114,7 @@ def test_cli_control_plane_happy_path_covers_scan_export_logs(tmp_path: Path, ca
 
     ws = build_seed_workspace(workspace, seed_export_assets=True)
     try:
+        bind_real_source_roots(ws, tmp_path / "scan-input")
         rc_scan = main(["scan", "--workspace", str(workspace)])
         assert rc_scan == 0
         out_scan = capsys.readouterr().out
@@ -156,3 +161,66 @@ def test_cli_control_plane_happy_path_covers_scan_export_logs(tmp_path: Path, ca
         assert "days=90" in out_prune
     finally:
         ws.close()
+
+
+@pytest.mark.real_face_engine
+def test_cli_scan_executes_discover_to_completed_pipeline(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    source_root = tmp_path / "source-files"
+    source_root.mkdir(parents=True, exist_ok=True)
+    copy_raw_face_image(source_root / "x.jpg", index=0)
+    copy_raw_face_image(source_root / "y.jpeg", index=1)
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert (
+        main(
+            [
+                "source",
+                "add",
+                "--workspace",
+                str(workspace),
+                "--name",
+                "scan-source",
+                "--root-path",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    rc_scan = main(["scan", "--workspace", str(workspace)])
+    assert rc_scan == 0
+    out_scan = capsys.readouterr().out
+    assert "scan session_id=" in out_scan
+    assert "status=completed" in out_scan
+
+    rc_status = main(["scan", "status", "--workspace", str(workspace)])
+    assert rc_status == 0
+    out_status = capsys.readouterr().out
+    assert "status=completed" in out_status
+
+    conn = sqlite3.connect(workspace / ".hikbox" / "library.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM photo_asset WHERE processing_status = 'assignment_done') AS asset_count,
+              (SELECT COUNT(*) FROM face_observation WHERE active = 1) AS observation_count,
+              (SELECT COUNT(*) FROM face_embedding) AS embedding_count,
+              (
+                SELECT COUNT(*)
+                FROM review_item
+                WHERE review_type = 'new_person'
+                  AND status = 'open'
+              ) AS new_person_review_count
+            """
+        ).fetchone()
+        assert row is not None
+        assert int(row["asset_count"]) == 2
+        assert int(row["observation_count"]) >= 2
+        assert int(row["embedding_count"]) >= 2
+        assert int(row["new_person_review_count"]) >= 1
+    finally:
+        conn.close()

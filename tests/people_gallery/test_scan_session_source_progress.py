@@ -14,6 +14,7 @@ _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
 
 from hikbox_pictures.services.asset_stage_runner import AssetStageRunner
+from tests.people_gallery.real_image_helper import copy_raw_face_image
 
 
 def test_scan_session_source_progress_counts_follow_stage_pipeline(tmp_path) -> None:
@@ -22,8 +23,10 @@ def test_scan_session_source_progress_counts_follow_stage_pipeline(tmp_path) -> 
         session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
-        ws.asset_repo.add_photo_asset(source_id, "/tmp/a.jpg", processing_status="discovered")
-        ws.asset_repo.add_photo_asset(source_id, "/tmp/b.jpg", processing_status="discovered")
+        first = copy_raw_face_image(tmp_path / "progress-a.jpg", index=0)
+        second = copy_raw_face_image(tmp_path / "progress-b.jpg", index=1)
+        ws.asset_repo.add_photo_asset(source_id, str(first), processing_status="discovered")
+        ws.asset_repo.add_photo_asset(source_id, str(second), processing_status="discovered")
         ws.conn.commit()
 
         runner = AssetStageRunner(ws.conn)

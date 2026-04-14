@@ -91,6 +91,22 @@ class ReviewRepo:
         )
         return int(cursor.rowcount)
 
+    def resolve_item(self, review_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE review_item
+            SET status = 'resolved',
+                resolved_at = COALESCE(resolved_at, CURRENT_TIMESTAMP)
+            WHERE id = ?
+            """,
+            (int(review_id),),
+        )
+        return int(cursor.rowcount)
+
+    def ignore_item(self, review_id: int) -> int:
+        # 当前 schema 没有 ignore 状态，忽略动作落盘为 dismissed。
+        return self.dismiss_item(int(review_id))
+
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM review_item").fetchone()
         return int(row["c"])

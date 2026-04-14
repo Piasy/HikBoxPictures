@@ -18,9 +18,15 @@ sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
 
+from hikbox_pictures.ann import AnnIndexStore
 from hikbox_pictures.services.asset_stage_runner import AssetStageRunner
 from hikbox_pictures.deepface_engine import embedding_to_blob
 from hikbox_pictures.db.connection import connect_db
+from tests.people_gallery.real_image_helper import copy_raw_face_image
+
+
+def _write_real_photo(tmp_path: Path, name: str, *, index: int) -> str:
+    return str(copy_raw_face_image(tmp_path / name, index=index))
 
 
 def _count_face_rows(ws, asset_id: int) -> tuple[int, int]:
@@ -47,8 +53,16 @@ def test_asset_stage_monotonic_and_idempotent(tmp_path) -> None:
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
 
-        first_asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/a.jpg", processing_status="discovered")
-        second_asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/b.jpg", processing_status="discovered")
+        first_asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "a.jpg", index=0),
+            processing_status="discovered",
+        )
+        second_asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "b.jpg", index=1),
+            processing_status="discovered",
+        )
         ws.conn.commit()
 
         runner = AssetStageRunner(ws.conn)
@@ -127,8 +141,16 @@ def test_run_stage_rollback_when_mid_stage_failed(tmp_path) -> None:
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
 
-        first_asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/r-a.jpg", processing_status="discovered")
-        second_asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/r-b.jpg", processing_status="discovered")
+        first_asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "r-a.jpg", index=0),
+            processing_status="discovered",
+        )
+        second_asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "r-b.jpg", index=1),
+            processing_status="discovered",
+        )
         ws.conn.commit()
 
         runner = AssetStageRunner(ws.conn)
@@ -222,13 +244,47 @@ def test_concurrent_assignment_stage_is_idempotent(tmp_path) -> None:
         session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
-        asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/concurrent-a.jpg", processing_status="discovered")
+        asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "concurrent-a.jpg", index=0),
+            processing_status="discovered",
+        )
         ws.conn.commit()
 
         runner = AssetStageRunner(ws.conn)
         runner.run_stage(session_source_id, "metadata")
         runner.run_stage(session_source_id, "faces")
         runner.run_stage(session_source_id, "embeddings")
+        observation_row = ws.conn.execute(
+            """
+            SELECT e.vector_blob
+            FROM face_embedding AS e
+            JOIN face_observation AS o
+              ON o.id = e.face_observation_id
+            WHERE o.photo_asset_id = ?
+              AND o.active = 1
+              AND e.feature_type = 'face'
+            ORDER BY e.id ASC
+            LIMIT 1
+            """,
+            (asset_id,),
+        ).fetchone()
+        assert observation_row is not None
+        vector_blob = observation_row["vector_blob"]
+        assert isinstance(vector_blob, (bytes, bytearray, memoryview))
+        ws.person_repo.replace_centroid_prototype(
+            person_id=1,
+            vector_blob=bytes(vector_blob),
+            model_key="MockArcFace@retinaface",
+        )
+        ann_store = AnnIndexStore(ws.paths.artifacts_dir / "ann" / "prototype_index.npz")
+        ann_store.rebuild_from_prototypes(
+            ws.person_repo.list_active_prototypes(
+                prototype_type="centroid",
+                model_key="MockArcFace@retinaface",
+            )
+        )
+        ws.conn.commit()
 
         err_a: list[str] = []
         err_b: list[str] = []
@@ -274,7 +330,11 @@ def test_run_stage_rejects_existing_outer_transaction(tmp_path) -> None:
         session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
-        asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/tx-reject.jpg", processing_status="discovered")
+        asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "tx-reject.jpg", index=0),
+            processing_status="discovered",
+        )
         ws.conn.commit()
 
         ws.conn.execute("BEGIN")
@@ -297,7 +357,11 @@ def test_run_stage_rolls_back_when_commit_failed(tmp_path) -> None:
         session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
-        asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/commit-fail.jpg", processing_status="discovered")
+        asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "commit-fail.jpg", index=0),
+            processing_status="discovered",
+        )
         ws.conn.commit()
 
         class _CommitFailConn:
@@ -334,7 +398,11 @@ def test_concurrent_embeddings_stage_is_idempotent(tmp_path) -> None:
         session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
-        asset_id = ws.asset_repo.add_photo_asset(source_id, "/tmp/concurrent-embedding.jpg", processing_status="discovered")
+        asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            _write_real_photo(tmp_path, "concurrent-embedding.jpg", index=0),
+            processing_status="discovered",
+        )
         ws.conn.commit()
 
         runner = AssetStageRunner(ws.conn)

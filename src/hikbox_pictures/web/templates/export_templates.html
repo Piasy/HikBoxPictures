@@ -2,6 +2,7 @@
 {% block content %}
 <section>
   <h2>导出模板</h2>
+  <p data-export-feedback></p>
   {% include "components/media_viewer.html" %}
   <div class="export-preview-list">
     {% for sample in viewer_items %}
@@ -21,6 +22,8 @@
         <th>包含合照</th>
         <th>导出 MOV</th>
         <th>启用</th>
+        <th>最近运行</th>
+        <th>动作</th>
       </tr>
     </thead>
     <tbody>
@@ -32,9 +35,21 @@
         <td>{{ "是" if item.include_group else "否" }}</td>
         <td>{{ "是" if item.export_live_mov else "否" }}</td>
         <td>{{ "是" if item.enabled else "否" }}</td>
+        <td>
+          {% if item.latest_run %}
+          #{{ item.latest_run.id }} / {{ item.latest_run.status }}
+          {% else %}
+          -
+          {% endif %}
+        </td>
+        <td>
+          <button type="button" data-action="export-run" data-template-id="{{ item.id }}">执行导出</button>
+          <button type="button" data-action="export-show-runs" data-template-id="{{ item.id }}">查看历史</button>
+        </td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
+  <ul data-export-runs-list></ul>
 </section>
 {% endblock %}

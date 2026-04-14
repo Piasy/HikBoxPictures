@@ -262,6 +262,40 @@ def test_detect_faces_passes_loaded_rgb_array_to_deepface(monkeypatch, tmp_path:
     assert captured["detector_backend"] == "retinaface"
     assert captured["align"] is True
     assert captured["enforce_detection"] is False
+    assert captured["l2_normalize"] is True
+
+
+def test_detect_faces_filters_no_face_fallback_payload(tmp_path: Path) -> None:
+    image_path = tmp_path / "blank.jpg"
+    image_path.write_bytes(b"image")
+
+    monkeypatch = pytest.MonkeyPatch()
+    _patch_loaded_rgb(monkeypatch, np.full((96, 128, 3), 255, dtype=np.uint8))
+    try:
+        engine = DeepFaceEngine(
+            model_name="ArcFace",
+            detector_backend="retinaface",
+            distance_metric="cosine",
+            align=True,
+            distance_threshold=0.42,
+            threshold_source="explicit",
+            deepface_module=SimpleNamespace(
+                represent=lambda **_kwargs: [
+                    {
+                        "facial_area": {"x": 0, "y": 0, "w": 127, "h": 95},
+                        "embedding": [0.1, 0.2, 0.3],
+                        "face_confidence": 0.0,
+                    }
+                ]
+            ),
+            verification_module=SimpleNamespace(find_distance=lambda *_args, **_kwargs: 0.0),
+        )
+
+        faces = engine.detect_faces(image_path)
+
+        assert faces == []
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.parametrize(

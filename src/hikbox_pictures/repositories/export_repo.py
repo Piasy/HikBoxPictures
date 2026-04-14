@@ -174,6 +174,31 @@ class ExportRepo:
         )
         return int(cursor.rowcount)
 
+    def list_runs_by_template(self, template_id: int, limit: int = 20) -> list[dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        rows = self.conn.execute(
+            """
+            SELECT id,
+                   template_id,
+                   spec_hash,
+                   status,
+                   matched_only_count,
+                   matched_group_count,
+                   exported_count,
+                   skipped_count,
+                   failed_count,
+                   started_at,
+                   finished_at,
+                   created_at
+            FROM export_run
+            WHERE template_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(template_id), safe_limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def mark_other_spec_deliveries_stale(self, *, template_id: int, spec_hash: str) -> int:
         cursor = self.conn.execute(
             """

@@ -4,10 +4,13 @@ import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
+from hikbox_pictures.cli import main
 from hikbox_pictures.services.asset_stage_runner import AssetStageRunner
+from tests.people_gallery.real_image_helper import bind_real_source_roots, copy_raw_face_image
 
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
@@ -54,6 +57,7 @@ def test_scan_status_returns_idle_when_no_resumable_session(tmp_path) -> None:
 def test_scan_start_or_resume_prefers_latest_resumable_session(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path)
     try:
+        bind_real_source_roots(ws, tmp_path / "scan-input")
         client = TestClient(create_app(workspace=ws.root))
         expected = ws.latest_resumable_session()
         assert expected is not None
@@ -63,7 +67,14 @@ def test_scan_start_or_resume_prefers_latest_resumable_session(tmp_path) -> None
         assert response.status_code == 200
         body = response.json()
         assert body["session_id"] == expected["id"]
-        assert body["status"] == "running"
+        assert body["status"] == "completed"
+
+        status_response = client.get("/api/scan/status")
+        assert status_response.status_code == 200
+        status_body = status_response.json()
+        assert status_body["session_id"] == expected["id"]
+        assert status_body["status"] == "completed"
+        assert len(status_body["sources"]) == 2
     finally:
         ws.close()
 
@@ -71,6 +82,7 @@ def test_scan_start_or_resume_prefers_latest_resumable_session(tmp_path) -> None
 def test_scan_start_or_resume_creates_session_from_idle(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path)
     try:
+        bind_real_source_roots(ws, tmp_path / "scan-input")
         ws.conn.execute(
             """
             UPDATE scan_session
@@ -86,8 +98,66 @@ def test_scan_start_or_resume_creates_session_from_idle(tmp_path) -> None:
         assert response.status_code == 200
         body = response.json()
         assert body["session_id"] is not None
-        assert body["status"] == "running"
+        assert body["status"] == "completed"
         assert body["mode"] == "incremental"
+    finally:
+        ws.close()
+
+
+def test_scan_abort_interrupts_latest_resumable_session(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        expected = ws.latest_resumable_session()
+        assert expected is not None
+
+        response = client.post("/api/scan/abort")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["session_id"] == expected["id"]
+        assert body["status"] == "interrupted"
+        assert body["mode"] == expected["mode"]
+
+        status_body = client.get("/api/scan/status").json()
+        assert status_body["session_id"] == expected["id"]
+        assert status_body["status"] == "interrupted"
+    finally:
+        ws.close()
+
+
+def test_scan_start_new_requires_abandon_when_resumable_exists(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        response = client.post("/api/scan/start_new")
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "--abandon-resumable" in detail
+    finally:
+        ws.close()
+
+
+def test_scan_start_new_with_abandon_runs_new_session(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        bind_real_source_roots(ws, tmp_path / "scan-start-new-input")
+        client = TestClient(create_app(workspace=ws.root))
+        previous = ws.latest_resumable_session()
+        assert previous is not None
+        previous_id = int(previous["id"])
+
+        response = client.post("/api/scan/start_new", params={"abandon_resumable": True})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["session_id"] != previous_id
+        assert body["status"] == "completed"
+        assert body["mode"] == "incremental"
+
+        old_session = ws.scan_repo.get_session(previous_id)
+        assert old_session is not None
+        assert old_session["status"] == "abandoned"
     finally:
         ws.close()
 
@@ -99,7 +169,9 @@ def test_scan_status_reports_source_progress(tmp_path) -> None:
         source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
         session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
         baseline_assets = ws.asset_repo.count_assets_for_source(source_id)
-        ws.seed_source_assets(source_id, ["/tmp/a.jpg", "/tmp/b.jpg"])
+        first = copy_raw_face_image(tmp_path / "progress-a.jpg", index=0)
+        second = copy_raw_face_image(tmp_path / "progress-b.jpg", index=1)
+        ws.seed_source_assets(source_id, [str(first), str(second)])
 
         runner = AssetStageRunner(ws.conn)
         runner.run_stage(session_source_id, "metadata")
@@ -243,10 +315,34 @@ def test_people_api_matches_people_page(tmp_path) -> None:
 
         api_people = people_response.json()
         html = page_response.text
-        assert html.count("person-card") == len(api_people)
+        assert html.count('<article class="person-card">') == len(api_people)
         for person in api_people:
             assert str(person["display_name"]) in html
             assert f"/people/{person['id']}" in html
+    finally:
+        ws.close()
+
+
+def test_people_api_exposes_cover_and_counts_for_seeded_assignments(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        response = client.get("/api/people")
+
+        assert response.status_code == 200
+        people = {row["display_name"]: row for row in response.json()}
+
+        person_a = people["人物A"]
+        assert person_a["sample_count"] == 4
+        assert person_a["photo_count"] == 4
+        assert person_a["pending_review_count"] == 2
+        assert person_a["cover_observation_id"] is not None
+        assert person_a["cover_crop_url"].startswith("/api/observations/")
+
+        person_c = people["人物C"]
+        assert person_c["sample_count"] == 1
+        assert person_c["photo_count"] == 1
+        assert person_c["pending_review_count"] == 1
     finally:
         ws.close()
 
@@ -302,3 +398,47 @@ def test_api_contract_preview_counts_with_mock_embedding_dataset(tmp_path) -> No
     assert reviews_page_response.status_code == 200
     assert "queue-new_person" in reviews_page_response.text
     assert f"review #{review_id}" in reviews_page_response.text
+
+
+@pytest.mark.real_face_engine
+def test_api_contract_real_source_pipeline_without_seed_injection(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    source_root = tmp_path / "real-input"
+    copy_raw_face_image(source_root / "1.jpg", index=0)
+    copy_raw_face_image(source_root / "2.jpg", index=1)
+
+    assert main(["init", "--workspace", str(workspace)]) == 0
+    assert (
+        main(
+            [
+                "source",
+                "add",
+                "--workspace",
+                str(workspace),
+                "--name",
+                "api-real-input",
+                "--root-path",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+
+    client = TestClient(create_app(workspace=workspace))
+    start_response = client.post("/api/scan/start_or_resume")
+    reviews_response = client.get("/api/reviews")
+    logs_response = client.get("/api/logs/events", params={"run_kind": "scan", "limit": 200})
+    exports_response = client.get("/api/export/templates")
+    status_response = client.get("/api/scan/status")
+
+    assert start_response.status_code == 200
+    assert start_response.json()["status"] == "completed"
+    assert reviews_response.status_code == 200
+    assert len(reviews_response.json()) >= 1
+    assert any(item["review_type"] == "new_person" for item in reviews_response.json())
+    assert logs_response.status_code == 200
+    assert any(item["event_type"] == "scan.session.started" for item in logs_response.json())
+    assert exports_response.status_code == 200
+    assert exports_response.json() == []
+    assert status_response.status_code == 200
+    assert status_response.json()["status"] == "completed"

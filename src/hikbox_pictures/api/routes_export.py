@@ -31,3 +31,27 @@ def preview_template(template_id: int, request: Request) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:
         conn.close()
+
+
+@router.post("/export/templates/{template_id}/actions/run")
+def run_template(template_id: int, request: Request) -> dict[str, object]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        return ActionService(conn).run_export_template(template_id=template_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@router.get("/export/templates/{template_id}/runs")
+def list_template_runs(template_id: int, request: Request) -> list[dict[str, object]]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        return ActionService(conn).list_export_template_runs(template_id=template_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()

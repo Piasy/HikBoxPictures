@@ -10,6 +10,7 @@ except ModuleNotFoundError:
 
 _RESUMABLE_STATUSES: tuple[str, ...] = ("pending", "running", "paused", "interrupted")
 _ACTIVE_SOURCE_STATUSES: tuple[str, ...] = ("pending", "running", "paused", "interrupted")
+_TERMINAL_SOURCE_STATUSES: tuple[str, ...] = ("completed", "failed", "abandoned")
 
 
 class ScanRepo:
@@ -52,6 +53,17 @@ class ScanRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def latest_session(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, mode, status, resume_from_session_id, created_at, started_at, stopped_at, finished_at
+            FROM scan_session
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def latest_resumable_session(self) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
@@ -64,6 +76,18 @@ class ScanRepo:
             _RESUMABLE_STATUSES,
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def has_resumable_session(self) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM scan_session
+            WHERE status IN (?, ?, ?, ?)
+            LIMIT 1
+            """,
+            _RESUMABLE_STATUSES,
+        ).fetchone()
+        return row is not None
 
     def latest_running_session(self) -> dict[str, Any] | None:
         row = self.conn.execute(
@@ -90,6 +114,20 @@ class ScanRepo:
             (int(session_id),),
         )
 
+    def mark_session_interrupted(self, session_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE scan_session
+            SET status = 'interrupted',
+                stopped_at = COALESCE(stopped_at, CURRENT_TIMESTAMP),
+                finished_at = NULL
+            WHERE id = ?
+              AND status IN ('pending', 'running', 'paused')
+            """,
+            (int(session_id),),
+        )
+        return int(cursor.rowcount)
+
     def mark_session_completed(self, session_id: int) -> None:
         self.conn.execute(
             """
@@ -97,6 +135,20 @@ class ScanRepo:
             SET status = 'completed',
                 finished_at = CURRENT_TIMESTAMP
             WHERE id = ?
+              AND status IN ('pending', 'running', 'paused', 'interrupted')
+            """,
+            (int(session_id),),
+        )
+
+    def mark_session_failed(self, session_id: int) -> None:
+        self.conn.execute(
+            """
+            UPDATE scan_session
+            SET status = 'failed',
+                stopped_at = COALESCE(stopped_at, CURRENT_TIMESTAMP),
+                finished_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status IN ('pending', 'running', 'paused', 'interrupted')
             """,
             (int(session_id),),
         )
@@ -138,6 +190,101 @@ class ScanRepo:
             """,
             (int(scan_session_id),) + _ACTIVE_SOURCE_STATUSES,
         )
+
+    def mark_session_sources_interrupted(self, scan_session_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET status = 'interrupted',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE scan_session_id = ?
+              AND status IN ('pending', 'running', 'paused')
+            """,
+            (int(scan_session_id),),
+        )
+        return int(cursor.rowcount)
+
+    def abandon_resumable_sessions(self) -> int:
+        rows = self.conn.execute(
+            """
+            SELECT id
+            FROM scan_session
+            WHERE status IN (?, ?, ?, ?)
+            ORDER BY id ASC
+            """,
+            _RESUMABLE_STATUSES,
+        ).fetchall()
+        session_ids = [int(row["id"]) for row in rows]
+        if not session_ids:
+            return 0
+
+        placeholders = ", ".join("?" for _ in session_ids)
+        self.conn.execute(
+            f"""
+            UPDATE scan_session
+            SET status = 'abandoned',
+                stopped_at = COALESCE(stopped_at, CURRENT_TIMESTAMP),
+                finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP)
+            WHERE id IN ({placeholders})
+              AND status IN (?, ?, ?, ?)
+            """,
+            tuple(session_ids) + _RESUMABLE_STATUSES,
+        )
+        self.conn.execute(
+            f"""
+            UPDATE scan_session_source
+            SET status = 'abandoned',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE scan_session_id IN ({placeholders})
+              AND status IN (?, ?, ?, ?)
+            """,
+            tuple(session_ids) + _ACTIVE_SOURCE_STATUSES,
+        )
+        return len(session_ids)
+
+    def mark_session_source_running(self, session_source_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET status = 'running',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status IN (?, ?, ?, ?)
+            """,
+            (int(session_source_id),) + _ACTIVE_SOURCE_STATUSES,
+        )
+        return int(cursor.rowcount)
+
+    def mark_session_source_completed(self, session_source_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET status = 'completed',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status NOT IN (?, ?, ?)
+            """,
+            (int(session_source_id),) + _TERMINAL_SOURCE_STATUSES,
+        )
+        return int(cursor.rowcount)
+
+    def mark_session_source_failed(self, session_source_id: int, *, cursor_json: str | None = None) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE scan_session_source
+            SET status = 'failed',
+                cursor_json = COALESCE(?, cursor_json),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status NOT IN (?, ?, ?)
+            """,
+            (
+                cursor_json,
+                int(session_source_id),
+            )
+            + _TERMINAL_SOURCE_STATUSES,
+        )
+        return int(cursor.rowcount)
 
     def get_session_source(self, session_source_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
@@ -301,6 +448,40 @@ class ScanRepo:
             tuple(session_ids),
         )
         return len(session_ids)
+
+    def finalize_session_if_all_sources_terminal(self, session_id: int) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT CASE
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM scan_session_source
+                    WHERE scan_session_id = ?
+                      AND status NOT IN (?, ?, ?)
+                ) THEN NULL
+                WHEN EXISTS (
+                    SELECT 1
+                    FROM scan_session_source
+                    WHERE scan_session_id = ?
+                      AND status = 'failed'
+                ) THEN 'failed'
+                ELSE 'completed'
+            END AS final_status
+            """,
+            (int(session_id),) + _TERMINAL_SOURCE_STATUSES + (int(session_id),),
+        ).fetchone()
+        if row is None:
+            return None
+
+        final_status = row["final_status"]
+        if final_status is None:
+            return None
+        if str(final_status) == "failed":
+            self.mark_session_failed(session_id)
+            return "failed"
+
+        self.mark_session_completed(session_id)
+        return "completed"
 
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM scan_session").fetchone()

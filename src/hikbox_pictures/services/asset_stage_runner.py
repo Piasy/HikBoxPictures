@@ -1,18 +1,30 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 try:
     import sqlite3
 except ModuleNotFoundError:
     import pysqlite3 as sqlite3  # type: ignore[no-redef]
 
-from hikbox_pictures.deepface_engine import embedding_to_blob
+from hikbox_pictures.deepface_engine import (
+    DEFAULT_FACE_DETECTOR_BACKEND,
+    DEFAULT_FACE_MODEL_NAME,
+    DeepFaceEngine,
+    DetectedFace,
+    embedding_to_blob,
+)
+from hikbox_pictures.ann import AnnIndexStore
 from hikbox_pictures.metadata import resolve_capture_fields
-from hikbox_pictures.repositories import AssetRepo, ScanRepo
+from hikbox_pictures.repositories import AssetRepo, PersonRepo, ReviewRepo, ScanRepo
+from hikbox_pictures.services.ann_assignment_service import AnnAssignmentService
 from hikbox_pictures.services.asset_pipeline import (
+    DEFAULT_AUTO_ASSIGN_THRESHOLD,
+    DEFAULT_REVIEW_THRESHOLD,
     done_status_for_stage,
     ensure_stage,
     previous_status_for_stage,
@@ -24,7 +36,14 @@ class AssetStageRunner:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self.asset_repo = AssetRepo(conn)
+        self.person_repo = PersonRepo(conn)
+        self.review_repo = ReviewRepo(conn)
         self.scan_repo = ScanRepo(conn)
+        self.db_path = self._resolve_db_path()
+        self.workspace = self.db_path.parent.parent
+        self.face_crop_dir = self.workspace / ".hikbox" / "artifacts" / "face-crops" / "scan"
+        self._face_engine: DeepFaceEngine | None = None
+        self._ann_assignment_service: AnnAssignmentService | None = None
 
     def run_stage(self, session_source_id: int, stage: str) -> dict[str, int]:
         stage_name = ensure_stage(stage)
@@ -109,7 +128,22 @@ class AssetStageRunner:
         )
 
     def _run_faces_stage(self, asset_id: int, scan_session_id: int) -> None:
-        self.asset_repo.ensure_face_observation(asset_id)
+        asset = self.asset_repo.get_asset(asset_id)
+        if asset is None:
+            raise LookupError(f"photo_asset 不存在: {asset_id}")
+
+        primary_path = Path(str(asset["primary_path"]))
+        faces = self.face_engine.detect_faces(primary_path)
+        observations = [
+            self._build_face_observation_payload(primary_path, face)
+            for face in faces
+        ]
+        self.asset_repo.replace_face_observations(
+            asset_id,
+            observations=observations,
+            detector_key=self.face_engine.detector_backend,
+            detector_version=self.face_engine.model_name,
+        )
         self.asset_repo.mark_stage_done_if_current(
             asset_id,
             from_status=previous_status_for_stage("faces"),
@@ -118,18 +152,15 @@ class AssetStageRunner:
         )
 
     def _run_embeddings_stage(self, asset_id: int, scan_session_id: int) -> None:
-        observation_ids = self.asset_repo.list_active_face_observation_ids(asset_id)
-        if not observation_ids:
-            observation_ids = [self.asset_repo.ensure_face_observation(asset_id)]
-
-        for observation_id in observation_ids:
-            embedding = np.asarray(
-                [float(asset_id), float(observation_id), 0.0, 1.0],
-                dtype=np.float32,
-            )
+        observations = self.asset_repo.list_active_face_observations(asset_id)
+        for observation in observations:
+            observation_id = int(observation["id"])
+            crop_path = self._ensure_face_crop(observation_id)
+            embedding = self.face_engine.represent_face(crop_path)
             self.asset_repo.ensure_face_embedding(
                 observation_id,
                 vector_blob=embedding_to_blob(embedding),
+                model_key=self.face_engine.model_key,
                 dimension=int(embedding.size),
             )
 
@@ -141,11 +172,42 @@ class AssetStageRunner:
         )
 
     def _run_assignment_stage(self, asset_id: int, scan_session_id: int) -> None:
-        observation_ids = self.asset_repo.list_active_face_observation_ids(asset_id)
-        person_id = self._pick_default_person_id()
-        if person_id is not None:
-            for observation_id in observation_ids:
-                self._ensure_active_assignment(person_id, observation_id)
+        observations = self.asset_repo.list_active_face_observations(asset_id)
+        prototype_rows = self._load_active_prototype_rows()
+        prototype_vectors = self._group_prototype_vectors(prototype_rows)
+        for observation in observations:
+            observation_id = int(observation["id"])
+            active_assignment = self.asset_repo.get_active_assignment_for_observation(observation_id)
+            if active_assignment is not None and int(active_assignment["locked"]) == 1:
+                continue
+
+            embedding = self._load_observation_embedding(observation_id)
+            if embedding is None:
+                self._queue_new_person_review(observation_id, [])
+                continue
+
+            candidates = self._recall_candidates(
+                embedding,
+                prototype_rows=prototype_rows,
+                prototype_vectors=prototype_vectors,
+            )
+            if not candidates:
+                self._queue_new_person_review(observation_id, [])
+                continue
+
+            best_candidate = candidates[0]
+            decision = self.ann_assignment_service.classify_distance(float(best_candidate["distance"]))
+            if decision == "auto_assign":
+                self._upsert_auto_assignment(
+                    observation_id,
+                    person_id=int(best_candidate["person_id"]),
+                    distance=float(best_candidate["distance"]),
+                )
+                continue
+            if decision == "review":
+                self._queue_low_confidence_review(observation_id, candidates)
+                continue
+            self._queue_new_person_review(observation_id, candidates)
 
         self.asset_repo.mark_stage_done_if_current(
             asset_id,
@@ -154,32 +216,285 @@ class AssetStageRunner:
             last_processed_session_id=scan_session_id,
         )
 
-    def _pick_default_person_id(self) -> int | None:
-        row = self.conn.execute(
-            """
-            SELECT id
-            FROM person
-            WHERE status = 'active' AND ignored = 0
-            ORDER BY confirmed DESC, id ASC
-            LIMIT 1
-            """
-        ).fetchone()
+    @property
+    def face_engine(self) -> DeepFaceEngine:
+        if self._face_engine is None:
+            self._face_engine = DeepFaceEngine.create(
+                model_name=DEFAULT_FACE_MODEL_NAME,
+                detector_backend=DEFAULT_FACE_DETECTOR_BACKEND,
+            )
+        return self._face_engine
+
+    @property
+    def ann_assignment_service(self) -> AnnAssignmentService:
+        if self._ann_assignment_service is None:
+            ann_store = AnnIndexStore(self.workspace / ".hikbox" / "artifacts" / "ann" / "prototype_index.npz")
+            review_threshold = max(DEFAULT_REVIEW_THRESHOLD, float(self.face_engine.distance_threshold))
+            auto_assign_threshold = min(
+                review_threshold,
+                max(DEFAULT_AUTO_ASSIGN_THRESHOLD, review_threshold * 0.75),
+            )
+            self._ann_assignment_service = AnnAssignmentService(
+                ann_store,
+                auto_assign_threshold=auto_assign_threshold,
+                review_threshold=review_threshold,
+            )
+        return self._ann_assignment_service
+
+    def _resolve_db_path(self) -> Path:
+        rows = self.conn.execute("PRAGMA database_list").fetchall()
+        for row in rows:
+            name = row["name"] if isinstance(row, sqlite3.Row) else row[1]
+            if str(name) != "main":
+                continue
+            raw_path = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+            if raw_path:
+                return Path(str(raw_path)).resolve()
+        raise RuntimeError("无法解析当前连接对应的数据库路径")
+
+    def _build_face_observation_payload(self, primary_path: Path, face: DetectedFace) -> dict[str, float | None]:
+        width, height = self._resolve_image_size(primary_path, face)
+        bbox_top, bbox_right, bbox_bottom, bbox_left = self._normalize_bbox(
+            face.bbox,
+            width=width,
+            height=height,
+        )
+        return {
+            "bbox_top": bbox_top,
+            "bbox_right": bbox_right,
+            "bbox_bottom": bbox_bottom,
+            "bbox_left": bbox_left,
+            "face_area_ratio": max(0.0, (bbox_bottom - bbox_top) * (bbox_right - bbox_left)),
+            "crop_path": None,
+        }
+
+    def _resolve_image_size(self, primary_path: Path, face: DetectedFace) -> tuple[int, int]:
+        if face.image_size is not None:
+            width, height = face.image_size
+            if int(width) > 0 and int(height) > 0:
+                return int(width), int(height)
+        with Image.open(primary_path) as image:
+            width, height = image.size
+        if width <= 0 or height <= 0:
+            raise ValueError(f"图片尺寸非法: {primary_path}")
+        return int(width), int(height)
+
+    def _normalize_bbox(self, bbox: tuple[int, int, int, int], *, width: int, height: int) -> tuple[float, float, float, float]:
+        top, right, bottom, left = (int(value) for value in bbox)
+        clamped_left = max(0, min(width - 1, left))
+        clamped_top = max(0, min(height - 1, top))
+        clamped_right = max(clamped_left + 1, min(width, right))
+        clamped_bottom = max(clamped_top + 1, min(height, bottom))
+        return (
+            float(clamped_top) / float(height),
+            float(clamped_right) / float(width),
+            float(clamped_bottom) / float(height),
+            float(clamped_left) / float(width),
+        )
+
+    def _ensure_face_crop(self, observation_id: int) -> Path:
+        row = self.asset_repo.get_observation_with_source(observation_id)
+        if row is None:
+            raise LookupError(f"observation 不存在: {observation_id}")
+
+        crop_path_raw = row.get("crop_path")
+        if crop_path_raw:
+            existing = Path(str(crop_path_raw))
+            if existing.exists() and existing.is_file():
+                return existing
+
+        source_path = Path(str(row["primary_path"]))
+        if not source_path.exists() or not source_path.is_file():
+            raise FileNotFoundError(f"媒体文件不存在: {source_path}")
+
+        self.face_crop_dir.mkdir(parents=True, exist_ok=True)
+        out_path = self.face_crop_dir / f"obs-{observation_id}.jpg"
+
+        with Image.open(source_path) as image:
+            width, height = image.size
+            left = max(0, min(width - 1, int(float(row["bbox_left"]) * width)))
+            top = max(0, min(height - 1, int(float(row["bbox_top"]) * height)))
+            right = max(left + 1, min(width, int(float(row["bbox_right"]) * width)))
+            bottom = max(top + 1, min(height, int(float(row["bbox_bottom"]) * height)))
+            image.crop((left, top, right, bottom)).convert("RGB").save(out_path, format="JPEG")
+
+        self.asset_repo.update_observation_crop_path(observation_id, str(out_path))
+        return out_path
+
+    def _load_observation_embedding(self, observation_id: int) -> np.ndarray | None:
+        row = self.asset_repo.get_face_embedding(
+            observation_id,
+            model_key=self.face_engine.model_key,
+        )
+        if row is None:
+            row = self.asset_repo.get_face_embedding(observation_id)
         if row is None:
             return None
-        return int(row["id"])
 
-    def _ensure_active_assignment(self, person_id: int, observation_id: int) -> None:
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO person_face_assignment(
-                person_id,
-                face_observation_id,
-                assignment_source,
-                confidence,
-                locked,
-                active
+        vector_blob = row.get("vector_blob")
+        if not isinstance(vector_blob, (bytes, bytearray, memoryview)):
+            raise ValueError(f"observation {observation_id} 的 embedding 非法")
+        vector = np.frombuffer(vector_blob, dtype=np.float32).copy()
+        if vector.ndim != 1 or vector.size == 0:
+            raise ValueError(f"observation {observation_id} 的 embedding 为空或维度非法")
+        return vector
+
+    def _load_active_prototype_rows(self) -> list[dict[str, object]]:
+        return self.person_repo.list_active_prototypes(
+            prototype_type="centroid",
+            model_key=self.face_engine.model_key,
+        )
+
+    def _group_prototype_vectors(
+        self,
+        prototype_rows: list[dict[str, object]],
+    ) -> dict[int, list[np.ndarray]]:
+        grouped: dict[int, list[np.ndarray]] = {}
+        for row in prototype_rows:
+            vector_blob = row.get("vector_blob")
+            if not isinstance(vector_blob, (bytes, bytearray, memoryview)):
+                continue
+            vector = np.frombuffer(vector_blob, dtype=np.float32).copy()
+            if vector.ndim != 1 or vector.size == 0:
+                continue
+            person_id = int(row["person_id"])
+            grouped.setdefault(person_id, []).append(vector)
+        return grouped
+
+    def _recall_candidates(
+        self,
+        embedding: np.ndarray,
+        *,
+        prototype_rows: list[dict[str, object]],
+        prototype_vectors: dict[int, list[np.ndarray]],
+        top_k: int = 5,
+    ) -> list[dict[str, float | int]]:
+        if not prototype_vectors:
+            return []
+
+        recalled_candidates: list[dict[str, float | int]] = []
+        if self.ann_assignment_service.ann_index_store.size > 0:
+            try:
+                recalled_candidates = self.ann_assignment_service.recall_person_candidates(embedding, top_k=top_k)
+            except ValueError as exc:
+                if "维度不匹配" not in str(exc):
+                    raise
+                self.ann_assignment_service.ann_index_store.rebuild_from_prototypes(prototype_rows)
+                try:
+                    recalled_candidates = self.ann_assignment_service.recall_person_candidates(embedding, top_k=top_k)
+                except ValueError as retry_exc:
+                    if "维度不匹配" not in str(retry_exc):
+                        raise
+                    recalled_candidates = []
+
+        candidates = self._resolve_candidate_distances(
+            embedding,
+            recalled_candidates=recalled_candidates,
+            prototype_vectors=prototype_vectors,
+        )
+        if candidates:
+            return candidates
+        return self._manual_candidate_distances(
+            embedding,
+            prototype_vectors=prototype_vectors,
+            top_k=top_k,
+        )
+
+    def _resolve_candidate_distances(
+        self,
+        embedding: np.ndarray,
+        *,
+        recalled_candidates: list[dict[str, float | int]],
+        prototype_vectors: dict[int, list[np.ndarray]],
+    ) -> list[dict[str, float | int]]:
+        resolved: list[dict[str, float | int]] = []
+        for candidate in recalled_candidates:
+            person_id = int(candidate["person_id"])
+            references = prototype_vectors.get(person_id)
+            if not references:
+                continue
+            compatible_references = [reference for reference in references if int(reference.size) == int(embedding.size)]
+            if not compatible_references:
+                continue
+            distance = self.face_engine.min_distance(embedding, compatible_references)
+            resolved.append({"person_id": person_id, "distance": float(distance)})
+        resolved.sort(key=lambda item: (float(item["distance"]), int(item["person_id"])))
+        return resolved
+
+    def _manual_candidate_distances(
+        self,
+        embedding: np.ndarray,
+        *,
+        prototype_vectors: dict[int, list[np.ndarray]],
+        top_k: int,
+    ) -> list[dict[str, float | int]]:
+        resolved: list[dict[str, float | int]] = []
+        for person_id, references in prototype_vectors.items():
+            compatible_references = [reference for reference in references if int(reference.size) == int(embedding.size)]
+            if not compatible_references:
+                continue
+            distance = self.face_engine.min_distance(embedding, compatible_references)
+            resolved.append({"person_id": int(person_id), "distance": float(distance)})
+        resolved.sort(key=lambda item: (float(item["distance"]), int(item["person_id"])))
+        return resolved[: max(0, int(top_k))]
+
+    def _upsert_auto_assignment(self, observation_id: int, *, person_id: int, distance: float) -> None:
+        active_assignment = self.asset_repo.get_active_assignment_for_observation(observation_id)
+        confidence = max(0.0, 1.0 - float(distance))
+        if active_assignment is None:
+            self.asset_repo.create_assignment(
+                person_id=int(person_id),
+                face_observation_id=int(observation_id),
+                assignment_source="auto",
+                confidence=confidence,
+                locked=False,
             )
-            VALUES (?, ?, 'auto', 1.0, 0, 1)
-            """,
-            (int(person_id), int(observation_id)),
+            return
+        self.asset_repo.update_assignment(
+            int(active_assignment["id"]),
+            person_id=int(person_id),
+            assignment_source="auto",
+            confidence=confidence,
+        )
+
+    def _queue_low_confidence_review(
+        self,
+        observation_id: int,
+        candidates: list[dict[str, float | int]],
+    ) -> None:
+        payload = json.dumps(
+            {
+                "face_observation_id": int(observation_id),
+                "candidates": candidates,
+                "model_key": self.face_engine.model_key,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.review_repo.create_review_item(
+            "low_confidence_assignment",
+            payload_json=payload,
+            priority=20,
+            face_observation_id=int(observation_id),
+        )
+
+    def _queue_new_person_review(
+        self,
+        observation_id: int,
+        candidates: list[dict[str, float | int]],
+    ) -> None:
+        payload = json.dumps(
+            {
+                "face_observation_id": int(observation_id),
+                "candidates": candidates,
+                "model_key": self.face_engine.model_key,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        self.review_repo.create_review_item(
+            "new_person",
+            payload_json=payload,
+            priority=15,
+            face_observation_id=int(observation_id),
         )

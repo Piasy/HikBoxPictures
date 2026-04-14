@@ -37,3 +37,6 @@ hikbox_pictures = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "real_face_engine: 使用真实 DeepFace 引擎执行测试",
+]

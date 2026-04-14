@@ -30,3 +30,25 @@ def dismiss_review(review_id: int, request: Request) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     finally:
         conn.close()
+
+
+@router.post("/reviews/{review_id}/actions/resolve")
+def resolve_review(review_id: int, request: Request) -> dict[str, object]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        return ActionService(conn).resolve_review(review_id=review_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@router.post("/reviews/{review_id}/actions/ignore")
+def ignore_review(review_id: int, request: Request) -> dict[str, object]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        return ActionService(conn).ignore_review(review_id=review_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()

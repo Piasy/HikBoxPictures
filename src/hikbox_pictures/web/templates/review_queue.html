@@ -2,6 +2,7 @@
 {% block content %}
 <section>
   <h2>待审核</h2>
+  <p data-review-feedback></p>
   {% include "components/media_viewer.html" %}
 
   {% for queue in queues %}
@@ -10,9 +11,16 @@
     <ul>
       {% for item in queue['items'] %}
       <li>
-        review #{{ item.id }}
-        类型：{{ item.review_type }}
-        优先级：{{ item.priority }}
+        <div>
+          review #{{ item.id }}
+          类型：{{ item.review_type }}
+          优先级：{{ item.priority }}
+        </div>
+        <div>
+          <button type="button" data-action="review-resolve" data-review-id="{{ item.id }}">确认</button>
+          <button type="button" data-action="review-dismiss" data-review-id="{{ item.id }}">驳回</button>
+          <button type="button" data-action="review-ignore" data-review-id="{{ item.id }}">忽略</button>
+        </div>
       </li>
       {% endfor %}
     </ul>

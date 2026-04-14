@@ -21,7 +21,43 @@ class PrototypeService:
         self.person_repo = person_repo
         self.ann_index_store = ann_index_store
 
-    def rebuild_all_person_prototypes(self, *, model_key: str = "pipeline-stub-v1") -> int:
+    def resolve_default_model_key(self, *, preferred: str | None = None) -> str | None:
+        if preferred is not None:
+            row = self.conn.execute(
+                """
+                SELECT model_key
+                FROM face_embedding
+                WHERE feature_type = 'face'
+                  AND normalized = 1
+                  AND model_key = ?
+                LIMIT 1
+                """,
+                (str(preferred),),
+            ).fetchone()
+            if row is not None:
+                return str(row["model_key"])
+
+        row = self.conn.execute(
+            """
+            SELECT model_key
+            FROM face_embedding
+            WHERE feature_type = 'face'
+              AND normalized = 1
+              AND model_key IS NOT NULL
+            GROUP BY model_key
+            ORDER BY COUNT(*) DESC, model_key ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row is None:
+            return preferred
+        return str(row["model_key"])
+
+    def rebuild_all_person_prototypes(self, *, model_key: str | None = None) -> int:
+        resolved_model_key = self.resolve_default_model_key(preferred=model_key)
+        if resolved_model_key is None:
+            return 0
+
         grouped_embeddings: dict[int, list[np.ndarray[Any, np.dtype[np.float32]]]] = defaultdict(list)
         rows = self.conn.execute(
             """
@@ -39,7 +75,7 @@ class PrototypeService:
               AND fe.normalized = 1
             ORDER BY pfa.person_id ASC, pfa.id ASC
             """,
-            (str(model_key),),
+            (resolved_model_key,),
         ).fetchall()
 
         expected_dim_by_person: dict[int, int] = {}
@@ -64,7 +100,7 @@ class PrototypeService:
             if not samples:
                 self.person_repo.deactivate_active_centroid_prototypes(
                     person_id=person_id,
-                    model_key=model_key,
+                    model_key=resolved_model_key,
                 )
                 continue
             centroid = np.mean(np.vstack(samples), axis=0).astype(np.float32, copy=False)
@@ -74,16 +110,19 @@ class PrototypeService:
             self.person_repo.replace_centroid_prototype(
                 person_id=person_id,
                 vector_blob=embedding_to_blob(centroid),
-                model_key=model_key,
+                model_key=resolved_model_key,
                 quality_score=float(len(samples)),
             )
             rebuilt_count += 1
 
         return rebuilt_count
 
-    def rebuild_ann_index_from_active_prototypes(self, *, model_key: str = "pipeline-stub-v1") -> int:
+    def rebuild_ann_index_from_active_prototypes(self, *, model_key: str | None = None) -> int:
+        resolved_model_key = self.resolve_default_model_key(preferred=model_key)
+        if resolved_model_key is None:
+            return self.ann_index_store.rebuild_from_prototypes([])
         prototypes = self.person_repo.list_active_prototypes(
             prototype_type="centroid",
-            model_key=model_key,
+            model_key=resolved_model_key,
         )
         return self.ann_index_store.rebuild_from_prototypes(prototypes)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
@@ -41,7 +41,38 @@ def scan_start_or_resume(request: Request) -> dict[str, object]:
     conn = connect_db(Path(request.app.state.db_path))
     try:
         orchestrator = ScanOrchestrator(conn)
-        session_id = orchestrator.start_or_resume()
+        session_id = orchestrator.start_or_resume_and_run()
+        session = orchestrator.scan_repo.get_session(session_id)
+        if session is None:
+            return {"session_id": session_id, "status": "unknown", "mode": None}
+        return {
+            "session_id": session_id,
+            "status": session["status"],
+            "mode": session["mode"],
+        }
+    finally:
+        conn.close()
+
+
+@router.post("/scan/abort")
+def scan_abort(request: Request) -> dict[str, object]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        return ScanOrchestrator(conn).abort()
+    finally:
+        conn.close()
+
+
+@router.post("/scan/start_new")
+def scan_start_new(request: Request, abandon_resumable: bool = False) -> dict[str, object]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        orchestrator = ScanOrchestrator(conn)
+        try:
+            session_id = orchestrator.start_new_and_run(abandon_resumable=abandon_resumable)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
         session = orchestrator.scan_repo.get_session(session_id)
         if session is None:
             return {"session_id": session_id, "status": "unknown", "mode": None}

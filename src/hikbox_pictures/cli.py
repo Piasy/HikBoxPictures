@@ -52,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan_status.add_argument("--workspace", type=Path, required=True)
     p_scan_status.set_defaults(handler=handle_scan_status)
 
+    p_scan_abort = scan_sub.add_parser("abort", help="中断当前扫描会话")
+    p_scan_abort.add_argument("--workspace", type=Path, required=True)
+    p_scan_abort.set_defaults(handler=handle_scan_abort)
+
+    p_scan_new = scan_sub.add_parser("new", help="放弃旧会话并启动新扫描")
+    p_scan_new.add_argument("--workspace", type=Path, required=True)
+    p_scan_new.add_argument("--abandon-resumable", action="store_true")
+    p_scan_new.set_defaults(handler=handle_scan_new)
+
     p_rebuild = sub.add_parser("rebuild-artifacts", help="重建可派生产物")
     p_rebuild.add_argument("--workspace", type=Path, required=True)
     p_rebuild.set_defaults(handler=handle_rebuild_artifacts)
@@ -287,13 +296,13 @@ def handle_scan(args: argparse.Namespace) -> int:
     conn = connect_db(paths.db_path)
     try:
         orchestrator = ScanOrchestrator(conn)
-        session_id = orchestrator.start_or_resume()
+        session_id = orchestrator.start_or_resume_and_run()
         session = orchestrator.scan_repo.get_session(session_id)
         if session is None:
             print(f"scan session_id={session_id} status=unknown mode=unknown")
             return 0
         print(f"scan session_id={session_id} status={session['status']} mode={session['mode']}")
-        return 0
+        return 1 if str(session["status"]) == "failed" else 0
     finally:
         conn.close()
 
@@ -330,6 +339,45 @@ def handle_scan_status(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def handle_scan_abort(args: argparse.Namespace) -> int:
+    from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
+
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        payload = ScanOrchestrator(conn).abort()
+        print(
+            "scan "
+            f"session_id={payload.get('session_id')} "
+            f"status={payload.get('status')} "
+            f"mode={payload.get('mode')}"
+        )
+        return 0
+    finally:
+        conn.close()
+
+
+def handle_scan_new(args: argparse.Namespace) -> int:
+    from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
+
+    paths = initialize_workspace(args.workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        orchestrator = ScanOrchestrator(conn)
+        session_id = orchestrator.start_new_and_run(abandon_resumable=bool(args.abandon_resumable))
+        session = orchestrator.scan_repo.get_session(session_id)
+        if session is None:
+            print(f"scan session_id={session_id} status=unknown mode=unknown")
+            return 0
+        print(f"scan session_id={session_id} status={session['status']} mode={session['mode']}")
+        return 1 if str(session["status"]) == "failed" else 0
+    except ValueError as exc:
+        print(f"scan new 失败: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+
+
 def handle_rebuild_artifacts(args: argparse.Namespace) -> int:
     from hikbox_pictures.ann import AnnIndexStore
     from hikbox_pictures.repositories.person_repo import PersonRepo
@@ -341,10 +389,16 @@ def handle_rebuild_artifacts(args: argparse.Namespace) -> int:
         conn.execute("BEGIN IMMEDIATE")
         ann_store = AnnIndexStore(paths.artifacts_dir / "ann" / "prototype_index.npz")
         prototype_service = PrototypeService(conn, PersonRepo(conn), ann_store)
-        rebuilt_count = prototype_service.rebuild_all_person_prototypes(model_key="pipeline-stub-v1")
-        indexed_count = prototype_service.rebuild_ann_index_from_active_prototypes(model_key="pipeline-stub-v1")
+        resolved_model_key = prototype_service.resolve_default_model_key()
+        rebuilt_count = prototype_service.rebuild_all_person_prototypes(model_key=resolved_model_key)
+        indexed_count = prototype_service.rebuild_ann_index_from_active_prototypes(model_key=resolved_model_key)
         conn.commit()
-        print(f"ANN 与人物原型重建完成: prototypes={rebuilt_count} indexed={indexed_count}")
+        print(
+            "ANN 与人物原型重建完成: "
+            f"model_key={resolved_model_key} "
+            f"prototypes={rebuilt_count} "
+            f"indexed={indexed_count}"
+        )
         return 0
     except Exception as exc:
         conn.rollback()

@@ -3,14 +3,43 @@
 <section>
   <h2>人物库</h2>
   <p class="summary">共 {{ people|length }} 人</p>
-  {% include "components/media_viewer.html" %}
+  <div class="people-gallery-viewer">
+    {% include "components/media_viewer.html" %}
+  </div>
   <div class="person-grid">
     {% for person in people %}
     <article class="person-card">
-      <h3>{{ person.display_name }}</h3>
-      <p>状态：{{ person.status }}</p>
-      <p>ID：{{ person.id }}</p>
-      <a class="action-link" href="/people/{{ person.id }}">进入维护</a>
+      <div class="person-card-cover">
+        {% if person.cover_crop_url %}
+        <img class="person-card-image" src="{{ person.cover_crop_url }}" alt="{{ person.display_name }} 封面" loading="lazy" />
+        {% else %}
+        <div class="person-card-placeholder">暂无样本</div>
+        {% endif %}
+        {% if person.pending_review_count %}
+        <span class="person-card-badge">待审核 {{ person.pending_review_count }}</span>
+        {% endif %}
+      </div>
+      <div class="person-card-body">
+        {% set state_class = "is-pending" %}
+        {% set state_label = "待确认" %}
+        {% if person.ignored %}
+          {% set state_class = "is-muted" %}
+          {% set state_label = "已忽略" %}
+        {% elif person.status == "merged" %}
+          {% set state_class = "is-muted" %}
+          {% set state_label = "已合并" %}
+        {% elif person.confirmed %}
+          {% set state_class = "is-confirmed" %}
+          {% set state_label = "已确认" %}
+        {% endif %}
+        <div class="person-card-header">
+          <h3>{{ person.display_name }}</h3>
+          <span class="person-card-state {{ state_class }}">{{ state_label }}</span>
+        </div>
+        <p class="person-card-metrics">照片 {{ person.photo_count }} · 样本 {{ person.sample_count }}</p>
+        <p class="person-card-meta">ID：{{ person.id }}</p>
+        <a class="action-link" href="/people/{{ person.id }}">进入维护</a>
+      </div>
     </article>
     {% endfor %}
   </div>

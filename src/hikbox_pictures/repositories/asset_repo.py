@@ -27,6 +27,65 @@ class AssetRepo:
         )
         return int(cursor.lastrowid)
 
+    def upsert_photo_asset_from_scan(
+        self,
+        *,
+        library_source_id: int,
+        primary_path: str,
+        is_heic: bool,
+        live_mov_path: str | None,
+    ) -> tuple[int, bool]:
+        insert_cursor = self.conn.execute(
+            """
+            INSERT OR IGNORE INTO photo_asset(
+                library_source_id,
+                primary_path,
+                is_heic,
+                live_mov_path,
+                processing_status
+            )
+            VALUES (?, ?, ?, ?, 'discovered')
+            """,
+            (
+                int(library_source_id),
+                primary_path,
+                1 if is_heic else 0,
+                live_mov_path,
+            ),
+        )
+        created = int(insert_cursor.rowcount) > 0
+        if not created:
+            self.conn.execute(
+                """
+                UPDATE photo_asset
+                SET is_heic = ?,
+                    live_mov_path = COALESCE(?, live_mov_path),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE library_source_id = ?
+                  AND primary_path = ?
+                """,
+                (
+                    1 if is_heic else 0,
+                    live_mov_path,
+                    int(library_source_id),
+                    primary_path,
+                ),
+            )
+
+        row = self.conn.execute(
+            """
+            SELECT id
+            FROM photo_asset
+            WHERE library_source_id = ?
+              AND primary_path = ?
+            LIMIT 1
+            """,
+            (int(library_source_id), primary_path),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("photo_asset upsert 失败，未找到对应记录")
+        return int(row["id"]), created
+
     def get_asset(self, asset_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
@@ -225,6 +284,29 @@ class AssetRepo:
         ).fetchall()
         return [int(row["id"]) for row in rows]
 
+    def list_active_face_observations(self, asset_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT id,
+                   photo_asset_id,
+                   bbox_top,
+                   bbox_right,
+                   bbox_bottom,
+                   bbox_left,
+                   face_area_ratio,
+                   crop_path,
+                   detector_key,
+                   detector_version,
+                   active
+            FROM face_observation
+            WHERE photo_asset_id = ?
+              AND active = 1
+            ORDER BY id ASC
+            """,
+            (int(asset_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def ensure_face_observation(
         self,
         asset_id: int,
@@ -257,6 +339,57 @@ class AssetRepo:
         )
         return int(cursor.lastrowid)
 
+    def replace_face_observations(
+        self,
+        asset_id: int,
+        *,
+        observations: list[dict[str, Any]],
+        detector_key: str,
+        detector_version: str,
+    ) -> list[int]:
+        self.conn.execute(
+            """
+            UPDATE face_observation
+            SET active = 0
+            WHERE photo_asset_id = ?
+              AND active = 1
+            """,
+            (int(asset_id),),
+        )
+
+        created_ids: list[int] = []
+        for observation in observations:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO face_observation(
+                    photo_asset_id,
+                    bbox_top,
+                    bbox_right,
+                    bbox_bottom,
+                    bbox_left,
+                    face_area_ratio,
+                    crop_path,
+                    detector_key,
+                    detector_version,
+                    active
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    int(asset_id),
+                    float(observation["bbox_top"]),
+                    float(observation["bbox_right"]),
+                    float(observation["bbox_bottom"]),
+                    float(observation["bbox_left"]),
+                    observation.get("face_area_ratio"),
+                    observation.get("crop_path"),
+                    detector_key,
+                    detector_version,
+                ),
+            )
+            created_ids.append(int(cursor.lastrowid))
+        return created_ids
+
     def ensure_face_embedding(
         self,
         face_observation_id: int,
@@ -269,7 +402,7 @@ class AssetRepo:
     ) -> int:
         self.conn.execute(
             """
-            INSERT OR IGNORE INTO face_embedding(
+            INSERT INTO face_embedding(
                 face_observation_id,
                 feature_type,
                 model_key,
@@ -278,6 +411,13 @@ class AssetRepo:
                 normalized
             )
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(face_observation_id, feature_type)
+            DO UPDATE SET
+                model_key = excluded.model_key,
+                dimension = excluded.dimension,
+                vector_blob = excluded.vector_blob,
+                normalized = excluded.normalized,
+                generated_at = CURRENT_TIMESTAMP
             """,
             (
                 int(face_observation_id),
@@ -302,6 +442,34 @@ class AssetRepo:
             raise RuntimeError("face_embedding 写入失败，未找到对应记录")
         return int(row["id"])
 
+    def get_face_embedding(
+        self,
+        face_observation_id: int,
+        *,
+        feature_type: str = "face",
+        model_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        sql = """
+            SELECT id,
+                   face_observation_id,
+                   feature_type,
+                   model_key,
+                   dimension,
+                   vector_blob,
+                   normalized,
+                   generated_at
+            FROM face_embedding
+            WHERE face_observation_id = ?
+              AND feature_type = ?
+        """
+        params: list[Any] = [int(face_observation_id), feature_type]
+        if model_key is not None:
+            sql += " AND model_key = ?"
+            params.append(str(model_key))
+        sql += " ORDER BY id ASC LIMIT 1"
+        row = self.conn.execute(sql, tuple(params)).fetchone()
+        return dict(row) if row is not None else None
+
     def get_assignment(self, assignment_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
@@ -313,6 +481,79 @@ class AssetRepo:
             (int(assignment_id),),
         ).fetchone()
         return dict(row) if row is not None else None
+
+    def get_active_assignment_for_observation(self, face_observation_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, person_id, face_observation_id, assignment_source, confidence,
+                   locked, confirmed_at, active, created_at, updated_at
+            FROM person_face_assignment
+            WHERE face_observation_id = ?
+              AND active = 1
+            LIMIT 1
+            """,
+            (int(face_observation_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def create_assignment(
+        self,
+        *,
+        person_id: int,
+        face_observation_id: int,
+        assignment_source: str,
+        confidence: float | None,
+        locked: bool = False,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO person_face_assignment(
+                person_id,
+                face_observation_id,
+                assignment_source,
+                confidence,
+                locked,
+                active
+            )
+            VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (
+                int(person_id),
+                int(face_observation_id),
+                assignment_source,
+                confidence,
+                1 if locked else 0,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def update_assignment(
+        self,
+        assignment_id: int,
+        *,
+        person_id: int,
+        assignment_source: str,
+        confidence: float | None,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person_face_assignment
+            SET person_id = ?,
+                assignment_source = ?,
+                confidence = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND active = 1
+              AND locked = 0
+            """,
+            (
+                int(person_id),
+                assignment_source,
+                confidence,
+                int(assignment_id),
+            ),
+        )
+        return int(cursor.rowcount)
 
     def move_assignment(
         self,

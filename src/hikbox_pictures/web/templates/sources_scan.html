@@ -7,6 +7,12 @@
   {% else %}
   <p>当前会话：idle</p>
   {% endif %}
+  <div class="scan-controls">
+    <button type="button" data-action="scan-resume">恢复未完成任务</button>
+    <button type="button" data-action="scan-abort">停止当前扫描</button>
+    <button type="button" data-action="scan-start-new">放弃旧任务并新建扫描</button>
+    <p data-scan-feedback aria-live="polite"></p>
+  </div>
 </section>
 
 <section>
