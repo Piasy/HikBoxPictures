@@ -27,7 +27,6 @@ def people_page(request: Request) -> HTMLResponse:
                 "page_title": "人物库",
                 "page_key": "people",
                 "people": service.list_people(),
-                "viewer_items": service.list_viewer_samples(limit=6),
             },
         )
     finally:
@@ -62,14 +61,16 @@ def reviews_page(request: Request) -> HTMLResponse:
     conn = connect_db(Path(request.app.state.db_path))
     try:
         service = WebQueryService(conn)
+        review_page = service.get_review_page()
         return _get_templates(request).TemplateResponse(
             request=request,
             name="review_queue.html",
             context={
                 "page_title": "待审核",
                 "page_key": "reviews",
-                "queues": service.list_review_queues(),
-                "viewer_items": service.list_viewer_samples(limit=6),
+                "queues": review_page["queues"],
+                "review_summary": review_page["summary"],
+                "viewer_items": review_page["viewer_items"],
             },
         )
     finally:

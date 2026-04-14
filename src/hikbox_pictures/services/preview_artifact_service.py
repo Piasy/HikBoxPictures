@@ -11,6 +11,12 @@ from hikbox_pictures.services.observability_service import ObservabilityService
 from hikbox_pictures.services.path_guard import ensure_safe_asset_path
 from hikbox_pictures.services.runtime import resolve_media_allowed_roots
 
+LEGACY_CONTEXT_MAX_SIDE = 48
+CONTEXT_PREVIEW_MIN_SIDE = 160
+CONTEXT_PREVIEW_MAX_SIDE = 320
+CONTEXT_PREVIEW_MARGIN_FACTOR = 1.0
+CONTEXT_PREVIEW_MIN_AREA_RATIO = 2.5
+
 
 class PreviewArtifactError(Exception):
     def __init__(self, *, error_code: str, message: str, status_code: int = 422) -> None:
@@ -96,7 +102,7 @@ class PreviewArtifactService:
                 raise LookupError(f"observation {observation_id} 不存在")
 
             context_path = self.workspace / ".hikbox" / "artifacts" / "context" / f"obs-{int(observation_id)}.jpg"
-            if context_path.exists() and context_path.is_file():
+            if context_path.exists() and context_path.is_file() and self._is_context_artifact_usable(context_path):
                 return str(context_path)
 
             try:
@@ -139,6 +145,46 @@ class PreviewArtifactService:
         finally:
             conn.close()
 
+    def _is_context_artifact_usable(self, context_path: Path) -> bool:
+        try:
+            with Image.open(context_path) as image:
+                rgb = image.convert("RGB")
+                if max(rgb.size) <= LEGACY_CONTEXT_MAX_SIDE:
+                    return False
+                return self._context_has_meaningful_scene(rgb)
+        except (UnidentifiedImageError, OSError, ValueError):
+            return False
+
+    def _context_has_meaningful_scene(self, image: Image.Image) -> bool:
+        bounds = self._find_bbox_highlight_bounds(image)
+        if bounds is None:
+            return False
+        min_x, min_y, max_x, max_y = bounds
+        bbox_width = max_x - min_x + 1
+        bbox_height = max_y - min_y + 1
+        if bbox_width <= 0 or bbox_height <= 0:
+            return False
+        area_ratio = float(image.width * image.height) / float(bbox_width * bbox_height)
+        return area_ratio >= CONTEXT_PREVIEW_MIN_AREA_RATIO
+
+    def _find_bbox_highlight_bounds(self, image: Image.Image) -> tuple[int, int, int, int] | None:
+        pixels = image.load()
+        min_x = image.width
+        min_y = image.height
+        max_x = -1
+        max_y = -1
+        for y in range(image.height):
+            for x in range(image.width):
+                r, g, b = pixels[x, y]
+                if r >= 180 and g <= 130 and b <= 130:
+                    min_x = min(min_x, x)
+                    min_y = min(min_y, y)
+                    max_x = max(max_x, x)
+                    max_y = max(max_y, y)
+        if max_x < 0 or max_y < 0:
+            return None
+        return (min_x, min_y, max_x, max_y)
+
     def _rebuild_crop(self, row: dict[str, object]) -> Path:
         source_path = ensure_safe_asset_path(
             str(row["primary_path"]),
@@ -179,8 +225,9 @@ class PreviewArtifactService:
 
             face_w = max(1, right - left)
             face_h = max(1, bottom - top)
-            margin_x = max(2, int(face_w * 0.08))
-            margin_y = max(2, int(face_h * 0.08))
+            # context 必须明显大于 crop，才能在审核页形成可判断的中间层证据。
+            margin_x = max(2, int(face_w * CONTEXT_PREVIEW_MARGIN_FACTOR))
+            margin_y = max(2, int(face_h * CONTEXT_PREVIEW_MARGIN_FACTOR))
             ctx_left = max(0, left - margin_x)
             ctx_top = max(0, top - margin_y)
             ctx_right = min(width, right + margin_x)
@@ -192,15 +239,21 @@ class PreviewArtifactService:
             box_right = right - ctx_left
             box_bottom = bottom - ctx_top
 
-            max_context_side = 32
+            max_context_side = CONTEXT_PREVIEW_MAX_SIDE
             current_max_side = max(context.size)
+            target_max_side = current_max_side
             if current_max_side > max_context_side:
-                scale = float(max_context_side) / float(current_max_side)
+                target_max_side = max_context_side
+            elif current_max_side < CONTEXT_PREVIEW_MIN_SIDE:
+                target_max_side = CONTEXT_PREVIEW_MIN_SIDE
+
+            if target_max_side != current_max_side:
+                scale = float(target_max_side) / float(current_max_side)
                 resized_size = (
                     max(1, int(context.width * scale)),
                     max(1, int(context.height * scale)),
                 )
-                context = context.resize(resized_size)
+                context = context.resize(resized_size, resample=Image.Resampling.LANCZOS)
                 box_left = int(box_left * scale)
                 box_top = int(box_top * scale)
                 box_right = int(box_right * scale)

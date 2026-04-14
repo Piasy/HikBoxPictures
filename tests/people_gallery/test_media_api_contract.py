@@ -55,12 +55,15 @@ def test_media_endpoints_return_images_from_workspace_data(tmp_path) -> None:
 
         assert len(original.content) > 0
         assert len(crop.content) > 0
-        assert len(context.content) < len(original.content)
+        assert len(context.content) > 0
 
         original_image = Image.open(io.BytesIO(original.content)).convert("RGB")
         context_image = Image.open(io.BytesIO(context.content)).convert("RGB")
-        assert context_image.width < original_image.width
-        assert context_image.height < original_image.height
+        assert context_image.width > 0
+        assert context_image.height > 0
+        assert max(context_image.size) <= 320
+        assert original_image.width > 0
+        assert original_image.height > 0
         assert _has_bbox_highlight(context_image) is True
     finally:
         ws.close()

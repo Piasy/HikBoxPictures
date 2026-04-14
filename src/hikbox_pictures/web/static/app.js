@@ -36,6 +36,7 @@
     var items = root.__viewerItems || [];
     var index = root.__viewerIndex || 0;
     var status = root.querySelector("[data-viewer-status]");
+    var label = root.querySelector("[data-viewer-current-label]");
 
     if (!items.length) {
       setLayerSrc(root, "crop", "");
@@ -43,6 +44,9 @@
       setLayerSrc(root, "original", "");
       if (status) {
         status.textContent = "无样例";
+      }
+      if (label) {
+        label.textContent = "";
       }
       return;
     }
@@ -53,6 +57,9 @@
     setLayerSrc(root, "original", item.originalUrl);
     if (status) {
       status.textContent = (index + 1) + " / " + items.length;
+    }
+    if (label) {
+      label.textContent = item.label || "";
     }
   }
 
@@ -101,6 +108,16 @@
       }
       var total = viewer.__viewerItems.length;
       viewer.__viewerIndex = (viewer.__viewerIndex + 1) % total;
+      render(viewer);
+    },
+    select: function (target, index) {
+      var viewer = pickViewer(target);
+      var nextIndex = Number(index);
+      if (!viewer || !viewer.__viewerItems || !viewer.__viewerItems.length || !Number.isFinite(nextIndex)) {
+        return;
+      }
+      nextIndex = Math.max(0, Math.min(Math.floor(nextIndex), viewer.__viewerItems.length - 1));
+      viewer.__viewerIndex = nextIndex;
       render(viewer);
     },
     toggleBbox: function (target) {
@@ -208,6 +225,23 @@
       return;
     }
     node.textContent = message || "";
+  }
+
+  function bindReviewEvidenceFocus() {
+    var buttons = document.querySelectorAll("[data-review-focus-index]");
+    buttons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var index = button.getAttribute("data-review-focus-index");
+        if (!index) {
+          return;
+        }
+        window.hikboxViewer.select(undefined, index);
+        var label = button.getAttribute("data-review-focus-label");
+        if (label) {
+          setReviewFeedback("已定位证据: " + label);
+        }
+      });
+    });
   }
 
   function bindReviewActions() {
@@ -342,6 +376,7 @@
   if (page === "sources") {
     bindScanActions();
   } else if (page === "reviews") {
+    bindReviewEvidenceFocus();
     bindReviewActions();
   } else if (page === "exports") {
     bindExportActions();

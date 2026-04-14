@@ -1,30 +1,145 @@
 {% extends "base.html" %}
 {% block content %}
-<section>
-  <h2>待审核</h2>
-  <p data-review-feedback></p>
-  {% include "components/media_viewer.html" %}
+<section class="review-page">
+  <header class="review-hero panel">
+    <div class="review-hero-copy">
+      <p class="review-kicker">分类型队列</p>
+      <h2>待审核</h2>
+      <p class="summary">
+        当前共有 {{ review_summary['open_count'] }} 条待处理项，点击卡片里的“查看证据”会把左侧预览器切到对应样本，再执行确认、驳回或忽略。
+      </p>
+    </div>
+    <div class="review-stats" aria-label="审核概览">
+      <article>
+        <strong>{{ review_summary['open_count'] }}</strong>
+        <span>待处理项</span>
+      </article>
+      <article>
+        <strong>{{ review_summary['active_queue_count'] }}</strong>
+        <span>活跃队列</span>
+      </article>
+      <article>
+        <strong>{{ review_summary['focusable_count'] }}</strong>
+        <span>可看证据</span>
+      </article>
+    </div>
+  </header>
 
-  {% for queue in queues %}
-  <article id="queue-{{ queue['review_type'] }}" class="queue-block">
-    <h3>{{ queue['title'] }}（{{ queue['items']|length }}）</h3>
-    <ul>
-      {% for item in queue['items'] %}
-      <li>
-        <div>
-          review #{{ item.id }}
-          类型：{{ item.review_type }}
-          优先级：{{ item.priority }}
-        </div>
-        <div>
-          <button type="button" data-action="review-resolve" data-review-id="{{ item.id }}">确认</button>
-          <button type="button" data-action="review-dismiss" data-review-id="{{ item.id }}">驳回</button>
-          <button type="button" data-action="review-ignore" data-review-id="{{ item.id }}">忽略</button>
-        </div>
-      </li>
-      {% endfor %}
-    </ul>
-  </article>
-  {% endfor %}
+  <p class="review-feedback" data-review-feedback></p>
+
+  <div class="review-layout">
+    <aside class="review-inspector panel">
+      <div class="review-inspector-copy">
+        <h3>证据区</h3>
+        <p>这里显示当前选中 review 的 crop / context / original。先把证据看清，再回到右侧卡片执行动作。</p>
+      </div>
+      {% include "components/media_viewer.html" %}
+    </aside>
+
+    <div class="review-queues">
+    {% for queue in queues %}
+      <article
+        id="queue-{{ queue['review_type'] }}"
+        class="queue-block{% if not queue['items'] %} is-empty-queue{% endif %}"
+        data-queue-type="{{ queue['review_type'] }}"
+      >
+        <header class="queue-header">
+          <div>
+            <p class="queue-kicker">{{ queue['subtitle'] }}</p>
+            <h3 class="queue-title">
+              <span>{{ queue['title'] }}</span>
+              <span class="queue-count">{{ queue['count'] }}</span>
+            </h3>
+          </div>
+          <p class="queue-description">{{ queue['description'] }}</p>
+        </header>
+        <ul class="queue-list">
+          {% if not queue['items'] %}
+          <li class="queue-empty">
+            <strong>当前队列为空</strong>
+            <span>这一类问题暂时没有待处理项。</span>
+          </li>
+          {% endif %}
+          {% for item in queue['items'] %}
+          <li class="queue-item{% if item['viewer_index'] is not none %} is-focusable{% endif %}">
+            <div class="queue-item-top">
+              <div class="queue-item-preview" data-preview-count="{{ item['preview_faces']|length if item['preview_faces'] else 0 }}">
+                {% if item['preview_faces'] %}
+                  {% for face in item['preview_faces'] %}
+                  <button
+                    type="button"
+                    class="queue-face"
+                    {% set face_viewer_index = face['viewer_index'] if face.get('viewer_index') is not none else item['viewer_index'] %}
+                    {% if face_viewer_index is not none %}
+                    data-review-focus-index="{{ face_viewer_index }}"
+                    data-review-focus-label="{{ item['headline'] }}"
+                    {% else %}
+                    disabled
+                    {% endif %}
+                  >
+                    {% if face['crop_url'] %}
+                    <img src="{{ face['crop_url'] }}" alt="{{ face['label'] }}" loading="lazy" />
+                    {% else %}
+                    <span class="queue-face-placeholder">暂无样本</span>
+                    {% endif %}
+                    <span>{{ face['label'] }}</span>
+                  </button>
+                  {% endfor %}
+                {% else %}
+                <div class="queue-face is-placeholder">
+                  <span class="queue-face-placeholder">暂无样本</span>
+                  <span>没有可用封面</span>
+                </div>
+                {% endif %}
+              </div>
+
+              <div class="queue-item-main">
+                <div class="queue-item-meta">
+                  <strong>review #{{ item['id'] }}</strong>
+                  <span class="queue-item-pill">P{{ item['priority'] }}</span>
+                  {% if item['observation_label'] %}
+                  <span>{{ item['observation_label'] }}</span>
+                  {% endif %}
+                </div>
+                <p class="queue-item-headline">{{ item['headline'] }}</p>
+                <p class="queue-item-description">{{ item['description'] }}</p>
+                {% if item['chips'] %}
+                <div class="queue-item-tags">
+                  {% for chip in item['chips'] %}
+                  <span class="queue-item-tag">{{ chip }}</span>
+                  {% endfor %}
+                </div>
+                {% endif %}
+              </div>
+            </div>
+
+            <div class="queue-item-footer">
+              <div class="queue-item-evidence">
+                {% if item['viewer_index'] is not none %}
+                <button
+                  type="button"
+                  class="review-focus-link"
+                  data-review-focus-index="{{ item['viewer_index'] }}"
+                  data-review-focus-label="{{ item['headline'] }}"
+                >
+                  查看证据
+                </button>
+                {% else %}
+                <span class="review-focus-hint">暂无可切换证据</span>
+                {% endif %}
+              </div>
+              <div class="queue-item-actions">
+                <button type="button" data-action="review-resolve" data-review-id="{{ item['id'] }}">确认</button>
+                <button type="button" data-action="review-dismiss" data-review-id="{{ item['id'] }}">驳回</button>
+                <button type="button" data-action="review-ignore" data-review-id="{{ item['id'] }}">忽略</button>
+              </div>
+            </div>
+          </li>
+          {% endfor %}
+        </ul>
+      </article>
+    {% endfor %}
+    </div>
+  </div>
 </section>
 {% endblock %}

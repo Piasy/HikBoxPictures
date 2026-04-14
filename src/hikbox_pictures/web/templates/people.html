@@ -3,9 +3,13 @@
 <section>
   <h2>人物库</h2>
   <p class="summary">共 {{ people|length }} 人</p>
-  <div class="people-gallery-viewer">
-    {% include "components/media_viewer.html" %}
-  </div>
+  {% if not people %}
+  <article class="person-empty-state">
+    <h3>暂时还没有人物卡片</h3>
+    <p>先去“源目录与扫描”完成一次扫描，识别出有效人脸后，这里才会生成可维护的人物库。</p>
+    <a class="action-link" href="/sources">去管理源目录与扫描</a>
+  </article>
+  {% else %}
   <div class="person-grid">
     {% for person in people %}
     <article class="person-card">
@@ -43,5 +47,6 @@
     </article>
     {% endfor %}
   </div>
+  {% endif %}
 </section>
 {% endblock %}

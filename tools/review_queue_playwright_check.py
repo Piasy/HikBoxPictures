@@ -1,0 +1,509 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+from typing import Any
+from urllib.error import URLError
+from urllib.request import urlopen
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SRC_ROOT = REPO_ROOT / "src"
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from hikbox_pictures.cli import main as cli_main
+
+
+def _load_fixture_module():
+    fixture_path = REPO_ROOT / "tests" / "people_gallery" / "fixtures_workspace.py"
+    fixture_spec = spec_from_file_location("people_gallery_fixtures_workspace_review_visual", fixture_path)
+    if fixture_spec is None or fixture_spec.loader is None:
+        raise RuntimeError(f"无法加载测试夹具文件: {fixture_path}")
+    fixture_module = module_from_spec(fixture_spec)
+    sys.modules[fixture_spec.name] = fixture_module
+    fixture_spec.loader.exec_module(fixture_module)
+    return fixture_module
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="用 Playwright 检查 /reviews 页面视觉与基础交互质量。")
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=None,
+        help="指定已有工作区；默认优先使用 repo 内的 sample/workspace。",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="输出目录；默认写入系统临时目录。",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="本地服务监听地址。",
+    )
+    parser.add_argument(
+        "--runner-dir",
+        type=Path,
+        default=None,
+        help="Node Playwright runner 目录；默认写入 output-dir/node-runner。",
+    )
+    parser.add_argument(
+        "--install-browser",
+        action="store_true",
+        help="运行前执行一次 playwright chromium 安装。",
+    )
+    return parser
+
+
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _wait_for_health(host: str, port: int, *, timeout_seconds: float = 20.0) -> None:
+    deadline = time.time() + timeout_seconds
+    url = f"http://{host}:{port}/api/health"
+    while time.time() < deadline:
+        try:
+            with urlopen(url, timeout=1.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if payload.get("ok") is True:
+                return
+        except (OSError, URLError, json.JSONDecodeError):
+            time.sleep(0.2)
+    raise TimeoutError(f"服务未能在 {timeout_seconds:.1f}s 内启动: {url}")
+
+
+@contextmanager
+def _run_server(*, workspace: Path, host: str, port: int, log_path: Path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(SRC_ROOT)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "hikbox_pictures.cli",
+                "serve",
+                "--workspace",
+                str(workspace),
+                "--host",
+                host,
+                "--port",
+                str(port),
+            ],
+            cwd=str(REPO_ROOT),
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            _wait_for_health(host, port)
+            yield process
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+
+
+def _run_command(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
+    result = subprocess.run(
+        command,
+        cwd=str(cwd),
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"命令执行失败: {' '.join(command)}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
+    return result.stdout
+
+
+def _read_command_stdout(command: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> str:
+    return _run_command(command, cwd=cwd, env=env)
+
+
+def _system_has_cjk_font() -> bool:
+    try:
+        output = _read_command_stdout(["fc-list", ":lang=zh-cn", "family"], cwd=REPO_ROOT)
+    except Exception:
+        return False
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return False
+    return any("DejaVu" not in line for line in lines)
+
+
+def _ensure_local_runtime_libs(*, runner_dir: Path) -> dict[str, str]:
+    libs_root = runner_dir / "local-libs"
+    package_names = ("libgbm1", "libwayland-server0")
+    extracted_dirs: list[Path] = []
+
+    for package_name in package_names:
+        package_root = libs_root / package_name
+        lib_dir = package_root / "usr" / "lib" / "x86_64-linux-gnu"
+        if not lib_dir.exists():
+            libs_root.mkdir(parents=True, exist_ok=True)
+            _run_command(["apt-get", "download", package_name], cwd=libs_root)
+            debs = sorted(libs_root.glob(f"{package_name}_*.deb"))
+            if not debs:
+                raise RuntimeError(f"未能下载运行库包: {package_name}")
+            package_root.mkdir(parents=True, exist_ok=True)
+            _run_command(["dpkg-deb", "-x", str(debs[-1]), str(package_root)], cwd=libs_root)
+        extracted_dirs.append(lib_dir)
+
+    existing = os.environ.get("LD_LIBRARY_PATH", "").strip()
+    paths = [str(path) for path in extracted_dirs]
+    if existing:
+        paths.append(existing)
+    return {"LD_LIBRARY_PATH": ":".join(paths)}
+
+
+def _ensure_local_cjk_font(*, runner_dir: Path) -> dict[str, str]:
+    fonts_root = runner_dir / "local-fonts"
+    package_root = fonts_root / "fonts-wqy-microhei"
+    font_path = package_root / "usr" / "share" / "fonts" / "truetype" / "wqy" / "wqy-microhei.ttc"
+    font_conf_dir = fonts_root / "fontconfig"
+    font_conf_file = font_conf_dir / "fonts.conf"
+    font_cache_dir = fonts_root / "cache"
+
+    if not font_path.exists():
+        fonts_root.mkdir(parents=True, exist_ok=True)
+        _run_command(["apt-get", "download", "fonts-wqy-microhei"], cwd=fonts_root)
+        debs = sorted(fonts_root.glob("fonts-wqy-microhei_*_all.deb"))
+        if not debs:
+            raise RuntimeError("未能下载 fonts-wqy-microhei 字体包")
+        package_root.mkdir(parents=True, exist_ok=True)
+        _run_command(["dpkg-deb", "-x", str(debs[-1]), str(package_root)], cwd=fonts_root)
+
+    font_conf_dir.mkdir(parents=True, exist_ok=True)
+    font_cache_dir.mkdir(parents=True, exist_ok=True)
+    font_conf_file.write_text(
+        f"""<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <dir>{font_path.parent}</dir>
+
+  <match target="pattern">
+    <test qual="any" name="family">
+      <string>Noto Sans SC</string>
+    </test>
+    <edit name="family" mode="assign_replace">
+      <string>WenQuanYi Micro Hei</string>
+    </edit>
+  </match>
+
+  <match target="pattern">
+    <test qual="any" name="family">
+      <string>Noto Sans CJK SC</string>
+    </test>
+    <edit name="family" mode="assign_replace">
+      <string>WenQuanYi Micro Hei</string>
+    </edit>
+  </match>
+
+  <match target="pattern">
+    <test qual="any" name="family">
+      <string>PingFang SC</string>
+    </test>
+    <edit name="family" mode="assign_replace">
+      <string>WenQuanYi Micro Hei</string>
+    </edit>
+  </match>
+
+  <alias>
+    <family>sans-serif</family>
+    <prefer>
+      <family>WenQuanYi Micro Hei</family>
+    </prefer>
+  </alias>
+</fontconfig>
+""",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["FONTCONFIG_FILE"] = str(font_conf_file)
+    env["XDG_CACHE_HOME"] = str(font_cache_dir)
+    _run_command(["fc-cache", "-f"], cwd=REPO_ROOT, env=env)
+    return {
+        "FONTCONFIG_FILE": str(font_conf_file),
+    }
+
+
+def _ensure_node_playwright_runner(*, runner_dir: Path, install_browser: bool) -> Path:
+    runner_dir.mkdir(parents=True, exist_ok=True)
+    package_json = runner_dir / "package.json"
+    if not package_json.exists():
+        _run_command(["npm", "init", "-y"], cwd=runner_dir)
+
+    node_modules = runner_dir / "node_modules"
+    if not (node_modules / "playwright").exists():
+        _run_command(["npm", "install", "playwright"], cwd=runner_dir)
+
+    if install_browser:
+        _run_command(
+            ["node", str(node_modules / "playwright" / "cli.js"), "install", "chromium"],
+            cwd=runner_dir,
+        )
+    return node_modules
+
+
+def _ensure_font_env(*, runner_dir: Path) -> dict[str, str]:
+    if _system_has_cjk_font():
+        return {}
+    return _ensure_local_cjk_font(runner_dir=runner_dir)
+
+
+def _prepare_empty_workspace(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    result = cli_main(["init", "--workspace", str(path)])
+    if result != 0:
+        raise RuntimeError(f"初始化空工作区失败: {path}")
+
+
+def _prepare_seeded_workspace(path: Path) -> dict[str, Any]:
+    fixture_module = _load_fixture_module()
+    build_seed_workspace = fixture_module.build_seed_workspace
+    create_number_image_dataset = fixture_module.create_number_image_dataset
+    inject_mock_embeddings_for_assets = fixture_module.inject_mock_embeddings_for_assets
+    path.mkdir(parents=True, exist_ok=True)
+    ws = build_seed_workspace(path)
+    try:
+        people_count = len(ws.person_repo.list_people())
+        review_count = len(ws.review_repo.list_open_items())
+    finally:
+        ws.close()
+
+    dataset_dir = path / "review-visual-dataset"
+    create_number_image_dataset(dataset_dir, names=["101.jpg", "102.jpg", "103.jpg"])
+    inject_mock_embeddings_for_assets(
+        path,
+        dataset_dir=dataset_dir,
+        person_specs=[
+            {"file_name": "101.jpg", "display_name": "人物A", "vector": [0.11, 0.12, 0.13, 0.14], "locked": True},
+            {"file_name": "102.jpg", "display_name": "人物B", "vector": [0.21, 0.22, 0.23, 0.24], "locked": True},
+            {"file_name": "103.jpg", "display_name": "人物C", "vector": [0.31, 0.32, 0.33, 0.34], "locked": True},
+        ],
+        template_name="review-visual-template",
+    )
+    return {
+        "people_count": people_count,
+        "review_count_before_visual_seed": review_count,
+        "dataset_dir": dataset_dir,
+    }
+
+
+def _resolve_default_workspace() -> Path | None:
+    sample_workspace = REPO_ROOT / "sample" / "workspace"
+    if sample_workspace.exists() and sample_workspace.is_dir():
+        return sample_workspace
+    return None
+
+
+def _capture_once(
+    *,
+    node_modules_dir: Path,
+    browser_env: dict[str, str],
+    url: str,
+    mode: str,
+    viewport: str,
+    screenshot_path: Path,
+) -> dict[str, Any]:
+    report_path = screenshot_path.with_suffix(".json")
+    env = os.environ.copy()
+    env["NODE_PATH"] = str(node_modules_dir)
+    env.update(browser_env)
+    _run_command(
+        [
+            "node",
+            str(REPO_ROOT / "tools" / "review_queue_playwright_capture.cjs"),
+            "--url",
+            url,
+            "--mode",
+            mode,
+            "--viewport",
+            viewport,
+            "--screenshot",
+            str(screenshot_path),
+            "--report",
+            str(report_path),
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+    )
+    return json.loads(report_path.read_text(encoding="utf-8"))
+
+
+def _run_scenario(
+    *,
+    mode: str,
+    host: str,
+    node_modules_dir: Path,
+    browser_env: dict[str, str],
+    workspace: Path,
+    scenario_dir: Path,
+) -> dict[str, Any]:
+    port = _pick_free_port()
+    log_path = scenario_dir / "server.log"
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    base_url = f"http://{host}:{port}"
+    url = f"{base_url}/reviews"
+
+    with _run_server(workspace=workspace, host=host, port=port, log_path=log_path):
+        desktop_report = _capture_once(
+            node_modules_dir=node_modules_dir,
+            browser_env=browser_env,
+            url=url,
+            mode=mode,
+            viewport="desktop",
+            screenshot_path=scenario_dir / "reviews-desktop.png",
+        )
+        mobile_report = _capture_once(
+            node_modules_dir=node_modules_dir,
+            browser_env=browser_env,
+            url=url,
+            mode=mode,
+            viewport="mobile",
+            screenshot_path=scenario_dir / "reviews-mobile.png",
+        )
+
+    return {
+        "mode": mode,
+        "workspace": workspace,
+        "base_url": base_url,
+        "server_log": log_path,
+        "desktop": desktop_report,
+        "mobile": mobile_report,
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    if args.output_dir is None:
+        output_dir = Path(tempfile.mkdtemp(prefix="hikbox-review-visual-"))
+    else:
+        output_dir = args.output_dir.resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+    runner_dir = args.runner_dir.resolve() if args.runner_dir else (output_dir / "node-runner")
+
+    node_modules_dir = _ensure_node_playwright_runner(
+        runner_dir=runner_dir,
+        install_browser=bool(args.install_browser),
+    )
+    browser_env: dict[str, str] = {}
+    browser_env.update(_ensure_local_runtime_libs(runner_dir=runner_dir))
+    browser_env.update(_ensure_font_env(runner_dir=runner_dir))
+
+    requested_workspace = args.workspace.resolve() if args.workspace else _resolve_default_workspace()
+    results: list[dict[str, Any]]
+    summary: dict[str, Any]
+    if requested_workspace is not None:
+        workspace_result = _run_scenario(
+            mode="seeded",
+            host=args.host,
+            node_modules_dir=node_modules_dir,
+            browser_env=browser_env,
+            workspace=requested_workspace,
+            scenario_dir=output_dir / "captures" / "workspace",
+        )
+        results = [workspace_result]
+        summary = {
+            "output_dir": output_dir,
+            "runner_dir": runner_dir,
+            "font_env": browser_env,
+            "workspace": requested_workspace,
+            "results": results,
+        }
+    else:
+        workspace_root = output_dir / "workspaces"
+        empty_workspace = workspace_root / "empty"
+        seeded_workspace = workspace_root / "seeded"
+        _prepare_empty_workspace(empty_workspace)
+        seeded_meta = _prepare_seeded_workspace(seeded_workspace)
+
+        empty_result = _run_scenario(
+            mode="empty",
+            host=args.host,
+            node_modules_dir=node_modules_dir,
+            browser_env=browser_env,
+            workspace=empty_workspace,
+            scenario_dir=output_dir / "captures" / "empty",
+        )
+        seeded_result = _run_scenario(
+            mode="seeded",
+            host=args.host,
+            node_modules_dir=node_modules_dir,
+            browser_env=browser_env,
+            workspace=seeded_workspace,
+            scenario_dir=output_dir / "captures" / "seeded",
+        )
+        results = [empty_result, seeded_result]
+        summary = {
+            "output_dir": output_dir,
+            "runner_dir": runner_dir,
+            "font_env": browser_env,
+            "seeded_meta": seeded_meta,
+            "results": results,
+        }
+
+    summary_path = output_dir / "review-queue-visual-summary.json"
+    summary_path.write_text(
+        json.dumps(_jsonable(summary), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"[review-visual] 输出目录: {output_dir}")
+    print(f"[review-visual] 汇总报告: {summary_path}")
+    if requested_workspace is not None:
+        workspace_result = results[0]
+        print(
+            f"[review-visual] workspace 截图: "
+            f"{workspace_result['desktop']['screenshot']} / {workspace_result['mobile']['screenshot']}"
+        )
+    else:
+        empty_result, seeded_result = results
+        print(
+            f"[review-visual] 空库截图: {empty_result['desktop']['screenshot']} / {empty_result['mobile']['screenshot']}"
+        )
+        print(
+            f"[review-visual] seed 截图: {seeded_result['desktop']['screenshot']} / {seeded_result['mobile']['screenshot']}"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -131,3 +131,16 @@ PYTHONPATH=src python3 -m pytest \
 ```
 
 主流程验收已要求包含无 seed/mock 注入路径，固定数据集位于 `tests/data/e2e-face-input`。
+
+人物库首页视觉检查（Playwright）：
+
+```bash
+source .venv/bin/activate
+./scripts/setup_playwright_zh_fonts.sh
+python3 -m playwright install chromium
+PYTHONPATH=src python3 -m pytest tests/people_gallery/test_webui_people_home_visual_playwright.py -q
+```
+
+说明：无 GUI 服务器下若系统缺少 CJK 字体，截图会出现中文乱码。`setup_playwright_zh_fonts.sh` 会在仓库内 `.cache/playwright-fonts/` 下载 Noto Sans CJK SC 并生成局部 `fontconfig`，仅供 Playwright 浏览器进程使用，不影响应用运行时字体配置。
+
+该用例仅覆盖 `GET /` 两种状态：空库态、seed 后人物卡片态；不会触碰 reviews/person detail/exports 页面语义。
