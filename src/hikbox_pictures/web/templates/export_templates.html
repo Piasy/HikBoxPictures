@@ -261,7 +261,12 @@
               aria-label="{{ sample.viewer_label }}"
             >
               <img src="{{ sample.preview_url }}" alt="{{ sample.viewer_label }}" loading="lazy">
-              <span class="export-preview-tile-badge">{{ sample.bucket_label }}</span>
+              <span class="export-preview-tile-badges">
+                <span class="export-preview-tile-badge">{{ sample.bucket_label }}</span>
+                {% if sample.is_live_photo %}
+                <span class="export-preview-tile-badge is-live">{{ sample.live_label }}</span>
+                {% endif %}
+              </span>
             </button>
             {% endfor %}
             </div>

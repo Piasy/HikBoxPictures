@@ -470,6 +470,14 @@ class WebQueryService:
                 }
             )
 
+        grouped["new_person"].sort(
+            key=lambda item: (
+                -len(item["review_ids"]),
+                -int(item["priority"]),
+                int(item["id"]),
+            )
+        )
+
         active_queue_count = sum(1 for review_type in queue_order if grouped[review_type])
         return {
             "queues": [
@@ -1157,11 +1165,13 @@ class WebQueryService:
         for match in preview_matches:
             observation_id = representative_observation_ids.get(int(match.photo_asset_id))
             bucket_label = self._format_export_bucket(match.bucket.value)
+            is_live_photo = match.live_mov_path is not None
+            viewer_badge_label = f"{bucket_label} · live" if is_live_photo else bucket_label
             viewer_index = self._ensure_export_viewer_item(
                 template_name=str(template["name"]),
                 observation_id=observation_id,
                 photo_id=int(match.photo_asset_id),
-                bucket_label=bucket_label,
+                bucket_label=viewer_badge_label,
                 viewer_items=viewer_items,
                 viewer_index_by_observation=viewer_index_by_observation,
             )
@@ -1169,8 +1179,10 @@ class WebQueryService:
                 {
                     "photo_asset_id": int(match.photo_asset_id),
                     "bucket_label": bucket_label,
+                    "is_live_photo": is_live_photo,
+                    "live_label": "live" if is_live_photo else None,
                     "preview_url": f"/api/photos/{match.photo_asset_id}/preview",
-                    "viewer_label": f"{template['name']} · 照片 #{match.photo_asset_id} · {bucket_label}",
+                    "viewer_label": f"{template['name']} · 照片 #{match.photo_asset_id} · {viewer_badge_label}",
                     "viewer_index": viewer_index,
                 }
             )

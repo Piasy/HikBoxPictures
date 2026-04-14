@@ -92,7 +92,11 @@ class MediaPreviewService:
 
         source_path = str(row["primary_path"])
         try:
-            return self._build_stream_payload(source_path=source_path, range_header=range_header)
+            return self._build_stream_payload(
+                source_path=source_path,
+                range_header=range_header,
+                allowed_roots=self._allowed_roots_for_source_row(row),
+            )
         except LookupError:
             self._emit_event(
                 level="warning",
@@ -141,7 +145,11 @@ class MediaPreviewService:
             ) from exc
         except LookupError:
             raise
-        return self._build_stream_payload(source_path=crop_path, range_header=None)
+        return self._build_stream_payload(
+            source_path=crop_path,
+            range_header=None,
+            allowed_roots=self._artifact_allowed_roots(),
+        )
 
     def read_observation_context(self, observation_id: int) -> MediaStreamPayload:
         try:
@@ -154,10 +162,27 @@ class MediaPreviewService:
             ) from exc
         except LookupError:
             raise
-        return self._build_stream_payload(source_path=context_path, range_header=None)
+        return self._build_stream_payload(
+            source_path=context_path,
+            range_header=None,
+            allowed_roots=self._artifact_allowed_roots(),
+        )
 
-    def _build_stream_payload(self, *, source_path: str, range_header: str | None) -> MediaStreamPayload:
-        allowed_roots = [str(path) for path in self.allowed_roots_resolver(self.workspace)]
+    def _build_stream_payload(
+        self,
+        *,
+        source_path: str,
+        range_header: str | None,
+        allowed_roots: list[Path] | None = None,
+    ) -> MediaStreamPayload:
+        allowed_roots = [
+            str(path)
+            for path in (
+                allowed_roots
+                if allowed_roots is not None
+                else self.allowed_roots_resolver(self.workspace)
+            )
+        ]
         safe_path = ensure_safe_asset_path(source_path, allowed_roots)
         if not safe_path.exists() or not safe_path.is_file():
             raise LookupError(f"媒体文件不存在: {safe_path}")
@@ -192,6 +217,28 @@ class MediaPreviewService:
             start=start,
             end=end,
         )
+
+    def _allowed_roots_for_source_row(self, row: dict[str, object]) -> list[Path]:
+        roots = self._artifact_allowed_roots()
+        source_root = row.get("source_root_path")
+        if source_root not in (None, ""):
+            roots.append(Path(str(source_root)).expanduser().resolve())
+        return self._dedupe_paths(roots)
+
+    def _artifact_allowed_roots(self) -> list[Path]:
+        return [(self.workspace / ".hikbox" / "artifacts").resolve()]
+
+    @staticmethod
+    def _dedupe_paths(paths: list[Path]) -> list[Path]:
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
 
     def _parse_range(self, *, range_header: str, total_size: int) -> tuple[int, int]:
         header = range_header.strip()

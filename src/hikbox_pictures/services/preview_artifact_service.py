@@ -10,7 +10,6 @@ from hikbox_pictures.repositories import AssetRepo
 from hikbox_pictures.services.asset_pipeline import PREVIEW_CONTEXT_REBUILD_FAILED_ERROR
 from hikbox_pictures.services.observability_service import ObservabilityService
 from hikbox_pictures.services.path_guard import ensure_safe_asset_path
-from hikbox_pictures.services.runtime import resolve_media_allowed_roots
 
 LEGACY_CONTEXT_MAX_SIDE = 48
 CONTEXT_PREVIEW_MIN_SIDE = 160
@@ -44,7 +43,7 @@ class PreviewArtifactService:
             if crop_path_raw:
                 safe_existing = ensure_safe_asset_path(
                     str(crop_path_raw),
-                    [str(p) for p in resolve_media_allowed_roots(self.workspace)],
+                    [str(path) for path in self._allowed_roots_for_row(row)],
                 )
                 if safe_existing.exists() and safe_existing.is_file() and self._is_crop_artifact_usable(row, safe_existing):
                     return str(safe_existing)
@@ -283,11 +282,33 @@ class PreviewArtifactService:
     def _resolve_source_path(self, row: dict[str, object]) -> Path:
         source_path = ensure_safe_asset_path(
             str(row["primary_path"]),
-            [str(p) for p in resolve_media_allowed_roots(self.workspace)],
+            [str(path) for path in self._allowed_roots_for_row(row)],
         )
         if not source_path.exists() or not source_path.is_file():
             raise LookupError(f"媒体文件不存在: {source_path}")
         return source_path
+
+    def _allowed_roots_for_row(self, row: dict[str, object]) -> list[Path]:
+        roots: list[Path] = [self._artifacts_root()]
+        source_root = row.get("source_root_path")
+        if source_root not in (None, ""):
+            roots.append(Path(str(source_root)).expanduser().resolve())
+        return self._dedupe_paths(roots)
+
+    def _artifacts_root(self) -> Path:
+        return (self.workspace / ".hikbox" / "artifacts").resolve()
+
+    @staticmethod
+    def _dedupe_paths(paths: list[Path]) -> list[Path]:
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for path in paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(path)
+        return deduped
 
     def _load_source_image(self, row: dict[str, object]) -> Image.Image:
         return load_oriented_image(self._resolve_source_path(row))

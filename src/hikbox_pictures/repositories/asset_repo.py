@@ -101,10 +101,23 @@ class AssetRepo:
     def get_photo_media(self, photo_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
-            SELECT id, library_source_id, primary_path, primary_fingerprint, live_mov_path, live_mov_fingerprint,
-                   is_heic, processing_status, capture_datetime, capture_month, created_at, updated_at
-            FROM photo_asset
-            WHERE id = ?
+            SELECT pa.id,
+                   pa.library_source_id,
+                   pa.primary_path,
+                   pa.primary_fingerprint,
+                   pa.live_mov_path,
+                   pa.live_mov_fingerprint,
+                   ls.root_path AS source_root_path,
+                   pa.is_heic,
+                   pa.processing_status,
+                   pa.capture_datetime,
+                   pa.capture_month,
+                   pa.created_at,
+                   pa.updated_at
+            FROM photo_asset AS pa
+            LEFT JOIN library_source AS ls
+              ON ls.id = pa.library_source_id
+            WHERE pa.id = ?
             """,
             (int(photo_id),),
         ).fetchone()
@@ -140,10 +153,13 @@ class AssetRepo:
                    fo.crop_path,
                    fo.active,
                    pa.library_source_id,
-                   pa.primary_path
+                   pa.primary_path,
+                   ls.root_path AS source_root_path
             FROM face_observation AS fo
             JOIN photo_asset AS pa
               ON pa.id = fo.photo_asset_id
+            LEFT JOIN library_source AS ls
+              ON ls.id = pa.library_source_id
             WHERE fo.id = ?
             """,
             (int(observation_id),),

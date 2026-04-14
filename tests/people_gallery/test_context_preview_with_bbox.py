@@ -156,3 +156,28 @@ def test_context_artifact_is_written_under_workspace(tmp_path) -> None:
         assert artifact_path.is_file() is True
     finally:
         ws.close()
+
+
+def test_context_endpoint_does_not_depend_on_runtime_allowed_roots_lookup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ws = build_seed_workspace(tmp_path, seed_media_assets=True)
+    try:
+        assert ws.media_observation_id is not None
+        app = create_app(workspace=ws.root)
+
+        def _unexpected_runtime_connect(*_args, **_kwargs):
+            raise RuntimeError("不应在 context 请求里触发运行时数据库连接")
+
+        monkeypatch.setattr(
+            "hikbox_pictures.services.runtime.connect_db",
+            _unexpected_runtime_connect,
+        )
+
+        client = TestClient(app, raise_server_exceptions=False)
+        response = client.get(f"/api/observations/{ws.media_observation_id}/context")
+
+        assert response.status_code == 200
+    finally:
+        ws.close()

@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
+from hikbox_pictures.services.web_query_service import WebQueryService
 
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
@@ -64,3 +65,38 @@ def test_export_preview_page_hides_fake_samples_without_templates(tmp_path) -> N
     assert "当前还没有导出模板" in html
     assert "export-preview-tile" not in html
     assert "export-photo-" not in html
+
+
+def test_export_preview_marks_live_photo_samples(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        assert ws.export_template_id is not None
+        assert ws.export_live_photo_asset_id is not None
+
+        export_page = WebQueryService(ws.conn).get_export_page()
+        template = next(
+            item
+            for item in export_page["templates"]
+            if int(item["id"]) == int(ws.export_template_id)
+        )
+        live_sample = next(
+            sample
+            for sample in template["preview_samples"]
+            if int(sample["photo_asset_id"]) == int(ws.export_live_photo_asset_id)
+        )
+        non_live_sample = next(
+            sample
+            for sample in template["preview_samples"]
+            if int(sample["photo_asset_id"]) != int(ws.export_live_photo_asset_id)
+        )
+
+        assert live_sample["is_live_photo"] is True
+        assert live_sample["live_label"] == "live"
+        assert non_live_sample["is_live_photo"] is False
+
+        client = TestClient(create_app(workspace=ws.root))
+        html = client.get("/exports").text
+
+        assert '<span class="export-preview-tile-badge is-live">live</span>' in html
+    finally:
+        ws.close()

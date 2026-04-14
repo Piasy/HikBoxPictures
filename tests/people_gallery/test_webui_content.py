@@ -239,6 +239,56 @@ def test_reviews_page_groups_similar_new_person_samples(tmp_path) -> None:
         ws.close()
 
 
+def test_reviews_page_sorts_new_person_queue_by_sample_count_desc(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        review_small_a, _ = _append_new_person_review(
+            ws,
+            file_name="small-cluster-a.jpg",
+            vector=np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        review_small_b, _ = _append_new_person_review(
+            ws,
+            file_name="small-cluster-b.jpg",
+            vector=np.asarray([0.98, 0.18, 0.0, 0.0], dtype=np.float32),
+        )
+        review_large_a, _ = _append_new_person_review(
+            ws,
+            file_name="large-cluster-a.jpg",
+            vector=np.asarray([-1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+        )
+        review_large_b, _ = _append_new_person_review(
+            ws,
+            file_name="large-cluster-b.jpg",
+            vector=np.asarray([-0.98, -0.18, 0.0, 0.0], dtype=np.float32),
+        )
+        review_large_c, _ = _append_new_person_review(
+            ws,
+            file_name="large-cluster-c.jpg",
+            vector=np.asarray([-0.96, -0.27, 0.0, 0.0], dtype=np.float32),
+        )
+        ws.conn.commit()
+
+        page = WebQueryService(ws.conn).get_review_page()
+        new_person_queue = next(queue for queue in page["queues"] if queue["review_type"] == "new_person")
+
+        ordered_review_groups = [set(item["review_ids"]) for item in new_person_queue["items"]]
+        assert ordered_review_groups[0] == {review_large_a, review_large_b, review_large_c}
+        assert ordered_review_groups[1] == {review_small_a, review_small_b}
+        assert len(ordered_review_groups[2]) == 1
+
+        client = TestClient(create_app(workspace=ws.root))
+        html = client.get("/reviews").text
+        large_label = f"review #{review_large_a} 等 3 条"
+        small_label = f"review #{review_small_a} 等 2 条"
+
+        assert large_label in html
+        assert small_label in html
+        assert html.index(large_label) < html.index(small_label)
+    finally:
+        ws.close()
+
+
 def test_reviews_fall_back_to_active_cover_when_review_observation_is_inactive(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path, seed_export_assets=True)
     try:
