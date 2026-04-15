@@ -151,7 +151,11 @@ class ScanOrchestrator:
             ),
             progress_reporter=progress_reporter,
         )
-        return execution.run_session(session_id)
+        try:
+            return execution.run_session(session_id)
+        except KeyboardInterrupt:
+            self._mark_session_interrupted(session_id, reason="keyboard_interrupt")
+            raise
 
     def start_or_resume_and_run(
         self,
@@ -172,29 +176,8 @@ class ScanOrchestrator:
                 return {"session_id": None, "status": "idle", "mode": None}
 
             session_id = int(session["id"])
-            if str(session["status"]) in {"pending", "running", "paused"}:
-                self.scan_repo.mark_session_interrupted(session_id)
-                self.scan_repo.mark_session_sources_interrupted(session_id)
-            self.conn.execute("COMMIT")
-
-            interrupted = self.scan_repo.get_session(session_id)
-            if interrupted is None:
-                return {"session_id": session_id, "status": "unknown", "mode": None}
-
-            self.observability.emit_event(
-                level="info",
-                component="scanner",
-                event_type="scan.session.interrupted",
-                message="扫描会话已中断",
-                run_kind="scan",
-                run_id=str(session_id),
-                detail={"status": interrupted["status"]},
-            )
-            return {
-                "session_id": int(interrupted["id"]),
-                "status": interrupted["status"],
-                "mode": interrupted["mode"],
-            }
+            self.conn.execute("ROLLBACK")
+            return self._mark_session_interrupted(session_id)
         except Exception as exc:
             try:
                 self.conn.execute("ROLLBACK")
@@ -261,6 +244,40 @@ class ScanOrchestrator:
                 },
             )
             raise
+
+    def _mark_session_interrupted(self, session_id: int, *, reason: str | None = None) -> dict[str, Any]:
+        try:
+            if self.conn.in_transaction:
+                self.conn.rollback()
+        except Exception:
+            pass
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        self.scan_repo.mark_session_interrupted(session_id)
+        self.scan_repo.mark_session_sources_interrupted(session_id)
+        self.conn.execute("COMMIT")
+
+        interrupted = self.scan_repo.get_session(session_id)
+        if interrupted is None:
+            return {"session_id": int(session_id), "status": "unknown", "mode": None}
+
+        detail: dict[str, Any] = {"status": interrupted["status"]}
+        if reason is not None:
+            detail["reason"] = reason
+        self.observability.emit_event(
+            level="info",
+            component="scanner",
+            event_type="scan.session.interrupted",
+            message="扫描会话已中断",
+            run_kind="scan",
+            run_id=str(session_id),
+            detail=detail,
+        )
+        return {
+            "session_id": int(interrupted["id"]),
+            "status": interrupted["status"],
+            "mode": interrupted["mode"],
+        }
 
     def start_new_and_run(
         self,

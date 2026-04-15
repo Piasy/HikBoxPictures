@@ -266,6 +266,7 @@ def test_project_metadata_points_to_existing_files() -> None:
     assert Path("README.md").is_file()
     assert Path("src/hikbox_pictures/cli.py").is_file()
     assert Path("scripts/install.sh").is_file()
+    assert Path("scripts/run_tests.sh").is_file()
     assert not Path("scripts/inspect_distances.py").exists()
     assert not Path("scripts/extract_faces.py").exists()
     assert not Path("scripts/calibrate_thresholds.py").exists()
@@ -273,8 +274,11 @@ def test_project_metadata_points_to_existing_files() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     install_script = Path("scripts/install.sh").read_text(encoding="utf-8")
     install_script_lower = install_script.lower()
+    run_tests_script = Path("scripts/run_tests.sh").read_text(encoding="utf-8")
+    run_tests_script_lower = run_tests_script.lower()
 
     assert "./scripts/install.sh" in readme
+    assert "./scripts/run_tests.sh" in readme
     assert "--input" not in readme
     assert "--ref-a-dir" not in readme
     assert "--ref-b-dir" not in readme
@@ -289,11 +293,18 @@ def test_project_metadata_points_to_existing_files() -> None:
     assert "`deepface`" not in install_script
     assert "`tf-keras`" not in install_script
 
-    assert "sys.version_info" in install_script
-    assert "3.13" in install_script
-    assert "VENV_PYTHON" in install_script
-    assert '"${VENV_PYTHON}" -m pip install --upgrade pip' in install_script
-    assert '"${VENV_PYTHON}" -m pip install -e' in install_script
+    assert "uv" in install_script_lower
+    assert "3.12" in install_script
+    assert "python install" in install_script_lower
+    assert "uv venv" in install_script_lower
+    assert "playwright install chromium" in install_script_lower
+    assert "setup_playwright_zh_fonts.sh" in install_script
+
+    assert "run_playwright_visual=1" in run_tests_script_lower
+    assert "pytest -q -ra" in run_tests_script_lower
+    assert "\n./scripts/install.sh\n" not in run_tests_script
+    assert "请先执行 ./scripts/install.sh" in run_tests_script
+    assert ".venv/bin/python" in run_tests_script
 
 
 def test_pyproject_dependencies_use_deepface_runtime() -> None:
@@ -305,3 +316,4 @@ def test_pyproject_dependencies_use_deepface_runtime() -> None:
     assert all(not dep.startswith("insightface") for dep in dependencies)
     assert all(not dep.startswith("onnxruntime") for dep in dependencies)
     assert all(not dep.startswith("face_recognition") for dep in dependencies)
+    assert pyproject["project"]["requires-python"] == ">=3.12,<3.13"

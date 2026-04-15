@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hikbox_pictures import cli as cli_module
 from hikbox_pictures.cli import main
+from hikbox_pictures.services import scan_orchestrator as scan_orchestrator_module
 
 
 def test_main_returns_zero_when_called_without_argv() -> None:
@@ -159,3 +160,49 @@ def test_scan_polls_status_snapshot_on_interval(monkeypatch, tmp_path: Path, cap
     assert "status=running" in out_scan
     assert "status=completed" in out_scan
     assert re.search(r"source id=\d+ library_source_id=\d+ status=completed", out_scan) is not None
+
+
+def test_scan_returns_130_and_marks_session_interrupted_on_keyboard_interrupt(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_root = tmp_path / "input"
+    source_root.mkdir(parents=True)
+
+    assert main(["init", "--workspace", str(workspace), "--external-root", str(workspace / ".hikbox")]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "source",
+                "add",
+                "--workspace",
+                str(workspace),
+                "--name",
+                "sample-input",
+                "--root-path",
+                str(source_root),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    def fake_run_session(self, session_id: int) -> dict[str, int]:
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(scan_orchestrator_module.ScanExecutionService, "run_session", fake_run_session)
+
+    raised: BaseException | None = None
+    rc_scan: int | None = None
+    try:
+        rc_scan = main(["scan", "--workspace", str(workspace)])
+    except BaseException as exc:
+        raised = exc
+
+    assert raised is None
+    assert rc_scan == 130
+    out_scan = capsys.readouterr().out
+    assert "status=interrupted" in out_scan

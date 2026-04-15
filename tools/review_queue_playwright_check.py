@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
+from importlib.metadata import PackageNotFoundError, version as package_version
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import Any
@@ -18,10 +19,9 @@ from urllib.request import ProxyHandler, build_opener
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SRC_ROOT = REPO_ROOT / "src"
+DEFAULT_DATASET_ROOT = REPO_ROOT / "tests" / "data" / "e2e-face-input"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
-
-from hikbox_pictures.cli import main as cli_main
 
 
 def _load_fixture_module():
@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         type=Path,
         default=None,
-        help="指定已有工作区；默认优先使用 repo 内的 sample/workspace。",
+        help="指定已有工作区；不传时会基于 tests/data/e2e-face-input 构建临时 workspace。",
     )
     parser.add_argument(
         "--output-dir",
@@ -180,7 +180,14 @@ def _system_has_cjk_font() -> bool:
     return any("DejaVu" not in line for line in lines)
 
 
+def _is_linux_platform() -> bool:
+    return sys.platform.startswith("linux")
+
+
 def _ensure_local_runtime_libs(*, runner_dir: Path) -> dict[str, str]:
+    if not _is_linux_platform():
+        return {}
+
     libs_root = runner_dir / "local-libs"
     package_names = ("libgbm1", "libwayland-server0")
     extracted_dirs: list[Path] = []
@@ -277,6 +284,25 @@ def _ensure_local_cjk_font(*, runner_dir: Path) -> dict[str, str]:
     }
 
 
+def _desired_node_playwright_spec() -> str:
+    try:
+        return f"playwright@{package_version('playwright')}"
+    except PackageNotFoundError:
+        return "playwright"
+
+
+def _read_installed_node_playwright_version(node_modules: Path) -> str | None:
+    package_json = node_modules / "playwright" / "package.json"
+    if not package_json.exists():
+        return None
+    try:
+        payload = json.loads(package_json.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    version = str(payload.get("version", "")).strip()
+    return version or None
+
+
 def _ensure_node_playwright_runner(*, runner_dir: Path, install_browser: bool) -> Path:
     runner_dir.mkdir(parents=True, exist_ok=True)
     package_json = runner_dir / "package.json"
@@ -284,8 +310,11 @@ def _ensure_node_playwright_runner(*, runner_dir: Path, install_browser: bool) -
         _run_command(["npm", "init", "-y"], cwd=runner_dir)
 
     node_modules = runner_dir / "node_modules"
-    if not (node_modules / "playwright").exists():
-        _run_command(["npm", "install", "playwright"], cwd=runner_dir)
+    desired_spec = _desired_node_playwright_spec()
+    desired_version = desired_spec.partition("@")[2] or None
+    installed_version = _read_installed_node_playwright_version(node_modules)
+    if installed_version != desired_version:
+        _run_command(["npm", "install", desired_spec], cwd=runner_dir)
 
     if install_browser:
         _run_command(
@@ -296,55 +325,52 @@ def _ensure_node_playwright_runner(*, runner_dir: Path, install_browser: bool) -
 
 
 def _ensure_font_env(*, runner_dir: Path) -> dict[str, str]:
+    if not _is_linux_platform():
+        return {}
     if _system_has_cjk_font():
         return {}
     return _ensure_local_cjk_font(runner_dir=runner_dir)
 
 
-def _prepare_empty_workspace(path: Path) -> None:
-    path.mkdir(parents=True, exist_ok=True)
-    result = cli_main(["init", "--workspace", str(path)])
-    if result != 0:
-        raise RuntimeError(f"初始化空工作区失败: {path}")
+def _resolve_default_dataset_root() -> Path:
+    dataset_root = DEFAULT_DATASET_ROOT.resolve()
+    if not dataset_root.is_dir():
+        raise FileNotFoundError(f"缺少 reviews Playwright 默认数据集: {dataset_root}")
+    return dataset_root
 
 
 def _prepare_seeded_workspace(path: Path) -> dict[str, Any]:
     fixture_module = _load_fixture_module()
-    build_seed_workspace = fixture_module.build_seed_workspace
-    create_number_image_dataset = fixture_module.create_number_image_dataset
     inject_mock_embeddings_for_assets = fixture_module.inject_mock_embeddings_for_assets
     path.mkdir(parents=True, exist_ok=True)
-    ws = build_seed_workspace(path)
-    try:
-        people_count = len(ws.person_repo.list_people())
-        review_count = len(ws.review_repo.list_open_items())
-    finally:
-        ws.close()
-
-    dataset_dir = path / "review-visual-dataset"
-    create_number_image_dataset(dataset_dir, names=["101.jpg", "102.jpg", "103.jpg"])
-    inject_mock_embeddings_for_assets(
+    dataset_dir = _resolve_default_dataset_root()
+    result = inject_mock_embeddings_for_assets(
         path,
         dataset_dir=dataset_dir,
         person_specs=[
-            {"file_name": "101.jpg", "display_name": "人物A", "vector": [0.11, 0.12, 0.13, 0.14], "locked": True},
-            {"file_name": "102.jpg", "display_name": "人物B", "vector": [0.21, 0.22, 0.23, 0.24], "locked": True},
-            {"file_name": "103.jpg", "display_name": "人物C", "vector": [0.31, 0.32, 0.33, 0.34], "locked": True},
+            {
+                "file_name": "raw/person_a_001.jpg",
+                "display_name": "人物A",
+                "vector": [0.11, 0.12, 0.13, 0.14],
+                "locked": True,
+            },
+            {
+                "file_name": "raw/person_b_001.jpg",
+                "display_name": "人物B",
+                "vector": [0.21, 0.22, 0.23, 0.24],
+                "locked": True,
+            },
+            {
+                "file_name": "raw/person_c_001.jpg",
+                "display_name": "人物C",
+                "vector": [0.31, 0.32, 0.33, 0.34],
+                "locked": True,
+            },
         ],
         template_name="review-visual-template",
     )
-    return {
-        "people_count": people_count,
-        "review_count_before_visual_seed": review_count,
-        "dataset_dir": dataset_dir,
-    }
-
-
-def _resolve_default_workspace() -> Path | None:
-    sample_workspace = REPO_ROOT / "sample" / "workspace"
-    if sample_workspace.exists() and sample_workspace.is_dir():
-        return sample_workspace
-    return None
+    result["dataset_dir"] = dataset_dir
+    return result
 
 
 def _capture_once(
@@ -432,57 +458,35 @@ def main(argv: list[str] | None = None) -> int:
     browser_env.update(_ensure_local_runtime_libs(runner_dir=runner_dir))
     browser_env.update(_ensure_font_env(runner_dir=runner_dir))
 
-    requested_workspace = args.workspace.resolve() if args.workspace else _resolve_default_workspace()
-    results: list[dict[str, Any]]
-    summary: dict[str, Any]
-    if requested_workspace is not None:
-        workspace_result = _run_scenario(
-            mode="seeded",
-            host=args.host,
-            node_modules_dir=node_modules_dir,
-            browser_env=browser_env,
-            workspace=requested_workspace,
-            scenario_dir=output_dir / "captures" / "workspace",
-        )
-        results = [workspace_result]
-        summary = {
-            "output_dir": output_dir,
-            "runner_dir": runner_dir,
-            "font_env": browser_env,
-            "workspace": requested_workspace,
-            "results": results,
-        }
+    seeded_meta: dict[str, Any] | None = None
+    if args.workspace is not None:
+        requested_workspace = args.workspace.resolve()
+        capture_name = "workspace"
     else:
         workspace_root = output_dir / "workspaces"
-        empty_workspace = workspace_root / "empty"
         seeded_workspace = workspace_root / "seeded"
-        _prepare_empty_workspace(empty_workspace)
         seeded_meta = _prepare_seeded_workspace(seeded_workspace)
+        requested_workspace = seeded_workspace
+        capture_name = "seeded"
 
-        empty_result = _run_scenario(
-            mode="empty",
-            host=args.host,
-            node_modules_dir=node_modules_dir,
-            browser_env=browser_env,
-            workspace=empty_workspace,
-            scenario_dir=output_dir / "captures" / "empty",
-        )
-        seeded_result = _run_scenario(
-            mode="seeded",
-            host=args.host,
-            node_modules_dir=node_modules_dir,
-            browser_env=browser_env,
-            workspace=seeded_workspace,
-            scenario_dir=output_dir / "captures" / "seeded",
-        )
-        results = [empty_result, seeded_result]
-        summary = {
-            "output_dir": output_dir,
-            "runner_dir": runner_dir,
-            "font_env": browser_env,
-            "seeded_meta": seeded_meta,
-            "results": results,
-        }
+    workspace_result = _run_scenario(
+        mode="seeded",
+        host=args.host,
+        node_modules_dir=node_modules_dir,
+        browser_env=browser_env,
+        workspace=requested_workspace,
+        scenario_dir=output_dir / "captures" / capture_name,
+    )
+    results = [workspace_result]
+    summary = {
+        "output_dir": output_dir,
+        "runner_dir": runner_dir,
+        "font_env": browser_env,
+        "workspace": requested_workspace,
+        "results": results,
+    }
+    if seeded_meta is not None:
+        summary["seeded_meta"] = seeded_meta
 
     summary_path = output_dir / "review-queue-visual-summary.json"
     summary_path.write_text(
@@ -491,13 +495,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"[review-visual] 输出目录: {output_dir}")
     print(f"[review-visual] 汇总报告: {summary_path}")
-    if requested_workspace is not None:
-        workspace_result = results[0]
+    if args.workspace is not None:
         print(f"[review-visual] workspace 截图: {workspace_result['desktop']['screenshot']}")
     else:
-        empty_result, seeded_result = results
-        print(f"[review-visual] 空库截图: {empty_result['desktop']['screenshot']}")
-        print(f"[review-visual] seed 截图: {seeded_result['desktop']['screenshot']}")
+        print(f"[review-visual] seed 截图: {workspace_result['desktop']['screenshot']}")
     return 0
 
 

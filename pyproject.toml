@@ -7,7 +7,7 @@ name = "hikbox-pictures"
 version = "0.1.0"
 description = "Find photos that contain two specific people and export them by month."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "deepface>=0.0.93",
   "fastapi>=0.116.0",

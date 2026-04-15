@@ -5,7 +5,7 @@ HikBox Pictures 是一个本地运行的图库控制面项目，围绕 workspace
 ## 依赖要求
 
 - macOS
-- Python 3.13+
+- Python 3.12
 - Xcode Command Line Tools
 - `deepface`
 - `tf-keras`
@@ -20,13 +20,18 @@ HikBox Pictures 是一个本地运行的图库控制面项目，围绕 workspace
 ./scripts/install.sh
 ```
 
-安装脚本会创建 `.venv`、升级 `pip`，并安装项目及开发依赖。
+安装脚本会自动完成以下事情：
 
-如需显式指定 Python，可在执行前设置 `PYTHON_BIN`：
+- 检测 `uv`；如果机器上没有，会自动安装到仓库内 `.tools/uv/bin/uv`
+- 下载并固定使用 uv 管理的 Python 3.12，安装位置默认在 `.tools/python`
+- 创建/修复 `.venv`
+- 安装项目及开发依赖
+- 安装 Playwright Chromium 浏览器
+- 准备 Playwright 中文字体
 
-```bash
-PYTHON_BIN=python3.13 ./scripts/install.sh
-```
+这样创建出来的 `.venv` 绑定的是仓库内 uv 管理的 Python 3.12，不依赖系统 Python。
+
+如需显式指定已有的 `uv`，可在执行前设置 `UV_BIN`。
 
 ## 快速开始
 
@@ -120,22 +125,23 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 运行全部测试：
 
 ```bash
-source .venv/bin/activate
-PYTHONPATH=src python3 -m pytest -q
+./scripts/install.sh
+./scripts/run_tests.sh
 ```
+
+该脚本默认带上 `RUN_PLAYWRIGHT_VISUAL=1` 运行全量 pytest；首次运行前先执行一次 `./scripts/install.sh` 准备环境。
 
 只运行 people_gallery：
 
 ```bash
-source .venv/bin/activate
-PYTHONPATH=src python3 -m pytest tests/people_gallery -q
+./scripts/run_tests.sh tests/people_gallery -q
 ```
 
 如需验证真实 DeepFace 主链路，推荐至少运行以下组合：
 
 ```bash
 source .venv/bin/activate
-PYTHONPATH=src python3 -m pytest \
+PYTHONPATH=src python -m pytest \
   tests/people_gallery/test_real_face_pipeline.py \
   tests/people_gallery/test_assignment_with_ann_thresholds.py \
   tests/people_gallery/test_e2e_real_source_pipeline.py -q
@@ -146,12 +152,11 @@ PYTHONPATH=src python3 -m pytest \
 人物库首页视觉检查（Playwright）：
 
 ```bash
+./scripts/install.sh
 source .venv/bin/activate
-./scripts/setup_playwright_zh_fonts.sh
-python3 -m playwright install chromium
-PYTHONPATH=src python3 -m pytest tests/people_gallery/test_webui_people_home_visual_playwright.py -q
+PYTHONPATH=src python -m pytest tests/people_gallery/test_webui_people_home_visual_playwright.py -q
 ```
 
-说明：无 GUI 服务器下若系统缺少 CJK 字体，截图会出现中文乱码。`setup_playwright_zh_fonts.sh` 会在仓库内 `.cache/playwright-fonts/` 下载 Noto Sans CJK SC 并生成局部 `fontconfig`，仅供 Playwright 浏览器进程使用，不影响应用运行时字体配置。
+说明：安装脚本已经会自动安装 Chromium 并准备中文字体。`setup_playwright_zh_fonts.sh` 会在仓库内 `.cache/playwright-fonts/` 下载 Noto Sans CJK SC 并生成局部 `fontconfig`，仅供 Playwright 浏览器进程使用，不影响应用运行时字体配置。
 
 该用例仅覆盖 `GET /` 两种状态：空库态、seed 后人物卡片态；不会触碰 reviews/person detail/exports 页面语义。

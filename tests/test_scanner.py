@@ -50,3 +50,34 @@ def test_find_live_photo_video_matches_lowercase_hidden_mov_on_case_sensitive_gl
     monkeypatch.setattr(Path, "glob", case_sensitive_glob)
 
     assert find_live_photo_video(heic) == mov
+
+
+def test_iter_candidate_photos_does_not_rescan_same_directory_for_each_heic(tmp_path, monkeypatch) -> None:
+    heic_a = tmp_path / "IMG_0100.HEIC"
+    heic_b = tmp_path / "IMG_0101.HEIC"
+    mov_a = tmp_path / ".IMG_0100_123456.MOV"
+    mov_b = tmp_path / ".IMG_0101_123456.MOV"
+
+    heic_a.write_bytes(b"heic-a")
+    heic_b.write_bytes(b"heic-b")
+    mov_a.write_bytes(b"mov-a")
+    mov_b.write_bytes(b"mov-b")
+
+    original_iterdir = Path.iterdir
+    root_iterdir_calls = 0
+
+    def counting_iterdir(self: Path):
+        nonlocal root_iterdir_calls
+        if self == tmp_path:
+            root_iterdir_calls += 1
+            if root_iterdir_calls > 1:
+                raise AssertionError("同一目录不应为每张 HEIC 重复扫描")
+        yield from original_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+    candidates = list(iter_candidate_photos(tmp_path))
+
+    assert [candidate.path.name for candidate in candidates] == ["IMG_0100.HEIC", "IMG_0101.HEIC"]
+    assert candidates[0].live_photo_video == mov_a
+    assert candidates[1].live_photo_video == mov_b

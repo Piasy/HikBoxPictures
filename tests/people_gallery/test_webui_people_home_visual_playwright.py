@@ -21,6 +21,7 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+build_empty_workspace = _MODULE.build_empty_workspace
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _LOCALHOST = "127.0.0.1"
@@ -148,7 +149,8 @@ def _ensure_playwright_zh_font_ready_or_skip() -> None:
 def test_people_home_visual_empty_workspace(tmp_path: Path) -> None:
     sync_api = pytest.importorskip("playwright.sync_api")
     _ensure_playwright_zh_font_ready_or_skip()
-    with _serve_workspace(tmp_path) as base_url:
+    workspace = build_empty_workspace(tmp_path)
+    with _serve_workspace(workspace) as base_url:
         with sync_api.sync_playwright() as playwright:
             browser = _launch_browser_or_skip(playwright)
             try:

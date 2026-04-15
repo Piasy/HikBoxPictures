@@ -3,65 +3,130 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON_VERSION="${PYTHON_VERSION:-3.12}"
 VENV_DIR="${VENV_DIR:-${ROOT_DIR}/.venv}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+LOCAL_UV_DIR="${LOCAL_UV_DIR:-${ROOT_DIR}/.tools/uv/bin}"
+LOCAL_UV_BIN="${LOCAL_UV_DIR}/uv"
+UV_BIN_OVERRIDE="${UV_BIN:-}"
+UV_INSTALLER_URL="${UV_INSTALLER_URL:-https://astral.sh/uv/install.sh}"
 
-echo "[hikbox-pictures] 项目目录: ${ROOT_DIR}"
-echo "[hikbox-pictures] 虚拟环境: ${VENV_DIR}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-${ROOT_DIR}/.cache/uv}"
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-${ROOT_DIR}/.tools/python}"
 
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  echo "未找到 Python 可执行文件: ${PYTHON_BIN}" >&2
-  echo "请先安装 Python 3.13+，或通过 PYTHON_BIN 指定解释器路径。" >&2
+log() {
+  echo "[hikbox-pictures] $*"
+}
+
+fail() {
+  echo "$*" >&2
   exit 1
+}
+
+download_and_install_uv() {
+  mkdir -p "${LOCAL_UV_DIR}"
+  log "未检测到 uv，安装到 ${LOCAL_UV_DIR}"
+  if command -v curl >/dev/null 2>&1; then
+    curl -LsSf "${UV_INSTALLER_URL}" | env UV_UNMANAGED_INSTALL="${LOCAL_UV_DIR}" sh
+    return
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget -qO- "${UV_INSTALLER_URL}" | env UV_UNMANAGED_INSTALL="${LOCAL_UV_DIR}" sh
+    return
+  fi
+  fail "缺少 curl 或 wget，无法自动安装 uv。"
+}
+
+resolve_uv_bin() {
+  if [[ -n "${UV_BIN_OVERRIDE}" ]]; then
+    [[ -x "${UV_BIN_OVERRIDE}" ]] || fail "指定的 UV_BIN 不可执行: ${UV_BIN_OVERRIDE}"
+    echo "${UV_BIN_OVERRIDE}"
+    return
+  fi
+  if [[ -x "${LOCAL_UV_BIN}" ]]; then
+    echo "${LOCAL_UV_BIN}"
+    return
+  fi
+  if command -v uv >/dev/null 2>&1; then
+    command -v uv
+    return
+  fi
+
+  download_and_install_uv
+  [[ -x "${LOCAL_UV_BIN}" ]] || fail "uv 安装后仍不可执行: ${LOCAL_UV_BIN}"
+  echo "${LOCAL_UV_BIN}"
+}
+
+venv_python() {
+  if [[ -x "${VENV_DIR}/bin/python" ]]; then
+    echo "${VENV_DIR}/bin/python"
+    return
+  fi
+  if [[ -x "${VENV_DIR}/bin/python3" ]]; then
+    echo "${VENV_DIR}/bin/python3"
+    return
+  fi
+  echo "${VENV_DIR}/bin/python"
+}
+
+venv_matches_expected_python() {
+  local python_bin
+  python_bin="$(venv_python)"
+  if [[ ! -x "${python_bin}" ]]; then
+    return 1
+  fi
+  "${python_bin}" -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)"
+}
+
+ACTIVE_UV_BIN="$(resolve_uv_bin)"
+VENV_PYTHON="$(venv_python)"
+
+log "项目目录: ${ROOT_DIR}"
+log "uv: ${ACTIVE_UV_BIN}"
+log "uv 缓存目录: ${UV_CACHE_DIR}"
+log "uv Python 目录: ${UV_PYTHON_INSTALL_DIR}"
+log "目标虚拟环境: ${VENV_DIR}"
+
+mkdir -p "${UV_CACHE_DIR}" "${UV_PYTHON_INSTALL_DIR}"
+
+log "确保使用 uv 管理的 Python ${PYTHON_VERSION}"
+"${ACTIVE_UV_BIN}" python install "${PYTHON_VERSION}" --managed-python
+
+if venv_matches_expected_python; then
+  log "复用现有 .venv"
+else
+  clear_args=()
+  if [[ -d "${VENV_DIR}" ]]; then
+    log "重建 .venv，使其绑定 Python ${PYTHON_VERSION}"
+    clear_args=(--clear)
+  else
+    log "创建 .venv"
+  fi
+  log "执行 uv venv，固定虚拟环境解释器"
+  "${ACTIVE_UV_BIN}" venv "${VENV_DIR}" --python "${PYTHON_VERSION}" --managed-python --seed "${clear_args[@]}"
 fi
 
-if ! "${PYTHON_BIN}" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 13) else 1)'; then
-  echo "Python 版本过低：${PYTHON_BIN} 需要 >= 3.13。" >&2
-  echo "请安装 Python 3.13+，或通过 PYTHON_BIN 指定符合要求的解释器。" >&2
-  exit 1
-fi
+VENV_PYTHON="$(venv_python)"
+[[ -x "${VENV_PYTHON}" ]] || fail "虚拟环境 Python 不可用: ${VENV_PYTHON}"
 
-if [[ ! -d "${VENV_DIR}" ]]; then
-  echo "[hikbox-pictures] 创建虚拟环境"
-  "${PYTHON_BIN}" -m venv "${VENV_DIR}"
-fi
+log "安装项目及开发依赖（包含 deepface、tf-keras）"
+"${ACTIVE_UV_BIN}" pip install --python "${VENV_PYTHON}" --editable ".[dev]"
 
-source "${VENV_DIR}/bin/activate"
+log "安装 Playwright Chromium 浏览器"
+"${VENV_PYTHON}" -m playwright install chromium
 
-VENV_PYTHON="${VENV_DIR}/bin/python3"
-if [[ ! -x "${VENV_PYTHON}" ]]; then
-  echo "虚拟环境 Python 不可用: ${VENV_PYTHON}" >&2
-  exit 1
-fi
-
-echo "[hikbox-pictures] 升级 pip"
-"${VENV_PYTHON}" -m pip install --upgrade pip
-
-echo "[hikbox-pictures] 安装项目及开发依赖（包含 deepface、tf-keras）"
-if ! "${VENV_PYTHON}" -m pip install -e '.[dev]'; then
-  cat >&2 <<'ERR'
-安装失败。
-
-请确认：
-1) Python 版本满足 3.13+
-2) 网络可用（首次安装 deepface、tf-keras 与相关模型时需联网）
-3) 系统依赖安装完整（如 TensorFlow / OpenCV 的平台依赖）
-
-然后重新运行：
-  ./scripts/install.sh
-ERR
-  exit 1
-fi
+log "准备 Playwright 中文字体"
+"${ROOT_DIR}/scripts/setup_playwright_zh_fonts.sh"
 
 cat <<DONE
 
 安装完成。
 
-提示：安装脚本会一并安装 deepface 与 tf-keras；首次运行仍可能触发模型下载，需联网，首次启动会明显慢于后续运行。
+当前环境说明：
+- Python 版本固定为 ${PYTHON_VERSION}
+- .venv 由 uv 管理的本地 Python 创建，不依赖系统 Python
+- Chromium 浏览器与 Playwright 中文字体已准备完成
 
-激活虚拟环境：
+常用命令：
   source "${VENV_DIR}/bin/activate"
-
-运行测试：
-  PYTHONPATH=src python3 -m pytest -q
+  ./scripts/run_tests.sh
 DONE

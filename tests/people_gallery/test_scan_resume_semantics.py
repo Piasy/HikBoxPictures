@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+import pytest
+
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
 if _SPEC is None or _SPEC.loader is None:
@@ -16,6 +18,7 @@ build_seed_workspace = _MODULE.build_seed_workspace
 
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.repositories.scan_repo import ScanRepo
+from hikbox_pictures.services import scan_orchestrator as scan_orchestrator_module
 from hikbox_pictures.services.scan_orchestrator import ScanOrchestrator
 
 
@@ -132,3 +135,28 @@ def test_start_or_resume_is_idempotent_under_concurrency(tmp_path) -> None:
         assert int(running["id"]) == session_ids[0]
     finally:
         conn.close()
+
+
+def test_execute_session_marks_running_session_interrupted_on_keyboard_interrupt(tmp_path, monkeypatch) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        orchestrator = ScanOrchestrator(ws.conn)
+        session_id = orchestrator.start_or_resume()
+
+        def fake_run_session(self, session_id: int) -> dict[str, int]:
+            raise KeyboardInterrupt()
+
+        monkeypatch.setattr(scan_orchestrator_module.ScanExecutionService, "run_session", fake_run_session)
+
+        with pytest.raises(KeyboardInterrupt):
+            orchestrator.execute_session(session_id)
+
+        session = ws.scan_repo.get_session(session_id)
+        assert session is not None
+        assert session["status"] == "interrupted"
+        assert session["stopped_at"] is not None
+        source_rows = ws.scan_repo.list_session_sources(session_id)
+        assert source_rows
+        assert all(str(row["status"]) == "interrupted" for row in source_rows)
+    finally:
+        ws.close()

@@ -12,6 +12,7 @@ _MODULE = module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = _MODULE
 _SPEC.loader.exec_module(_MODULE)
 build_seed_workspace = _MODULE.build_seed_workspace
+build_empty_workspace = _MODULE.build_empty_workspace
 
 from hikbox_pictures.services.scan_recovery import mark_stale_running_sessions
 
@@ -85,7 +86,8 @@ def test_stale_running_session_not_marked_when_fresh(tmp_path) -> None:
         ws.close()
 
 
-def test_mark_stale_running_sessions_bootstraps_empty_workspace(tmp_path) -> None:
-    changed = mark_stale_running_sessions(tmp_path, stale_after_seconds=60)
+def test_mark_stale_running_sessions_reads_initialized_empty_workspace(tmp_path) -> None:
+    workspace = build_empty_workspace(tmp_path)
+    changed = mark_stale_running_sessions(workspace, stale_after_seconds=60)
     assert changed == 0
-    assert (tmp_path / ".hikbox" / "library.db").exists()
+    assert (workspace / ".hikbox" / "library.db").exists()

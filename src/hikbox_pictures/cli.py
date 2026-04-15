@@ -368,8 +368,11 @@ def _run_scan_and_print_progress(orchestrator, *, db_path: Path, session_id: int
     _print_scan_session_line(session_id=session_id, status=session["status"], mode=session["mode"])
     poller = _ScanStatusPoller(db_path=db_path, session_id=session_id)
     poller.start()
+    interrupted = False
     try:
         orchestrator.execute_session(session_id)
+    except KeyboardInterrupt:
+        interrupted = True
     finally:
         poller.stop()
 
@@ -381,6 +384,8 @@ def _run_scan_and_print_progress(orchestrator, *, db_path: Path, session_id: int
     final_session_id = final_status.get("session_id")
     if final_session_id is not None and int(final_session_id) == session_id:
         _print_scan_status_snapshot(final_status)
+        if interrupted or str(final_status.get("status")) == "interrupted":
+            return 130
         return 1 if str(final_status.get("status")) == "failed" else 0
 
     session = orchestrator.scan_repo.get_session(session_id)
@@ -389,6 +394,8 @@ def _run_scan_and_print_progress(orchestrator, *, db_path: Path, session_id: int
         return 0
 
     _print_scan_session_line(session_id=session_id, status=session["status"], mode=session["mode"])
+    if interrupted or str(session["status"]) == "interrupted":
+        return 130
     return 1 if str(session["status"]) == "failed" else 0
 
 

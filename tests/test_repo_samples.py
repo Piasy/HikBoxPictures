@@ -28,8 +28,9 @@ def test_readme_mentions_deepface_runtime_basics() -> None:
     readme_lower = readme.lower()
 
     assert "macOS" in readme
-    assert "Python 3.13+" in readme
+    assert "Python 3.12" in readme
     assert "./scripts/install.sh" in readme
+    assert "./scripts/run_tests.sh" in readme
 
     assert "deepface" in readme_lower
     assert "tf-keras" in readme_lower

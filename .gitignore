@@ -1,6 +1,8 @@
 .worktrees/
 .superpowers/
 .cache/
+.tools/
+.hikbox/
 deepface
 sample/
 .DS_Store
