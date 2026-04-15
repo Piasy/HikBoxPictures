@@ -189,6 +189,25 @@ def test_apply_migrations_is_idempotent(tmp_path):
     assert int(row[0]) == 1
 
 
+def test_apply_migrations_does_not_require_write_lock_when_schema_is_current(tmp_path):
+    paths = _init_paths(tmp_path)
+    bootstrap_conn = connect_db(paths.db_path)
+    apply_migrations(bootstrap_conn)
+    bootstrap_conn.close()
+
+    writer_conn = connect_db(paths.db_path)
+    check_conn = connect_db(paths.db_path)
+    check_conn.execute("PRAGMA busy_timeout=100")
+
+    writer_conn.execute("BEGIN IMMEDIATE")
+    try:
+        apply_migrations(check_conn)
+    finally:
+        writer_conn.rollback()
+        writer_conn.close()
+        check_conn.close()
+
+
 def test_apply_migrations_rolls_back_partial_failed_script(tmp_path, monkeypatch):
     migration_dir = tmp_path / "migrations"
     migration_dir.mkdir(parents=True, exist_ok=True)

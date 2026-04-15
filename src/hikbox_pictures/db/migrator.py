@@ -70,8 +70,15 @@ def _split_sql_statements(script: str) -> list[str]:
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
     conn.execute(MIGRATION_TABLE_SQL)
+    applied_versions = {
+        int(row[0])
+        for row in conn.execute("SELECT version FROM schema_migration").fetchall()
+    }
 
     for version, name, migration_path in _iter_migration_files():
+        if version in applied_versions:
+            continue
+
         sql_text = migration_path.read_text(encoding="utf-8")
         statements = _split_sql_statements(sql_text)
         try:
@@ -82,6 +89,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
             ).fetchone()
             if applied is not None:
                 conn.execute("COMMIT")
+                applied_versions.add(version)
                 continue
 
             for statement in statements:
@@ -92,6 +100,7 @@ def apply_migrations(conn: sqlite3.Connection) -> None:
                 (version, name),
             )
             conn.execute("COMMIT")
+            applied_versions.add(version)
         except Exception as exc:
             try:
                 conn.execute("ROLLBACK")
