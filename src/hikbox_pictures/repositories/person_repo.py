@@ -67,6 +67,7 @@ class PersonRepo:
         *,
         prototype_type: str | None = None,
         model_key: str | None = None,
+        person_id: int | None = None,
     ) -> list[dict[str, Any]]:
         sql = """
             SELECT pp.id,
@@ -93,6 +94,9 @@ class PersonRepo:
         if model_key is not None:
             sql += " AND pp.model_key = ?"
             params_list.append(str(model_key))
+        if person_id is not None:
+            sql += " AND pp.person_id = ?"
+            params_list.append(int(person_id))
         params = tuple(params_list)
         sql += " ORDER BY pp.person_id ASC, pp.id ASC"
         rows = self.conn.execute(sql, params).fetchall()

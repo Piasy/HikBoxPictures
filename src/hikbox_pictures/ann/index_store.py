@@ -41,11 +41,8 @@ class AnnIndexStore:
 
         for row in prototypes:
             person_id = int(row["person_id"])
-            vector_blob = row.get("vector_blob")
-            if not isinstance(vector_blob, (bytes, bytearray, memoryview)):
-                continue
-            vector = np.frombuffer(vector_blob, dtype=np.float32).copy()
-            if vector.ndim != 1 or vector.size == 0:
+            vector = self._vector_from_row(row)
+            if vector is None:
                 continue
             if expected_dim is None:
                 expected_dim = int(vector.size)
@@ -64,6 +61,55 @@ class AnnIndexStore:
 
         self._person_ids = np.asarray(person_ids, dtype=np.int64)
         self._vectors = np.vstack(vectors).astype(np.float32, copy=False)
+        self._build_index()
+        self._save()
+        return self.size
+
+    def upsert_person_prototype(self, prototype: Mapping[str, Any]) -> int:
+        person_id = int(prototype["person_id"])
+        vector = self._vector_from_row(prototype)
+        if vector is None:
+            return self.remove_person(person_id)
+        return self.upsert_person_vector(person_id, vector)
+
+    def upsert_person_vector(self, person_id: int, vector: Sequence[float] | Embedding) -> int:
+        normalized = np.asarray(vector, dtype=np.float32).reshape(-1)
+        if normalized.size == 0:
+            raise ValueError("person prototype 不能为空向量")
+
+        if self.size > 0 and self._vectors.shape[1] != int(normalized.size):
+            raise ValueError(
+                f"embedding 维度不匹配: query={int(normalized.size)} index={int(self._vectors.shape[1])}"
+            )
+
+        mask = self._person_ids != int(person_id)
+        kept_person_ids = self._person_ids[mask]
+        kept_vectors = self._vectors[mask] if self.size > 0 else np.empty((0, normalized.size), dtype=np.float32)
+
+        next_person_ids = np.concatenate((kept_person_ids, np.asarray([int(person_id)], dtype=np.int64)))
+        next_vectors = (
+            np.vstack((kept_vectors, normalized.reshape(1, -1)))
+            if kept_vectors.size > 0
+            else normalized.reshape(1, -1).astype(np.float32, copy=False)
+        )
+        order = np.argsort(next_person_ids, kind="stable")
+        self._person_ids = next_person_ids[order]
+        self._vectors = next_vectors[order]
+        self._build_index()
+        self._save()
+        return self.size
+
+    def remove_person(self, person_id: int) -> int:
+        if self.size == 0:
+            return 0
+        mask = self._person_ids != int(person_id)
+        if bool(np.all(mask)):
+            return self.size
+        self._person_ids = self._person_ids[mask]
+        if self._person_ids.size == 0:
+            self._vectors = np.empty((0, 0), dtype=np.float32)
+        else:
+            self._vectors = self._vectors[mask]
         self._build_index()
         self._save()
         return self.size
@@ -147,3 +193,13 @@ class AnnIndexStore:
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
+
+    @staticmethod
+    def _vector_from_row(row: Mapping[str, Any]) -> Embedding | None:
+        vector_blob = row.get("vector_blob")
+        if not isinstance(vector_blob, (bytes, bytearray, memoryview)):
+            return None
+        vector = np.frombuffer(vector_blob, dtype=np.float32).copy()
+        if vector.ndim != 1 or vector.size == 0:
+            return None
+        return vector.astype(np.float32, copy=False)

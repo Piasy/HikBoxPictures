@@ -126,3 +126,33 @@ def test_replace_centroid_prototype_does_not_deactivate_other_model_key(tmp_path
         assert active_map["model-b"] == 1
     finally:
         conn.close()
+
+
+def test_ann_store_upsert_and_remove_single_person_without_full_reload(tmp_path: Path) -> None:
+    ann_store = AnnIndexStore(tmp_path / "prototype_index.npz")
+    ann_store.rebuild_from_prototypes(
+        [
+            {
+                "person_id": 1,
+                "vector_blob": embedding_to_blob(np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32)),
+            },
+            {
+                "person_id": 2,
+                "vector_blob": embedding_to_blob(np.asarray([0.0, 1.0, 0.0, 0.0], dtype=np.float32)),
+            },
+        ]
+    )
+
+    ann_store.upsert_person_prototype(
+        {
+            "person_id": 2,
+            "vector_blob": embedding_to_blob(np.asarray([0.0, 0.0, 1.0, 0.0], dtype=np.float32)),
+        }
+    )
+    first_recall = ann_store.search(np.asarray([0.0, 0.0, 0.95, 0.0], dtype=np.float32), 2)
+    assert first_recall
+    assert int(first_recall[0][0]) == 2
+
+    ann_store.remove_person(2)
+    second_recall = ann_store.search(np.asarray([0.0, 0.0, 0.95, 0.0], dtype=np.float32), 2)
+    assert all(int(person_id) != 2 for person_id, _distance in second_recall)

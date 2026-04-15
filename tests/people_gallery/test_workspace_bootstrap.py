@@ -51,6 +51,7 @@ def test_workspace_layout_and_tables(tmp_path):
         "auto_cluster_member",
         "person",
         "person_face_assignment",
+        "person_face_exclusion",
         "person_prototype",
         "review_item",
         "export_template",

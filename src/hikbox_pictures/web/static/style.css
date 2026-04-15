@@ -255,6 +255,11 @@ body {
   cursor: pointer;
 }
 
+.viewer-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .viewer-status {
   color: var(--muted);
   font-size: 13px;
@@ -314,6 +319,13 @@ body {
 .person-detail-header h2 {
   margin: 4px 0 8px;
   font-size: 30px;
+}
+
+.person-detail-feedback {
+  min-height: 22px;
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .person-detail-kicker {
@@ -430,6 +442,11 @@ body {
   gap: 8px;
 }
 
+.person-detail-viewer-shell .viewer-toolbar [data-action="person-exclude-assignment"] {
+  background: #fff7ed;
+  border-color: rgba(217, 119, 6, 0.24);
+}
+
 .person-detail-viewer-shell .viewer-status {
   margin-left: auto;
 }
@@ -493,6 +510,14 @@ body {
 
 .person-detail-table-wrap {
   overflow-x: auto;
+}
+
+.person-detail-preview-grid-shell {
+  max-height: 640px;
+}
+
+.person-detail-preview-grid {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
 }
 
 .review-hero {

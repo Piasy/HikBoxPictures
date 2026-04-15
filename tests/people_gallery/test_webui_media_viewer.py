@@ -32,6 +32,9 @@ def test_person_detail_contains_media_viewer_layers_and_actions(tmp_path) -> Non
 
         assert 'data-action="viewer-prev"' in html
         assert 'data-action="viewer-next"' in html
+        assert 'data-action="person-exclude-assignment"' in html
         assert 'data-action="viewer-toggle-bbox"' not in html
+        assert "export-preview-grid person-detail-preview-grid" in html
+        assert "<table" not in html
     finally:
         ws.close()

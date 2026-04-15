@@ -29,6 +29,10 @@ class LockAssignmentRequest(BaseModel):
     assignment_id: int
 
 
+class ExcludeAssignmentRequest(BaseModel):
+    assignment_id: int
+
+
 @router.get("/people")
 def list_people(request: Request) -> list[dict[str, object]]:
     conn = connect_db(Path(request.app.state.db_path))
@@ -86,6 +90,25 @@ def lock_person_assignment(person_id: int, payload: LockAssignmentRequest, reque
     conn = connect_db(Path(request.app.state.db_path))
     try:
         return ActionService(conn).lock_person_assignment(
+            person_id=person_id,
+            assignment_id=payload.assignment_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@router.post("/people/{person_id}/actions/exclude-assignment")
+def exclude_person_assignment(person_id: int, payload: ExcludeAssignmentRequest, request: Request) -> dict[str, object]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        return ActionService(
+            conn,
+            ann_artifact_path=request.app.state.workspace_paths.artifacts_dir / "ann" / "prototype_index.npz",
+        ).exclude_person_assignment(
             person_id=person_id,
             assignment_id=payload.assignment_id,
         )

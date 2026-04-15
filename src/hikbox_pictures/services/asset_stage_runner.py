@@ -275,6 +275,13 @@ class AssetStageRunner:
                 prototype_rows=prototype_rows,
                 prototype_vectors=prototype_vectors,
             )
+            excluded_person_ids = set(self.asset_repo.list_excluded_person_ids_for_observation(observation_id))
+            if excluded_person_ids:
+                candidates = [
+                    candidate
+                    for candidate in candidates
+                    if int(candidate["person_id"]) not in excluded_person_ids
+                ]
             if not candidates:
                 self._queue_new_person_review(observation_id, [])
                 continue

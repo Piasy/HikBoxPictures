@@ -66,8 +66,12 @@ class WebQueryService:
                    COALESCE(
                        (
                            SELECT fo.id
-                           FROM face_observation AS fo
+                           FROM person_face_assignment AS pfa
+                           JOIN face_observation AS fo
+                             ON fo.id = pfa.face_observation_id
                            WHERE fo.id = p.cover_observation_id
+                             AND pfa.person_id = p.id
+                             AND pfa.active = 1
                              AND fo.active = 1
                        ),
                        (
@@ -1011,27 +1015,53 @@ class WebQueryService:
                    pfa.updated_at,
                    fo.id AS face_observation_id,
                    pa.id AS photo_asset_id,
-                   pa.primary_path
+                   pa.primary_path,
+                   pa.live_mov_path
             FROM person_face_assignment AS pfa
             JOIN face_observation AS fo
               ON fo.id = pfa.face_observation_id
             JOIN photo_asset AS pa
               ON pa.id = fo.photo_asset_id
             WHERE pfa.person_id = ?
+              AND pfa.active = 1
+              AND fo.active = 1
             ORDER BY pfa.id ASC
             """,
             (int(person_id),),
         ).fetchall()
         assignment_rows = [dict(row) for row in assignments]
-        viewer_items = [
-            {
-                "label": f"assignment-{row['id']}",
-                "crop_url": f"/api/observations/{row['face_observation_id']}/crop",
-                "context_url": f"/api/observations/{row['face_observation_id']}/context",
-                "original_url": f"/api/photos/{row['photo_asset_id']}/original",
-            }
-            for row in assignment_rows
-        ]
+        viewer_items: list[dict[str, Any]] = []
+        for index, row in enumerate(assignment_rows):
+            observation_id = int(row["face_observation_id"])
+            photo_id = int(row["photo_asset_id"])
+            crop_url = f"/api/observations/{observation_id}/crop"
+            context_url = f"/api/observations/{observation_id}/context"
+            original_url = f"/api/photos/{photo_id}/original"
+            file_name = Path(str(row["primary_path"])).name if row.get("primary_path") else f"图片#{photo_id}"
+            is_live_photo = bool(row.get("live_mov_path"))
+            viewer_label = f"{file_name} · 样本 #{observation_id} · 图片 #{photo_id}"
+            if is_live_photo:
+                viewer_label += " · live"
+
+            row["preview_url"] = crop_url
+            row["crop_url"] = crop_url
+            row["context_url"] = context_url
+            row["original_url"] = original_url
+            row["viewer_index"] = index
+            row["viewer_label"] = viewer_label
+            row["file_name"] = file_name
+            row["is_live_photo"] = is_live_photo
+            row["live_label"] = "live" if is_live_photo else None
+            viewer_items.append(
+                {
+                    "label": viewer_label,
+                    "crop_url": crop_url,
+                    "context_url": context_url,
+                    "original_url": original_url,
+                    "assignment_id": int(row["id"]),
+                    "observation_id": observation_id,
+                }
+            )
         return {
             "person": {
                 "id": person["id"],

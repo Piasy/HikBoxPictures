@@ -10,11 +10,15 @@
   function parseViewerItems(root) {
     var rows = root.querySelectorAll(".viewer-items li");
     return Array.prototype.map.call(rows, function (row) {
+      var assignmentId = Number(row.getAttribute("data-assignment-id"));
+      var observationId = Number(row.getAttribute("data-observation-id"));
       return {
         label: row.getAttribute("data-label") || "",
         cropUrl: row.getAttribute("data-crop-url") || "",
         contextUrl: row.getAttribute("data-context-url") || "",
-        originalUrl: row.getAttribute("data-original-url") || ""
+        originalUrl: row.getAttribute("data-original-url") || "",
+        assignmentId: Number.isFinite(assignmentId) && assignmentId > 0 ? assignmentId : null,
+        observationId: Number.isFinite(observationId) && observationId > 0 ? observationId : null
       };
     });
   }
@@ -67,7 +71,9 @@
         detail: {
           index: index,
           total: items.length,
-          label: item.label || ""
+          label: item.label || "",
+          assignmentId: item.assignmentId,
+          observationId: item.observationId
         }
       })
     );
@@ -98,6 +104,14 @@
     return document.querySelector(".media-viewer");
   }
 
+  function currentViewerItem(target) {
+    var viewer = pickViewer(target);
+    if (!viewer || !viewer.__viewerItems || !viewer.__viewerItems.length) {
+      return null;
+    }
+    return viewer.__viewerItems[viewer.__viewerIndex || 0] || null;
+  }
+
   window.hikboxViewer = {
     prev: function (target) {
       var viewer = pickViewer(target);
@@ -126,6 +140,9 @@
       nextIndex = Math.max(0, Math.min(Math.floor(nextIndex), viewer.__viewerItems.length - 1));
       viewer.__viewerIndex = nextIndex;
       render(viewer);
+    },
+    currentItem: function (target) {
+      return currentViewerItem(target);
     }
   };
 
@@ -219,6 +236,123 @@
       return;
     }
     node.textContent = message || "";
+  }
+
+  function setPersonDetailFeedback(message) {
+    var node = document.querySelector("[data-person-feedback]");
+    if (!node) {
+      return;
+    }
+    node.textContent = message || "";
+  }
+
+  function bindPersonDetailPreviewFocus() {
+    var buttons = document.querySelectorAll("[data-person-focus-index]");
+    if (!buttons.length) {
+      return;
+    }
+
+    function syncActiveButton(index, shouldScroll) {
+      var activeButton = null;
+      buttons.forEach(function (button) {
+        var isActive = button.getAttribute("data-person-focus-index") === String(index);
+        button.classList.toggle("is-active", isActive);
+        button.setAttribute("aria-pressed", isActive ? "true" : "false");
+        if (isActive) {
+          activeButton = button;
+        }
+      });
+      if (shouldScroll && activeButton && typeof activeButton.scrollIntoView === "function") {
+        activeButton.scrollIntoView({
+          block: "nearest",
+          inline: "nearest"
+        });
+      }
+    }
+
+    buttons.forEach(function (button) {
+      button.addEventListener("click", function () {
+        var index = button.getAttribute("data-person-focus-index");
+        if (!index) {
+          return;
+        }
+        window.hikboxViewer.select(undefined, index);
+        syncActiveButton(index, true);
+        var label = button.getAttribute("data-person-focus-label");
+        if (label) {
+          setPersonDetailFeedback("已定位样本: " + label);
+        }
+      });
+    });
+
+    var detailPage = document.querySelector(".person-detail-page");
+    if (detailPage) {
+      detailPage.addEventListener("hikbox:viewer-change", function (event) {
+        if (!event.detail || !Number.isFinite(event.detail.index)) {
+          return;
+        }
+        syncActiveButton(event.detail.index, true);
+        var excludeButton = detailPage.querySelector('[data-action="person-exclude-assignment"]');
+        if (excludeButton) {
+          excludeButton.disabled = !Number.isFinite(event.detail.assignmentId) || Number(event.detail.assignmentId) <= 0;
+        }
+      });
+    }
+
+    var viewer = document.querySelector(".person-detail-page .media-viewer");
+    if (viewer && Number.isFinite(viewer.__viewerIndex)) {
+      syncActiveButton(viewer.__viewerIndex, false);
+    }
+  }
+
+  function bindPersonDetailExcludeAction() {
+    var button = document.querySelector('[data-action="person-exclude-assignment"]');
+    if (!button) {
+      return;
+    }
+    button.addEventListener("click", function () {
+      var personId = button.getAttribute("data-person-id");
+      var currentItem = window.hikboxViewer.currentItem();
+      var assignmentId = currentItem && Number(currentItem.assignmentId);
+      if (!personId) {
+        setPersonDetailFeedback("失败: person_id 缺失");
+        return;
+      }
+      if (!Number.isFinite(assignmentId) || assignmentId <= 0) {
+        setPersonDetailFeedback("失败: 当前样本没有可排除的归属记录");
+        return;
+      }
+      button.disabled = true;
+      setPersonDetailFeedback("排除中...");
+      fetch("/api/people/" + personId + "/actions/exclude-assignment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assignment_id: assignmentId })
+      })
+        .then(parseJsonResponse)
+        .then(function (result) {
+          if (!result.ok) {
+            button.disabled = false;
+            var detail = result.payload && result.payload.detail ? String(result.payload.detail) : "请求失败";
+            setPersonDetailFeedback("失败: " + detail);
+            return;
+          }
+          var remaining =
+            result.payload && Object.prototype.hasOwnProperty.call(result.payload, "remaining_sample_count")
+              ? String(result.payload.remaining_sample_count)
+              : "-";
+          var reviewId =
+            result.payload && Object.prototype.hasOwnProperty.call(result.payload, "review_id")
+              ? String(result.payload.review_id)
+              : "-";
+          setPersonDetailFeedback("完成: 已排除并重建，remaining=" + remaining + " review_id=" + reviewId);
+          window.location.reload();
+        })
+        .catch(function (error) {
+          button.disabled = false;
+          setPersonDetailFeedback("失败: " + (error && error.message ? error.message : "网络错误"));
+        });
+    });
   }
 
   function bindReviewEvidenceFocus(root) {
@@ -841,6 +975,9 @@
 
   if (page === "sources") {
     bindScanActions();
+  } else if (page === "people") {
+    bindPersonDetailPreviewFocus();
+    bindPersonDetailExcludeAction();
   } else if (page === "reviews") {
     var reviewQueues = document.querySelector(".review-queues");
     bindReviewEvidenceFocus(reviewQueues || document);

@@ -137,6 +137,11 @@ class PersonTruthService:
             return False
         if int(assignment["locked"]) == 1:
             return False
+        if self.asset_repo.is_person_observation_excluded(
+            person_id=int(candidate_person_id),
+            face_observation_id=int(assignment["face_observation_id"]),
+        ):
+            return False
 
         candidate = self.person_repo.get_person(int(candidate_person_id))
         if candidate is None or candidate["status"] != "active":

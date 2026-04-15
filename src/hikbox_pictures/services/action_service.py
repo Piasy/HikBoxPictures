@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict
 from datetime import datetime
 import json
+from pathlib import Path
 from typing import Any, Callable, Sequence
 
 try:
@@ -10,16 +11,18 @@ try:
 except ModuleNotFoundError:
     import pysqlite3 as sqlite3  # type: ignore[no-redef]
 
+from hikbox_pictures.ann import AnnIndexStore
 from hikbox_pictures.repositories import PersonRepo
 from hikbox_pictures.repositories import ExportRepo
 from hikbox_pictures.repositories import ReviewRepo
 from hikbox_pictures.services.export_delivery_service import ExportDeliveryService
 from hikbox_pictures.services.export_match_service import ExportMatchService
 from hikbox_pictures.services.person_truth_service import PersonTruthService
+from hikbox_pictures.services.prototype_service import PrototypeService
 
 
 class ActionService:
-    def __init__(self, conn: sqlite3.Connection) -> None:
+    def __init__(self, conn: sqlite3.Connection, *, ann_artifact_path: Path | None = None) -> None:
         self.conn = conn
         self.person_repo = PersonRepo(conn)
         self.review_repo = ReviewRepo(conn)
@@ -27,6 +30,7 @@ class ActionService:
         self.person_truth_service = PersonTruthService(conn)
         self.export_match_service = ExportMatchService(conn)
         self.export_delivery_service = ExportDeliveryService(conn)
+        self.ann_artifact_path = Path(ann_artifact_path) if ann_artifact_path is not None else None
 
     def rename_person(self, person_id: int, display_name: str) -> dict[str, Any]:
         clean_name = display_name.strip()
@@ -85,6 +89,75 @@ class ActionService:
             "person_id": row["person_id"],
             "locked": bool(row["locked"]),
             "assignment_source": row["assignment_source"],
+        }
+
+    def exclude_person_assignment(self, person_id: int, assignment_id: int) -> dict[str, Any]:
+        if self.ann_artifact_path is None:
+            raise RuntimeError("exclude_person_assignment 缺少 ann_artifact_path")
+
+        person = self.person_repo.get_person(int(person_id))
+        if person is None:
+            raise LookupError(f"person {person_id} 不存在")
+
+        assignment = self.person_truth_service.asset_repo.get_assignment(int(assignment_id))
+        if assignment is None:
+            raise LookupError(f"assignment {assignment_id} 不存在")
+        if int(assignment["person_id"]) != int(person_id):
+            raise ValueError(f"assignment {assignment_id} 不属于 person {person_id}")
+        if int(assignment["active"]) != 1:
+            raise ValueError(f"assignment {assignment_id} 不是 active 状态")
+
+        observation_id = int(assignment["face_observation_id"])
+        embedding_row = self.person_truth_service.asset_repo.get_face_embedding(observation_id)
+        model_key = str(embedding_row["model_key"]) if embedding_row is not None and embedding_row["model_key"] else None
+
+        try:
+            excluded = self.person_truth_service.asset_repo.deactivate_assignment(
+                int(assignment_id),
+                person_id=int(person_id),
+            )
+            if excluded == 0:
+                raise RuntimeError(f"assignment {assignment_id} 排除失败")
+
+            exclusion_id = self.person_truth_service.asset_repo.upsert_assignment_exclusion(
+                person_id=int(person_id),
+                face_observation_id=observation_id,
+                assignment_id=int(assignment_id),
+                reason="manual_exclude",
+            )
+            review_id = self._ensure_excluded_observation_review(
+                observation_id=observation_id,
+                excluded_person_id=int(person_id),
+                model_key=model_key,
+            )
+            prototype_service = PrototypeService(
+                self.conn,
+                self.person_repo,
+                AnnIndexStore(self.ann_artifact_path),
+            )
+            prototype_active = prototype_service.rebuild_person_prototype(
+                person_id=int(person_id),
+                model_key=model_key,
+            )
+            ann_size = prototype_service.sync_person_ann_entry(
+                person_id=int(person_id),
+                model_key=model_key,
+            )
+            remaining_sample_count = self._count_active_assignments_for_person(int(person_id))
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+
+        return {
+            "assignment_id": int(assignment_id),
+            "person_id": int(person_id),
+            "face_observation_id": observation_id,
+            "exclusion_id": int(exclusion_id),
+            "review_id": int(review_id),
+            "remaining_sample_count": remaining_sample_count,
+            "prototype_active": bool(prototype_active),
+            "ann_index_size": int(ann_size),
         }
 
     def dismiss_review(self, review_id: int, *, review_ids: Sequence[int] | None = None) -> dict[str, Any]:
@@ -542,6 +615,10 @@ class ActionService:
     def _assign_single_observation(self, *, person_id: int, observation_id: int) -> None:
         active_assignment = self.person_truth_service.asset_repo.get_active_assignment_for_observation(int(observation_id))
         if active_assignment is None:
+            self.person_truth_service.asset_repo.deactivate_assignment_exclusion(
+                person_id=int(person_id),
+                face_observation_id=int(observation_id),
+            )
             self.person_truth_service.asset_repo.create_assignment(
                 person_id=int(person_id),
                 face_observation_id=int(observation_id),
@@ -555,6 +632,10 @@ class ActionService:
         current_person_id = int(active_assignment["person_id"])
         is_locked = int(active_assignment["locked"]) == 1
         if current_person_id == int(person_id):
+            self.person_truth_service.asset_repo.deactivate_assignment_exclusion(
+                person_id=int(person_id),
+                face_observation_id=int(observation_id),
+            )
             if is_locked:
                 return
             locked = self.person_truth_service.asset_repo.lock_assignment(assignment_id, person_id=int(person_id))
@@ -574,12 +655,62 @@ class ActionService:
         if updated == 0:
             raise RuntimeError(f"assignment {assignment_id} 更新失败")
 
+        self.person_truth_service.asset_repo.deactivate_assignment_exclusion(
+            person_id=int(person_id),
+            face_observation_id=int(observation_id),
+        )
         locked = self.person_truth_service.asset_repo.lock_assignment(
             assignment_id,
             person_id=int(person_id),
         )
         if locked == 0:
             raise RuntimeError(f"assignment {assignment_id} 锁定失败")
+
+    def _ensure_excluded_observation_review(
+        self,
+        *,
+        observation_id: int,
+        excluded_person_id: int,
+        model_key: str | None,
+    ) -> int:
+        existing = self.review_repo.find_open_item_for_observation(int(observation_id))
+        if existing is not None:
+            return int(existing["id"])
+
+        payload = json.dumps(
+            {
+                "face_observation_id": int(observation_id),
+                "candidates": [],
+                "model_key": model_key,
+                "source": "manual_exclude",
+                "excluded_person_id": int(excluded_person_id),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return int(
+            self.review_repo.create_review_item(
+                "new_person",
+                payload_json=payload,
+                priority=25,
+                face_observation_id=int(observation_id),
+            )
+        )
+
+    def _count_active_assignments_for_person(self, person_id: int) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM person_face_assignment AS pfa
+            JOIN face_observation AS fo
+              ON fo.id = pfa.face_observation_id
+            WHERE pfa.person_id = ?
+              AND pfa.active = 1
+              AND fo.active = 1
+            """,
+            (int(person_id),),
+        ).fetchone()
+        return int(row["c"]) if row is not None else 0
 
     def _resolve_review_batch(self, review_ids: Sequence[int]) -> int:
         updated_count = 0

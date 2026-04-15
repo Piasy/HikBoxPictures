@@ -498,6 +498,23 @@ class AssetRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def deactivate_assignment(self, assignment_id: int, *, person_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person_face_assignment
+            SET active = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND person_id = ?
+              AND active = 1
+            """,
+            (
+                int(assignment_id),
+                int(person_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
     def get_active_assignment_for_observation(self, face_observation_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
@@ -656,6 +673,99 @@ class AssetRepo:
             ),
         )
         return int(cursor.rowcount)
+
+    def upsert_assignment_exclusion(
+        self,
+        *,
+        person_id: int,
+        face_observation_id: int,
+        assignment_id: int | None,
+        reason: str = "manual_exclude",
+    ) -> int:
+        self.conn.execute(
+            """
+            INSERT INTO person_face_exclusion(
+                person_id,
+                face_observation_id,
+                assignment_id,
+                reason,
+                active
+            )
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(person_id, face_observation_id)
+            DO UPDATE SET
+                assignment_id = COALESCE(excluded.assignment_id, person_face_exclusion.assignment_id),
+                reason = excluded.reason,
+                active = 1,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (
+                int(person_id),
+                int(face_observation_id),
+                int(assignment_id) if assignment_id is not None else None,
+                reason,
+            ),
+        )
+        row = self.conn.execute(
+            """
+            SELECT id
+            FROM person_face_exclusion
+            WHERE person_id = ?
+              AND face_observation_id = ?
+            LIMIT 1
+            """,
+            (int(person_id), int(face_observation_id)),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("person_face_exclusion 写入失败，未找到对应记录")
+        return int(row["id"])
+
+    def deactivate_assignment_exclusion(self, *, person_id: int, face_observation_id: int) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person_face_exclusion
+            SET active = 0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE person_id = ?
+              AND face_observation_id = ?
+              AND active = 1
+            """,
+            (
+                int(person_id),
+                int(face_observation_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def is_person_observation_excluded(self, *, person_id: int, face_observation_id: int) -> bool:
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM person_face_exclusion
+            WHERE person_id = ?
+              AND face_observation_id = ?
+              AND active = 1
+            LIMIT 1
+            """,
+            (
+                int(person_id),
+                int(face_observation_id),
+            ),
+        ).fetchone()
+        return row is not None
+
+    def list_excluded_person_ids_for_observation(self, face_observation_id: int) -> list[int]:
+        rows = self.conn.execute(
+            """
+            SELECT person_id
+            FROM person_face_exclusion
+            WHERE face_observation_id = ?
+              AND active = 1
+            ORDER BY person_id ASC
+            """,
+            (int(face_observation_id),),
+        ).fetchall()
+        return [int(row["person_id"]) for row in rows]
 
     def count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) AS c FROM photo_asset").fetchone()

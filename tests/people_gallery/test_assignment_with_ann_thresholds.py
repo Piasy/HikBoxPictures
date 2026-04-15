@@ -215,3 +215,63 @@ def test_assignment_stage_survives_stale_ann_dimension_and_rebuilds_index(tmp_pa
         assert int(recalled[0][0]) == 1
     finally:
         ws.close()
+
+
+def test_assignment_stage_skips_excluded_person_candidates(tmp_path: Path) -> None:
+    ws = build_seed_workspace(tmp_path)
+    try:
+        source_id = int(ws.source_repo.list_sources(active=True)[0]["id"])
+        asset_id = ws.asset_repo.add_photo_asset(
+            source_id,
+            str((tmp_path / "assignment-excluded-person.jpg").resolve()),
+            processing_status="embeddings_done",
+        )
+        observation_id = _insert_observation(ws.conn, asset_id)
+        _insert_embedding(ws.conn, observation_id, [0.01, 0.0, 0.0, 0.0])
+        ws.person_repo.replace_centroid_prototype(
+            person_id=1,
+            vector_blob=embedding_to_blob(np.asarray([0.0, 0.0, 0.0, 0.0], dtype=np.float32)),
+            model_key=_MODEL_KEY,
+        )
+        ws.asset_repo.upsert_assignment_exclusion(
+            person_id=1,
+            face_observation_id=observation_id,
+            assignment_id=None,
+            reason="manual_exclude",
+        )
+
+        ann_store = AnnIndexStore(ws.paths.artifacts_dir / "ann" / "prototype_index.npz")
+        ann_store.rebuild_from_prototypes(
+            ws.person_repo.list_active_prototypes(
+                prototype_type="centroid",
+                model_key=_MODEL_KEY,
+            )
+        )
+        ws.conn.commit()
+
+        session_id = ws.scan_repo.create_session(mode="incremental", status="running", started=True)
+        session_source_id = ws.scan_repo.create_session_source(session_id, source_id, status="running")
+        ws.conn.commit()
+
+        result = AssetStageRunner(ws.conn).run_stage(session_source_id, "assignment")
+
+        assignment = ws.asset_repo.get_active_assignment_for_observation(observation_id)
+        review_item = ws.conn.execute(
+            """
+            SELECT review_type, payload_json
+            FROM review_item
+            WHERE face_observation_id = ?
+              AND status = 'open'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (observation_id,),
+        ).fetchone()
+
+        assert result["assignment_done_count"] >= 1
+        assert assignment is None
+        assert review_item is not None
+        assert review_item["review_type"] == "new_person"
+        assert json.loads(str(review_item["payload_json"]))["candidates"] == []
+    finally:
+        ws.close()

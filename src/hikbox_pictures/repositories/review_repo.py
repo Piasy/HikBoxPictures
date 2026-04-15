@@ -79,6 +79,22 @@ class ReviewRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def find_open_item_for_observation(self, observation_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, review_type, payload_json, priority, status,
+                   primary_person_id, secondary_person_id, face_observation_id,
+                   created_at, resolved_at
+            FROM review_item
+            WHERE face_observation_id = ?
+              AND status = 'open'
+            ORDER BY priority DESC, id ASC
+            LIMIT 1
+            """,
+            (int(observation_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     def dismiss_item(self, review_id: int) -> int:
         cursor = self.conn.execute(
             """

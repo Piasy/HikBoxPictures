@@ -117,6 +117,71 @@ class PrototypeService:
 
         return rebuilt_count
 
+    def rebuild_person_prototype(self, *, person_id: int, model_key: str | None = None) -> bool:
+        resolved_model_key = self.resolve_default_model_key(preferred=model_key)
+        if resolved_model_key is None:
+            return False
+
+        person = self.person_repo.get_person(int(person_id))
+        if person is None:
+            raise LookupError(f"person {person_id} 不存在")
+        if str(person["status"]) != "active" or bool(person["ignored"]):
+            self.person_repo.deactivate_active_centroid_prototypes(
+                person_id=int(person_id),
+                model_key=resolved_model_key,
+            )
+            return False
+
+        rows = self.conn.execute(
+            """
+            SELECT fe.vector_blob
+            FROM person_face_assignment AS pfa
+            JOIN face_embedding AS fe
+              ON fe.face_observation_id = pfa.face_observation_id
+             AND fe.feature_type = 'face'
+            WHERE pfa.person_id = ?
+              AND pfa.active = 1
+              AND fe.model_key = ?
+              AND fe.normalized = 1
+            ORDER BY pfa.id ASC
+            """,
+            (int(person_id), resolved_model_key),
+        ).fetchall()
+
+        samples: list[np.ndarray[Any, np.dtype[np.float32]]] = []
+        expected_dim: int | None = None
+        for row in rows:
+            vector_blob = row["vector_blob"]
+            if not isinstance(vector_blob, (bytes, bytearray, memoryview)):
+                continue
+            vector = np.frombuffer(vector_blob, dtype=np.float32).copy()
+            if vector.ndim != 1 or vector.size == 0:
+                continue
+            if expected_dim is None:
+                expected_dim = int(vector.size)
+            elif int(vector.size) != expected_dim:
+                continue
+            samples.append(vector.astype(np.float32, copy=False))
+
+        if not samples:
+            self.person_repo.deactivate_active_centroid_prototypes(
+                person_id=int(person_id),
+                model_key=resolved_model_key,
+            )
+            return False
+
+        centroid = np.mean(np.vstack(samples), axis=0).astype(np.float32, copy=False)
+        norm = float(np.linalg.norm(centroid))
+        if norm > 0:
+            centroid = centroid / norm
+        self.person_repo.replace_centroid_prototype(
+            person_id=int(person_id),
+            vector_blob=embedding_to_blob(centroid),
+            model_key=resolved_model_key,
+            quality_score=float(len(samples)),
+        )
+        return True
+
     def rebuild_ann_index_from_active_prototypes(self, *, model_key: str | None = None) -> int:
         resolved_model_key = self.resolve_default_model_key(preferred=model_key)
         if resolved_model_key is None:
@@ -126,3 +191,27 @@ class PrototypeService:
             model_key=resolved_model_key,
         )
         return self.ann_index_store.rebuild_from_prototypes(prototypes)
+
+    def sync_person_ann_entry(self, *, person_id: int, model_key: str | None = None) -> int:
+        resolved_model_key = self.resolve_default_model_key(preferred=model_key)
+        if resolved_model_key is None:
+            return self.ann_index_store.remove_person(int(person_id))
+
+        prototypes = self.person_repo.list_active_prototypes(
+            prototype_type="centroid",
+            model_key=resolved_model_key,
+            person_id=int(person_id),
+        )
+        if not prototypes:
+            return self.ann_index_store.remove_person(int(person_id))
+
+        try:
+            return self.ann_index_store.upsert_person_prototype(prototypes[0])
+        except ValueError as exc:
+            if "维度不匹配" not in str(exc):
+                raise
+            all_prototypes = self.person_repo.list_active_prototypes(
+                prototype_type="centroid",
+                model_key=resolved_model_key,
+            )
+            return self.ann_index_store.rebuild_from_prototypes(all_prototypes)

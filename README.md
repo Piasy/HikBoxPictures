@@ -89,6 +89,7 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `POST /api/people/{id}/actions/merge`
 - `POST /api/people/{id}/actions/split`
 - `POST /api/people/{id}/actions/lock-assignment`
+- `POST /api/people/{id}/actions/exclude-assignment`
 - `GET /api/reviews`
 - `POST /api/reviews/{id}/actions/dismiss`
 - `POST /api/reviews/{id}/actions/resolve`

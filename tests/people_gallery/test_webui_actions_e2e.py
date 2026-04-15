@@ -37,13 +37,17 @@ def test_web_viewer_actions_visible_in_people_reviews_exports(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path, seed_export_assets=True)
     try:
         client = TestClient(create_app(workspace=ws.root))
-        pages = ("/people/1", "/reviews", "/exports")
-        for path in pages:
-            response = client.get(path)
-            assert response.status_code == 200
-            html = response.text
+        person_html = client.get("/people/1").text
+        review_html = client.get("/reviews").text
+        export_html = client.get("/exports").text
+
+        for html in (person_html, review_html, export_html):
             assert 'data-action="viewer-prev"' in html
             assert 'data-action="viewer-next"' in html
             assert 'data-action="viewer-toggle-bbox"' not in html
+
+        assert 'data-action="person-exclude-assignment"' in person_html
+        assert 'data-action="person-exclude-assignment"' not in review_html
+        assert 'data-action="person-exclude-assignment"' not in export_html
     finally:
         ws.close()

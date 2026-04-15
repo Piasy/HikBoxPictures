@@ -50,6 +50,7 @@ def person_detail_page(person_id: int, request: Request) -> HTMLResponse:
                 "person": detail["person"],
                 "assignments": detail["assignments"],
                 "viewer_items": detail["viewer_items"],
+                "viewer_enable_exclude": True,
             },
         )
     finally:
