@@ -122,6 +122,30 @@ def test_people_page_shows_cover_and_metrics_when_assignments_exist(tmp_path) ->
         ws.close()
 
 
+def test_person_detail_assignment_tiles_use_original_photo_urls(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        detail = WebQueryService(ws.conn).get_person_detail(1)
+        assert detail is not None
+        assignments = detail["assignments"]
+        assert assignments
+        for assignment in assignments:
+            assert assignment["preview_url"] == assignment["original_url"]
+            assert assignment["preview_url"] != assignment["crop_url"]
+
+        client = TestClient(create_app(workspace=ws.root))
+        html = client.get("/people/1").text
+
+        tile_srcs = re.findall(
+            r'class="export-preview-tile person-detail-preview-tile"[\s\S]*?<img src="([^"]+)"',
+            html,
+        )
+        assert tile_srcs
+        assert all(src.startswith("/api/photos/") and src.endswith("/original") for src in tile_srcs)
+    finally:
+        ws.close()
+
+
 def test_reviews_page_has_typed_queues(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path)
     try:

@@ -116,6 +116,7 @@ def exports_page(request: Request) -> HTMLResponse:
                 "templates": export_page["templates"],
                 "available_people": export_page["available_people"],
                 "viewer_items": export_page["viewer_items"],
+                "viewer_show_evidence_people": True,
                 "default_output_root": str(workspace_paths.exports_dir),
             },
         )

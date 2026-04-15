@@ -1,6 +1,7 @@
 <section class="media-viewer" data-viewer-index="0">
   <header class="viewer-toolbar">
     {% set initial = viewer_items[0] if viewer_items else None %}
+    {% set initial_evidence_people = initial.evidence_people if initial and initial.evidence_people else [] %}
     <button type="button" data-action="viewer-prev">上一张</button>
     <button type="button" data-action="viewer-next">下一张</button>
     {% if viewer_enable_exclude %}
@@ -20,11 +21,41 @@
   <div class="viewer-layers" data-viewer-layers>
     <figure class="viewer-frame" data-viewer-slot="crop">
       <figcaption class="viewer-frame-label">人脸裁剪</figcaption>
+      {% if viewer_show_evidence_people %}
+      <div data-viewer-layer="crop" class="viewer-evidence-list is-crop{% if not initial_evidence_people %} is-empty{% endif %}">
+        {% if initial_evidence_people %}
+          {% for person in initial_evidence_people %}
+          <article class="viewer-evidence-card">
+            <img src="{{ person.crop_url }}" alt="{{ person.display_name }} 人脸裁剪" loading="lazy" />
+            <span>{{ person.display_name }} · #{{ person.observation_id }}</span>
+          </article>
+          {% endfor %}
+        {% else %}
+        <p class="viewer-evidence-placeholder">暂无样本</p>
+        {% endif %}
+      </div>
+      {% else %}
       <img data-viewer-layer="crop" alt="人脸裁剪" src="{{ initial.crop_url if initial else '' }}" {% if not initial %}class="is-empty"{% endif %} />
+      {% endif %}
     </figure>
     <figure class="viewer-frame" data-viewer-slot="context">
       <figcaption class="viewer-frame-label">场景定位（带框）</figcaption>
+      {% if viewer_show_evidence_people %}
+      <div data-viewer-layer="context" class="viewer-evidence-list is-context{% if not initial_evidence_people %} is-empty{% endif %}">
+        {% if initial_evidence_people %}
+          {% for person in initial_evidence_people %}
+          <article class="viewer-evidence-card">
+            <img src="{{ person.context_url }}" alt="{{ person.display_name }} 场景定位" loading="lazy" />
+            <span>{{ person.display_name }} · #{{ person.observation_id }}</span>
+          </article>
+          {% endfor %}
+        {% else %}
+        <p class="viewer-evidence-placeholder">暂无样本</p>
+        {% endif %}
+      </div>
+      {% else %}
       <img data-viewer-layer="context" alt="场景定位（带框）" src="{{ initial.context_url if initial else '' }}" {% if not initial %}class="is-empty"{% endif %} />
+      {% endif %}
     </figure>
     <figure class="viewer-frame" data-viewer-slot="original">
       <figcaption class="viewer-frame-label">原图</figcaption>
@@ -39,6 +70,7 @@
       data-crop-url="{{ item.crop_url }}"
       data-context-url="{{ item.context_url }}"
       data-original-url="{{ item.original_url }}"
+      {% if item.evidence_people is defined and item.evidence_people %}data-evidence-people='{{ item.evidence_people|tojson }}'{% endif %}
       {% if item.assignment_id is defined and item.assignment_id is not none %}data-assignment-id="{{ item.assignment_id }}"{% endif %}
       {% if item.observation_id is defined and item.observation_id is not none %}data-observation-id="{{ item.observation_id }}"{% endif %}
     ></li>

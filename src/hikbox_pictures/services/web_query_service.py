@@ -1043,7 +1043,7 @@ class WebQueryService:
             if is_live_photo:
                 viewer_label += " · live"
 
-            row["preview_url"] = crop_url
+            row["preview_url"] = original_url
             row["crop_url"] = crop_url
             row["context_url"] = context_url
             row["original_url"] = original_url
@@ -1090,6 +1090,11 @@ class WebQueryService:
 
     def get_export_page(self, *, preview_limit_per_template: int | None = None) -> dict[str, Any]:
         templates = self._list_export_template_rows()
+        all_people = self.list_people()
+        people_by_id = {
+            int(person["id"]): person
+            for person in all_people
+        }
         available_people = [
             {
                 "id": int(person["id"]),
@@ -1099,14 +1104,13 @@ class WebQueryService:
                 "ignored": bool(person["ignored"]),
                 "badge": "已确认" if bool(person["confirmed"]) else "未确认",
             }
-            for person in self.list_people()
+            for person in all_people
             if str(person["status"]) == "active" and not bool(person["ignored"])
         ]
         safe_limit: int | None = None
         if preview_limit_per_template is not None:
             safe_limit = max(1, min(int(preview_limit_per_template), 200))
         viewer_items: list[dict[str, Any]] = []
-        viewer_index_by_observation: dict[int, int] = {}
 
         enriched_templates: list[dict[str, Any]] = []
         for template in templates:
@@ -1115,8 +1119,8 @@ class WebQueryService:
                 self._build_export_template_preview(
                     template=enriched,
                     sample_limit=safe_limit,
+                    people_by_id=people_by_id,
                     viewer_items=viewer_items,
-                    viewer_index_by_observation=viewer_index_by_observation,
                 )
             )
             enriched_templates.append(enriched)
@@ -1157,8 +1161,8 @@ class WebQueryService:
         *,
         template: dict[str, Any],
         sample_limit: int | None,
+        people_by_id: dict[int, dict[str, Any]],
         viewer_items: list[dict[str, Any]],
-        viewer_index_by_observation: dict[int, int],
     ) -> dict[str, Any]:
         template_id = int(template["id"])
         required_person_ids = self.export_repo.list_template_person_ids(template_id)
@@ -1183,9 +1187,9 @@ class WebQueryService:
             }
 
         matches = list(plan["matches"])
-        representative_observation_ids = self._resolve_export_preview_observation_ids(
+        preview_evidence_by_photo = self._resolve_export_preview_evidence_by_photo(
             photo_asset_ids={int(match.photo_asset_id) for match in matches},
-            required_person_ids=set(int(person_id) for person_id in required_person_ids),
+            required_person_ids=[int(person_id) for person_id in required_person_ids],
             start_datetime=plan["template"].get("start_datetime"),
             end_datetime=plan["template"].get("end_datetime"),
         )
@@ -1193,17 +1197,45 @@ class WebQueryService:
         preview_matches = matches if sample_limit is None else matches[:sample_limit]
         preview_samples: list[dict[str, Any]] = []
         for match in preview_matches:
-            observation_id = representative_observation_ids.get(int(match.photo_asset_id))
+            sample_detail = preview_evidence_by_photo.get(
+                int(match.photo_asset_id),
+                {
+                    "representative_observation_id": None,
+                    "people": [],
+                },
+            )
             bucket_label = self._format_export_bucket(match.bucket.value)
             is_live_photo = match.live_mov_path is not None
             viewer_badge_label = f"{bucket_label} · live" if is_live_photo else bucket_label
-            viewer_index = self._ensure_export_viewer_item(
+            preview_people: list[dict[str, Any]] = []
+            for person_preview in sample_detail["people"]:
+                person_id = int(person_preview["person_id"])
+                observation_id = int(person_preview["observation_id"])
+                display_name = str(
+                    people_by_id.get(person_id, {}).get(
+                        "display_name",
+                        f"人物 #{person_id}",
+                    )
+                )
+                preview_people.append(
+                    {
+                        "person_id": person_id,
+                        "display_name": display_name,
+                        "observation_id": observation_id,
+                        "crop_url": f"/api/observations/{observation_id}/crop",
+                        "context_url": f"/api/observations/{observation_id}/context",
+                    }
+                )
+            observation_id = sample_detail["representative_observation_id"]
+            if observation_id is None and preview_people:
+                observation_id = int(preview_people[0]["observation_id"])
+            viewer_index = self._append_export_viewer_item(
                 template_name=str(template["name"]),
-                observation_id=observation_id,
                 photo_id=int(match.photo_asset_id),
                 bucket_label=viewer_badge_label,
+                representative_observation_id=observation_id,
+                preview_people=preview_people,
                 viewer_items=viewer_items,
-                viewer_index_by_observation=viewer_index_by_observation,
             )
             preview_samples.append(
                 {
@@ -1214,6 +1246,7 @@ class WebQueryService:
                     "preview_url": f"/api/photos/{match.photo_asset_id}/preview",
                     "viewer_label": f"{template['name']} · 照片 #{match.photo_asset_id} · {viewer_badge_label}",
                     "viewer_index": viewer_index,
+                    "preview_people": preview_people,
                 }
             )
 
@@ -1225,17 +1258,18 @@ class WebQueryService:
             "preview_error": None,
         }
 
-    def _resolve_export_preview_observation_ids(
+    def _resolve_export_preview_evidence_by_photo(
         self,
         *,
         photo_asset_ids: set[int],
-        required_person_ids: set[int],
+        required_person_ids: list[int],
         start_datetime: str | None,
         end_datetime: str | None,
-    ) -> dict[int, int]:
+    ) -> dict[int, dict[str, Any]]:
         if not photo_asset_ids:
             return {}
 
+        required_person_id_set = {int(person_id) for person_id in required_person_ids}
         grouped: dict[int, dict[int, dict[str, Any]]] = {}
         for row in self.export_repo.list_assets_with_faces(
             start_datetime=start_datetime,
@@ -1262,7 +1296,7 @@ class WebQueryService:
             if person_id is not None:
                 observation["person_ids"].add(int(person_id))
 
-        representative_by_photo: dict[int, int] = {}
+        preview_by_photo: dict[int, dict[str, Any]] = {}
         for photo_id, observations in grouped.items():
             matched_candidates: list[tuple[float, int, int]] = []
             fallback_candidates: list[tuple[float, int, int]] = []
@@ -1271,42 +1305,65 @@ class WebQueryService:
                 candidate = (area, -int(observation_id), int(observation_id))
                 fallback_candidates.append(candidate)
                 person_ids = set(int(person_id) for person_id in observation["person_ids"])
-                if person_ids and person_ids.issubset(required_person_ids):
+                if person_ids and person_ids.issubset(required_person_id_set):
                     matched_candidates.append(candidate)
 
+            preview_people: list[dict[str, int]] = []
+            for required_person_id in required_person_ids:
+                person_candidates: list[tuple[float, int, int]] = []
+                for observation_id, observation in observations.items():
+                    person_ids = set(int(person_id) for person_id in observation["person_ids"])
+                    if int(required_person_id) not in person_ids:
+                        continue
+                    area = float(observation["face_area_ratio"]) if observation["face_area_ratio"] is not None else -1.0
+                    person_candidates.append((area, -int(observation_id), int(observation_id)))
+                selected_person_observation = max(person_candidates, default=None)
+                if selected_person_observation is None:
+                    continue
+                preview_people.append(
+                    {
+                        "person_id": int(required_person_id),
+                        "observation_id": int(selected_person_observation[2]),
+                    }
+                )
+
             selected = max(matched_candidates or fallback_candidates, default=None)
-            if selected is None:
-                continue
-            representative_by_photo[int(photo_id)] = int(selected[2])
+            preview_by_photo[int(photo_id)] = {
+                "representative_observation_id": int(selected[2]) if selected is not None else None,
+                "people": preview_people,
+            }
 
-        return representative_by_photo
+        return preview_by_photo
 
-    def _ensure_export_viewer_item(
+    def _append_export_viewer_item(
         self,
         *,
         template_name: str,
-        observation_id: int | None,
         photo_id: int,
         bucket_label: str,
+        representative_observation_id: int | None,
+        preview_people: list[dict[str, Any]],
         viewer_items: list[dict[str, Any]],
-        viewer_index_by_observation: dict[int, int],
-    ) -> int | None:
-        if observation_id is None:
-            return None
-        clean_observation_id = int(observation_id)
-        if clean_observation_id in viewer_index_by_observation:
-            return viewer_index_by_observation[clean_observation_id]
-
+    ) -> int:
         viewer_index = len(viewer_items)
+        crop_url = ""
+        context_url = ""
+        if preview_people:
+            crop_url = str(preview_people[0]["crop_url"])
+            context_url = str(preview_people[0]["context_url"])
+        elif representative_observation_id is not None:
+            crop_url = f"/api/observations/{int(representative_observation_id)}/crop"
+            context_url = f"/api/observations/{int(representative_observation_id)}/context"
         viewer_items.append(
             {
                 "label": f"{template_name} · 照片 #{int(photo_id)} · {bucket_label}",
-                "crop_url": f"/api/observations/{clean_observation_id}/crop",
-                "context_url": f"/api/observations/{clean_observation_id}/context",
+                "crop_url": crop_url,
+                "context_url": context_url,
                 "original_url": f"/api/photos/{int(photo_id)}/original",
+                "evidence_people": preview_people,
+                "observation_id": int(representative_observation_id) if representative_observation_id is not None else None,
             }
         )
-        viewer_index_by_observation[clean_observation_id] = viewer_index
         return viewer_index
 
     @staticmethod

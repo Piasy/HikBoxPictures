@@ -1,6 +1,7 @@
 .worktrees/
 .superpowers/
 .cache/
+.tmp/
 .tools/
 .hikbox/
 deepface

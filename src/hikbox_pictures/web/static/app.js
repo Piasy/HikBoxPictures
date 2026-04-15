@@ -12,11 +12,32 @@
     return Array.prototype.map.call(rows, function (row) {
       var assignmentId = Number(row.getAttribute("data-assignment-id"));
       var observationId = Number(row.getAttribute("data-observation-id"));
+      var evidencePeopleRaw = row.getAttribute("data-evidence-people");
+      var evidencePeople = [];
+      if (evidencePeopleRaw) {
+        try {
+          evidencePeople = JSON.parse(evidencePeopleRaw);
+        } catch (error) {
+          evidencePeople = [];
+        }
+      }
+      if (!Array.isArray(evidencePeople)) {
+        evidencePeople = [];
+      }
       return {
         label: row.getAttribute("data-label") || "",
         cropUrl: row.getAttribute("data-crop-url") || "",
         contextUrl: row.getAttribute("data-context-url") || "",
         originalUrl: row.getAttribute("data-original-url") || "",
+        evidencePeople: evidencePeople.map(function (person) {
+          var observation = Number(person && person.observation_id);
+          return {
+            displayName: person && person.display_name ? String(person.display_name) : "",
+            observationId: Number.isFinite(observation) && observation > 0 ? observation : null,
+            cropUrl: person && person.crop_url ? String(person.crop_url) : "",
+            contextUrl: person && person.context_url ? String(person.context_url) : ""
+          };
+        }),
         assignmentId: Number.isFinite(assignmentId) && assignmentId > 0 ? assignmentId : null,
         observationId: Number.isFinite(observationId) && observationId > 0 ? observationId : null
       };
@@ -25,7 +46,7 @@
 
   function setLayerSrc(root, layer, url) {
     var target = root.querySelector('[data-viewer-layer="' + layer + '"]');
-    if (!target) {
+    if (!target || target.tagName !== "IMG") {
       return;
     }
     target.setAttribute("src", url || "");
@@ -34,6 +55,45 @@
     } else {
       target.classList.add("is-empty");
     }
+  }
+
+  function renderEvidenceLayer(root, layer, people) {
+    var target = root.querySelector('[data-viewer-layer="' + layer + '"]');
+    if (!target || target.tagName === "IMG") {
+      return;
+    }
+    while (target.firstChild) {
+      target.removeChild(target.firstChild);
+    }
+    if (!people || !people.length) {
+      target.classList.add("is-empty");
+      var placeholder = document.createElement("p");
+      placeholder.className = "viewer-evidence-placeholder";
+      placeholder.textContent = "暂无样本";
+      target.appendChild(placeholder);
+      return;
+    }
+    target.classList.remove("is-empty");
+    people.forEach(function (person) {
+      var card = document.createElement("article");
+      card.className = "viewer-evidence-card";
+
+      var image = document.createElement("img");
+      image.loading = "lazy";
+      image.src = layer === "crop" ? person.cropUrl : person.contextUrl;
+      image.alt = (person.displayName || "样本") + (layer === "crop" ? " 人脸裁剪" : " 场景定位");
+
+      var label = document.createElement("span");
+      var text = person.displayName || "未命名人物";
+      if (Number.isFinite(person.observationId) && person.observationId > 0) {
+        text += " · #" + person.observationId;
+      }
+      label.textContent = text;
+
+      card.appendChild(image);
+      card.appendChild(label);
+      target.appendChild(card);
+    });
   }
 
   function render(root) {
@@ -56,6 +116,8 @@
     }
 
     var item = items[index];
+    renderEvidenceLayer(root, "crop", item.evidencePeople);
+    renderEvidenceLayer(root, "context", item.evidencePeople);
     setLayerSrc(root, "crop", item.cropUrl);
     setLayerSrc(root, "context", item.contextUrl);
     setLayerSrc(root, "original", item.originalUrl);

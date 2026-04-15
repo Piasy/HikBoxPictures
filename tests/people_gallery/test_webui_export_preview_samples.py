@@ -102,3 +102,33 @@ def test_export_preview_marks_live_photo_samples(tmp_path) -> None:
         assert '<span class="export-preview-tile-badge is-live">live</span>' in html
     finally:
         ws.close()
+
+
+def test_export_preview_exposes_selected_people_crop_and_context_evidence(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        export_page = WebQueryService(ws.conn).get_export_page()
+        template = next(
+            item
+            for item in export_page["templates"]
+            if int(item["id"]) == int(ws.export_template_id)
+        )
+        sample = template["preview_samples"][0]
+        viewer_item = export_page["viewer_items"][int(sample["viewer_index"])]
+
+        assert [person["display_name"] for person in sample["preview_people"]] == ["人物A", "人物B"]
+        assert [person["display_name"] for person in viewer_item["evidence_people"]] == ["人物A", "人物B"]
+        assert all(person["crop_url"].startswith("/api/observations/") for person in viewer_item["evidence_people"])
+        assert all(person["context_url"].startswith("/api/observations/") for person in viewer_item["evidence_people"])
+
+        client = TestClient(create_app(workspace=ws.root))
+        html = client.get("/exports").text
+
+        assert 'data-viewer-layer="crop"' in html
+        assert 'data-viewer-layer="context"' in html
+        assert "export-preview-evidence-list" not in html
+        for person in viewer_item["evidence_people"]:
+            assert person["crop_url"] in html
+            assert person["context_url"] in html
+    finally:
+        ws.close()
