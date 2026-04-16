@@ -23,7 +23,7 @@ from hikbox_pictures.deepface_engine import (
 from hikbox_pictures.ann import AnnIndexStore
 from hikbox_pictures.image_io import load_oriented_image
 from hikbox_pictures.metadata import resolve_capture_fields
-from hikbox_pictures.repositories import AssetRepo, PersonRepo, ReviewRepo, ScanRepo
+from hikbox_pictures.repositories import AssetRepo, IdentityRepo, PersonRepo, ReviewRepo, ScanRepo
 from hikbox_pictures.services.ann_assignment_service import AnnAssignmentService
 from hikbox_pictures.services.asset_pipeline import (
     DEFAULT_AUTO_ASSIGN_THRESHOLD,
@@ -33,6 +33,7 @@ from hikbox_pictures.services.asset_pipeline import (
     previous_status_for_stage,
     statuses_at_or_above,
 )
+from hikbox_pictures.services.observation_quality_backfill_service import ObservationQualityBackfillService
 from hikbox_pictures.workspace import load_workspace_paths_from_db_path
 
 _PROGRESS_FLUSH_INTERVAL_SECONDS = 5.0
@@ -72,6 +73,7 @@ class AssetStageRunner:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
         self.asset_repo = AssetRepo(conn)
+        self.identity_repo = IdentityRepo(conn)
         self.person_repo = PersonRepo(conn)
         self.review_repo = ReviewRepo(conn)
         self.scan_repo = ScanRepo(conn)
@@ -237,6 +239,7 @@ class AssetStageRunner:
 
     def _run_embeddings_stage(self, asset_id: int, scan_session_id: int) -> None:
         observations = self.asset_repo.list_active_face_observations(asset_id)
+        observation_ids: list[int] = []
         for observation in observations:
             observation_id = int(observation["id"])
             crop_path = self._ensure_face_crop(observation_id)
@@ -246,6 +249,16 @@ class AssetStageRunner:
                 vector_blob=embedding_to_blob(embedding),
                 model_key=self.face_engine.model_key,
                 dimension=int(embedding.size),
+            )
+            observation_ids.append(observation_id)
+
+        if observation_ids:
+            active_profile = self.identity_repo.get_active_profile()
+            profile_id = int(active_profile["id"]) if active_profile is not None else None
+            ObservationQualityBackfillService(self.conn).backfill_observations(
+                observation_ids=observation_ids,
+                profile_id=profile_id,
+                update_profile_quantiles=False,
             )
 
         self.asset_repo.mark_stage_done_if_current(

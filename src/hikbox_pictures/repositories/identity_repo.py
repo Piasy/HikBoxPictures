@@ -23,6 +23,12 @@ class IdentityRepo:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_profile_required(self, profile_id: int) -> dict[str, Any]:
+        profile = self.get_profile(profile_id)
+        if profile is None:
+            raise ValueError(f"threshold profile 不存在: {int(profile_id)}")
+        return profile
+
     def get_active_profile(self) -> dict[str, Any] | None:
         row = self.conn.execute(
             """

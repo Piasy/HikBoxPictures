@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 try:
     import sqlite3
@@ -1080,3 +1080,213 @@ def seed_active_identity_threshold_profile(
         "candidate_profile": dict(candidate),
         "workspace_embedding_binding": binding,
     }
+
+
+@dataclass
+class IdentityRealWorkspace:
+    root: Path
+    paths: WorkspacePaths
+    conn: sqlite3.Connection
+    profile_id: int
+    observation_ids: list[int]
+    photo_ids: list[int]
+    _pick_cursor: int = 0
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def pick_observation_with_crop(self) -> int:
+        if not self.observation_ids:
+            raise RuntimeError("当前工作区没有可用 observation")
+        index = self._pick_cursor % len(self.observation_ids)
+        self._pick_cursor += 1
+        return int(self.observation_ids[index])
+
+    def pick_observation_and_photo(self) -> tuple[int, int]:
+        if not self.observation_ids or not self.photo_ids:
+            raise RuntimeError("当前工作区缺少 observation/photo 数据")
+        return int(self.observation_ids[0]), int(self.photo_ids[0])
+
+    def break_crop_for_observation(self, observation_id: int) -> None:
+        row = self.conn.execute(
+            """
+            SELECT crop_path
+            FROM face_observation
+            WHERE id = ?
+            """,
+            (int(observation_id),),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"observation {observation_id} 不存在")
+        crop_path = row["crop_path"]
+        if crop_path:
+            Path(str(crop_path)).unlink(missing_ok=True)
+
+    def break_original_for_photo(self, photo_id: int) -> None:
+        row = self.conn.execute(
+            """
+            SELECT primary_path
+            FROM photo_asset
+            WHERE id = ?
+            """,
+            (int(photo_id),),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"photo {photo_id} 不存在")
+        Path(str(row["primary_path"])).unlink(missing_ok=True)
+
+    def get_observation(self, observation_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, photo_asset_id, face_area_ratio, sharpness_score, quality_score, crop_path, pose_score
+            FROM face_observation
+            WHERE id = ?
+            """,
+            (int(observation_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_profile(self, profile_id: int) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM identity_threshold_profile
+            WHERE id = ?
+            """,
+            (int(profile_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
+def _write_checker_image(target: Path, *, size: int = 160, cell: int = 8) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    canvas = np.zeros((size, size, 3), dtype=np.uint8)
+    for row in range(size):
+        for col in range(size):
+            checker = ((row // cell) + (col // cell)) % 2
+            value = 240 if checker == 0 else 16
+            canvas[row, col] = [value, value, value]
+    Image.fromarray(canvas, mode="RGB").save(target, format="JPEG", quality=95)
+
+
+def _write_blurry_checker_image(target: Path, *, size: int = 160, cell: int = 8) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    sharp_path = target.with_name(f"{target.stem}_sharp{target.suffix}")
+    _write_checker_image(sharp_path, size=size, cell=cell)
+    with Image.open(sharp_path) as image:
+        blurred = image.filter(ImageFilter.GaussianBlur(radius=4.0))
+        blurred.save(target, format="JPEG", quality=95)
+    sharp_path.unlink(missing_ok=True)
+
+
+def _crop_from_original(original_path: Path, crop_path: Path, *, left: int, top: int, right: int, bottom: int) -> None:
+    crop_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(original_path) as image:
+        image.crop((left, top, right, bottom)).convert("RGB").save(crop_path, format="JPEG", quality=95)
+
+
+def build_identity_real_workspace(root: Path) -> IdentityRealWorkspace:
+    paths = init_workspace_layout(root, root / ".hikbox")
+    conn = connect_db(paths.db_path)
+    apply_migrations(conn)
+    source_repo = SourceRepo(conn)
+    asset_repo = AssetRepo(conn)
+
+    source_root = paths.root / "identity-real-input"
+    source_root.mkdir(parents=True, exist_ok=True)
+    photo_a_path = source_root / "sharp-a.jpg"
+    photo_b_path = source_root / "blurry-b.jpg"
+    _write_checker_image(photo_a_path)
+    _write_blurry_checker_image(photo_b_path)
+
+    source_id = source_repo.add_source(
+        "identity-real-source",
+        str(source_root.resolve()),
+        root_fingerprint="fp-identity-real",
+        active=True,
+    )
+    photo_a_id = asset_repo.add_photo_asset(source_id, str(photo_a_path.resolve()), processing_status="faces_done")
+    photo_b_id = asset_repo.add_photo_asset(source_id, str(photo_b_path.resolve()), processing_status="faces_done")
+
+    crops_dir = paths.artifacts_dir / "face-crops" / "seed"
+    crop_a = crops_dir / "obs-a.jpg"
+    crop_b = crops_dir / "obs-b.jpg"
+    _crop_from_original(photo_a_path, crop_a, left=24, top=24, right=136, bottom=136)
+    _crop_from_original(photo_b_path, crop_b, left=24, top=24, right=136, bottom=136)
+
+    observation_ids: list[int] = []
+    for photo_id, crop_path, area_ratio in (
+        (photo_a_id, crop_a, 0.49),
+        (photo_b_id, crop_b, 0.21),
+    ):
+        cursor = conn.execute(
+            """
+            INSERT INTO face_observation(
+                photo_asset_id,
+                bbox_top,
+                bbox_right,
+                bbox_bottom,
+                bbox_left,
+                face_area_ratio,
+                crop_path,
+                detector_key,
+                detector_version,
+                active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                int(photo_id),
+                0.15,
+                0.85,
+                0.85,
+                0.15,
+                float(area_ratio),
+                str(crop_path.resolve()),
+                "fixture",
+                "identity-real-v1",
+            ),
+        )
+        observation_id = int(cursor.lastrowid)
+        observation_ids.append(observation_id)
+        vector = np.asarray([0.11, 0.22, 0.33, 0.44], dtype=np.float32)
+        conn.execute(
+            """
+            INSERT INTO face_embedding(
+                face_observation_id,
+                feature_type,
+                model_key,
+                dimension,
+                vector_blob,
+                normalized
+            )
+            VALUES (?, 'face', 'pipeline-stub-v1', ?, ?, 1)
+            ON CONFLICT(face_observation_id, feature_type)
+            DO UPDATE SET
+                model_key = excluded.model_key,
+                dimension = excluded.dimension,
+                vector_blob = excluded.vector_blob,
+                normalized = excluded.normalized,
+                generated_at = CURRENT_TIMESTAMP
+            """,
+            (observation_id, int(vector.size), vector.tobytes()),
+        )
+
+    seed = seed_active_identity_threshold_profile(
+        conn,
+        overrides={
+            "area_log_p10": -4.0,
+            "area_log_p90": -1.0,
+            "sharpness_log_p10": 0.1,
+            "sharpness_log_p90": 5.0,
+        },
+    )
+
+    return IdentityRealWorkspace(
+        root=paths.root,
+        paths=paths,
+        conn=conn,
+        profile_id=int(seed["active_profile_id"]),
+        observation_ids=observation_ids,
+        photo_ids=[int(photo_a_id), int(photo_b_id)],
+    )

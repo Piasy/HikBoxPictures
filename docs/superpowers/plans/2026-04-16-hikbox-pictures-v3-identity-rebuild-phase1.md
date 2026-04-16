@@ -653,7 +653,7 @@ git commit -m "feat: harden identity threshold profile roundtrip contract (Task 
 - Create: `tests/people_gallery/test_observation_quality_backfill_service.py`
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 
-- [ ] **Step 1: 写失败测试，锁定真实 I/O 回填 + area/sharpness 分位点回传 + 导入 profile 不被覆盖**
+- [x] **Step 1: 写失败测试，锁定真实 I/O 回填 + area/sharpness 分位点回传 + 导入 profile 不被覆盖**
 
 ```python
 # tests/people_gallery/test_observation_quality_backfill_service.py
@@ -725,12 +725,12 @@ def test_backfill_can_update_profile_quantiles_when_explicitly_enabled(identity_
     assert float(profile["sharpness_log_p90"]) > float(profile["sharpness_log_p10"])
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_observation_quality_backfill_service.py -v`
 Expected: FAIL（真实 backfill 服务不存在）。
 
-- [ ] **Step 3: 实现 backfill_all_observations() 真实链路（不得 fixture 直写分数）**
+- [x] **Step 3: 实现 backfill_all_observations() 真实链路（不得 fixture 直写分数）**
 
 ```python
 # src/hikbox_pictures/services/observation_quality_backfill_service.py
@@ -796,7 +796,7 @@ class QualityScoreService:
         ))
 ```
 
-- [ ] **Step 4: 运行回填链路测试 + 真实数据冒烟**
+- [x] **Step 4: 运行回填链路测试 + 真实数据冒烟**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_observation_quality_backfill_service.py tests/people_gallery/test_real_face_pipeline.py -q`
 Expected: PASS（含真实图片链路）。

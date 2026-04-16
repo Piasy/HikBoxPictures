@@ -334,6 +334,99 @@ class AssetRepo:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_active_observations_for_quality_backfill(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT fo.id,
+                   fo.photo_asset_id,
+                   fo.bbox_top,
+                   fo.bbox_right,
+                   fo.bbox_bottom,
+                   fo.bbox_left,
+                   fo.face_area_ratio,
+                   fo.sharpness_score,
+                   fo.pose_score,
+                   fo.quality_score,
+                   fo.crop_path,
+                   fo.active,
+                   pa.primary_path
+            FROM face_observation AS fo
+            JOIN photo_asset AS pa
+              ON pa.id = fo.photo_asset_id
+            WHERE fo.active = 1
+            ORDER BY fo.id ASC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_active_observations_for_quality_backfill_by_ids(
+        self,
+        observation_ids: list[int],
+    ) -> list[dict[str, Any]]:
+        if not observation_ids:
+            return []
+        placeholders = ", ".join("?" for _ in observation_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT fo.id,
+                   fo.photo_asset_id,
+                   fo.bbox_top,
+                   fo.bbox_right,
+                   fo.bbox_bottom,
+                   fo.bbox_left,
+                   fo.face_area_ratio,
+                   fo.sharpness_score,
+                   fo.pose_score,
+                   fo.quality_score,
+                   fo.crop_path,
+                   fo.active,
+                   pa.primary_path
+            FROM face_observation AS fo
+            JOIN photo_asset AS pa
+              ON pa.id = fo.photo_asset_id
+            WHERE fo.active = 1
+              AND fo.id IN ({placeholders})
+            ORDER BY fo.id ASC
+            """,
+            tuple(int(item) for item in observation_ids),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_observation_sharpness_score(self, observation_id: int, sharpness_score: float) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE face_observation
+            SET sharpness_score = ?
+            WHERE id = ?
+            """,
+            (float(sharpness_score), int(observation_id)),
+        )
+        return int(cursor.rowcount)
+
+    def get_observation_sharpness(self, observation_id: int) -> float | None:
+        row = self.conn.execute(
+            """
+            SELECT sharpness_score
+            FROM face_observation
+            WHERE id = ?
+            """,
+            (int(observation_id),),
+        ).fetchone()
+        if row is None or row["sharpness_score"] is None:
+            return None
+        return float(row["sharpness_score"])
+
+    def update_observation_quality_score(self, observation_id: int, quality_score: float) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE face_observation
+            SET quality_score = ?
+            WHERE id = ?
+            """,
+            (float(quality_score), int(observation_id)),
+        )
+        return int(cursor.rowcount)
+
     def ensure_face_observation(
         self,
         asset_id: int,
