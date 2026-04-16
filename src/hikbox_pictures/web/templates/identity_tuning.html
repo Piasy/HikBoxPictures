@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="identity-tuning-page">
+  <header class="panel identity-tuning-hero">
+    <p class="identity-tuning-kicker">phase1 只读调参验收页</p>
+    <h2>阈值调参与 Bootstrap 验收</h2>
+    <p class="summary">本页只展示 active profile、bootstrap batch、匿名人物与 pending cluster 诊断，不提供写入入口。</p>
+  </header>
+
+  <section class="panel identity-tuning-section">
+    <h3>active profile</h3>
+    {% if identity_tuning.active_profile %}
+    <dl class="identity-kv-grid">
+      <div><dt>ID</dt><dd>{{ identity_tuning.active_profile.id }}</dd></div>
+      <div><dt>profile_name</dt><dd>{{ identity_tuning.active_profile.profile_name }}</dd></div>
+      <div><dt>profile_version</dt><dd>{{ identity_tuning.active_profile.profile_version }}</dd></div>
+      <div><dt>embedding_model_key</dt><dd>{{ identity_tuning.active_profile.embedding_model_key }}</dd></div>
+      <div><dt>high_quality_threshold</dt><dd>{{ identity_tuning.active_profile.high_quality_threshold }}</dd></div>
+      <div><dt>trusted_seed_quality_threshold</dt><dd>{{ identity_tuning.active_profile.trusted_seed_quality_threshold }}</dd></div>
+    </dl>
+    {% else %}
+    <p class="summary">当前 workspace 没有 active profile。</p>
+    {% endif %}
+  </section>
+
+  <section class="panel identity-tuning-section">
+    <h3>bootstrap batch</h3>
+    {% if identity_tuning.bootstrap_batch %}
+    <dl class="identity-kv-grid">
+      <div><dt>ID</dt><dd>{{ identity_tuning.bootstrap_batch.id }}</dd></div>
+      <div><dt>batch_type</dt><dd>{{ identity_tuning.bootstrap_batch.batch_type }}</dd></div>
+      <div><dt>algorithm_version</dt><dd>{{ identity_tuning.bootstrap_batch.algorithm_version }}</dd></div>
+      <div><dt>threshold_profile_id</dt><dd>{{ identity_tuning.bootstrap_batch.threshold_profile_id }}</dd></div>
+      <div><dt>cluster_count</dt><dd>{{ identity_tuning.bootstrap_batch.cluster_count }}</dd></div>
+      <div><dt>review_pending_count</dt><dd>{{ identity_tuning.bootstrap_batch.review_pending_count }}</dd></div>
+    </dl>
+    {% else %}
+    <p class="summary">当前没有 bootstrap batch 记录。</p>
+    {% endif %}
+  </section>
+
+  <section class="panel identity-tuning-section">
+    <h3>匿名人物（含 cover observation 与 seed 组成）</h3>
+    {% if identity_tuning.anonymous_people %}
+    <ul class="identity-list">
+      {% for person in identity_tuning.anonymous_people %}
+      <li class="identity-list-item">
+        <div class="identity-row-head">
+          <strong>{{ person.display_name }}</strong>
+          <span>ID {{ person.person_id }} · origin cluster {{ person.origin_cluster_id }}</span>
+        </div>
+        <p class="summary">cover observation: {{ person.cover_observation_id if person.cover_observation_id is not none else "无" }}</p>
+        {% if person.seed_observations %}
+        <p class="summary">seed 组成：{{ person.seed_observations | map(attribute='observation_id') | join(', ') }}</p>
+        {% else %}
+        <p class="summary">seed 组成：无</p>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="summary">当前没有匿名人物。</p>
+    {% endif %}
+  </section>
+
+  <section class="panel identity-tuning-section">
+    <h3>pending cluster 诊断（含 distinct_photo_count / quality_distribution / external_margin / reject_reason）</h3>
+    {% if identity_tuning.pending_clusters %}
+    <ul class="identity-list">
+      {% for cluster in identity_tuning.pending_clusters %}
+      <li class="identity-list-item">
+        <div class="identity-row-head">
+          <strong>cluster #{{ cluster.cluster_id }}</strong>
+          <span>member {{ cluster.member_count }} · seed {{ cluster.seed_candidate_count }}</span>
+        </div>
+        <dl class="identity-kv-inline">
+          <div><dt>distinct_photo_count</dt><dd>{{ cluster.diagnostics.distinct_photo_count }}</dd></div>
+          <div><dt>quality_distribution</dt><dd>{{ cluster.diagnostics.quality_distribution | tojson }}</dd></div>
+          <div><dt>external_margin</dt><dd>{{ cluster.diagnostics.external_margin }}</dd></div>
+          <div><dt>reject_reason</dt><dd>{{ cluster.diagnostics.reject_reason }}</dd></div>
+        </dl>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="summary">当前没有 pending cluster。</p>
+    {% endif %}
+  </section>
+</section>
+
+<script id="identity-tuning-data" type="application/json">{{ identity_tuning | tojson }}</script>
+{% endblock %}

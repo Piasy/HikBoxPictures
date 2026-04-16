@@ -140,3 +140,22 @@ def logs_page(request: Request) -> HTMLResponse:
         )
     finally:
         conn.close()
+
+
+@router.get("/identity-tuning", response_class=HTMLResponse)
+def identity_tuning_page(request: Request) -> HTMLResponse:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        service = WebQueryService(conn)
+        page_data = service.get_identity_tuning_page()
+        return _get_templates(request).TemplateResponse(
+            request=request,
+            name="identity_tuning.html",
+            context={
+                "page_title": "阈值调参与 Bootstrap 验收",
+                "page_key": "identity_tuning",
+                "identity_tuning": page_data,
+            },
+        )
+    finally:
+        conn.close()

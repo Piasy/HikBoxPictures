@@ -1402,7 +1402,7 @@ git commit -m "feat: add non-destructive threshold evaluation with true rebuild 
 - Create: `tests/people_gallery/test_web_identity_tuning_page.py`
 - Modify: `tests/people_gallery/test_web_navigation.py`
 
-- [ ] **Step 1: 写失败测试，锁定页面必须展示的信息块**
+- [x] **Step 1: 写失败测试，锁定页面必须展示的信息块**
 
 ```python
 # tests/people_gallery/test_web_identity_tuning_page.py
@@ -1452,12 +1452,12 @@ def test_identity_tuning_page_is_read_only(identity_seed_workspace):
     assert "resolve-review" not in html
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_web_identity_tuning_page.py tests/people_gallery/test_web_navigation.py::test_web_navigation_routes_and_static_assets -v`
 Expected: FAIL（路由、查询和模板尚不存在）。
 
-- [ ] **Step 3: 实现只读页面查询、路由与模板**
+- [x] **Step 3: 实现只读页面查询、路由与模板**
 
 ```python
 # src/hikbox_pictures/api/routes_web.py
@@ -1516,7 +1516,7 @@ def identity_tuning_page(request: Request) -> HTMLResponse:
 {% endblock %}
 ```
 
-- [ ] **Step 4: 运行 Web 验收回归**
+- [x] **Step 4: 运行 Web 验收回归**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_web_identity_tuning_page.py tests/people_gallery/test_web_navigation.py -q`
 Expected: PASS。

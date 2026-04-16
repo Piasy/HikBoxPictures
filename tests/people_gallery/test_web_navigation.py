@@ -30,6 +30,7 @@ def test_web_navigation_routes_and_static_assets(tmp_path) -> None:
             "/reviews": "待审核",
             "/sources": "源目录与扫描",
             "/exports": "导出模板",
+            "/identity-tuning": "阈值调参与 Bootstrap 验收",
             "/logs": "运行日志",
         }
         for route, expected_text in route_checks.items():
@@ -61,5 +62,6 @@ def test_web_resources_paths_available_in_package() -> None:
     pkg_root = resources.files("hikbox_pictures")
     assert pkg_root.joinpath("web/templates/base.html").is_file()
     assert pkg_root.joinpath("web/templates/people.html").is_file()
+    assert pkg_root.joinpath("web/templates/identity_tuning.html").is_file()
     assert pkg_root.joinpath("web/static/style.css").is_file()
     assert pkg_root.joinpath("web/static/app.js").is_file()

@@ -1000,6 +1000,242 @@ class WebQueryService:
     def list_events(self, limit: int = 50) -> list[dict[str, Any]]:
         return self.ops_event_repo.list_recent(limit=limit)
 
+    def get_identity_tuning_page(self) -> dict[str, Any]:
+        active_profile_row = self.conn.execute(
+            """
+            SELECT *
+            FROM identity_threshold_profile
+            WHERE active = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        active_profile = dict(active_profile_row) if active_profile_row is not None else None
+
+        latest_batch_row = self.conn.execute(
+            """
+            SELECT b.id,
+                   b.model_key,
+                   b.algorithm_version,
+                   b.batch_type,
+                   b.threshold_profile_id,
+                   b.scan_session_id,
+                   b.created_at
+            FROM auto_cluster_batch AS b
+            WHERE b.batch_type = 'bootstrap'
+            ORDER BY b.id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest_batch_row is None:
+            return {
+                "active_profile": active_profile,
+                "bootstrap_batch": None,
+                "anonymous_people": [],
+                "pending_clusters": [],
+            }
+
+        latest_batch_id = int(latest_batch_row["id"])
+        cluster_aggregate_row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS cluster_count,
+                   SUM(CASE WHEN cluster_status = 'materialized' THEN 1 ELSE 0 END) AS materialized_count,
+                   SUM(CASE WHEN cluster_status = 'review_pending' THEN 1 ELSE 0 END) AS review_pending_count,
+                   SUM(CASE WHEN cluster_status = 'discarded' THEN 1 ELSE 0 END) AS discarded_count
+            FROM auto_cluster
+            WHERE batch_id = ?
+            """,
+            (latest_batch_id,),
+        ).fetchone()
+        assert cluster_aggregate_row is not None
+        bootstrap_batch = {
+            "id": latest_batch_id,
+            "model_key": latest_batch_row["model_key"],
+            "algorithm_version": latest_batch_row["algorithm_version"],
+            "batch_type": latest_batch_row["batch_type"],
+            "threshold_profile_id": latest_batch_row["threshold_profile_id"],
+            "scan_session_id": latest_batch_row["scan_session_id"],
+            "created_at": latest_batch_row["created_at"],
+            "cluster_count": int(cluster_aggregate_row["cluster_count"] or 0),
+            "materialized_count": int(cluster_aggregate_row["materialized_count"] or 0),
+            "review_pending_count": int(cluster_aggregate_row["review_pending_count"] or 0),
+            "discarded_count": int(cluster_aggregate_row["discarded_count"] or 0),
+        }
+
+        anonymous_rows = self.conn.execute(
+            """
+            SELECT p.id,
+                   p.display_name,
+                   p.origin_cluster_id,
+                   p.cover_observation_id,
+                   p.created_at,
+                   p.updated_at
+            FROM person AS p
+            JOIN auto_cluster AS ac
+              ON ac.id = p.origin_cluster_id
+            WHERE ac.batch_id = ?
+              AND ac.cluster_status = 'materialized'
+            ORDER BY p.id ASC
+            """,
+            (latest_batch_id,),
+        ).fetchall()
+        person_ids = [int(row["id"]) for row in anonymous_rows]
+        assignment_count_by_person: dict[int, int] = {}
+        seed_count_by_person: dict[int, int] = {}
+        seed_rows_by_person: dict[int, list[dict[str, Any]]] = {}
+        if person_ids:
+            placeholders = ", ".join("?" for _ in person_ids)
+            assignment_rows = self.conn.execute(
+                f"""
+                SELECT pfa.person_id,
+                       COUNT(*) AS assignment_count
+                FROM person_face_assignment AS pfa
+                JOIN face_observation AS fo
+                  ON fo.id = pfa.face_observation_id
+                WHERE pfa.active = 1
+                  AND fo.active = 1
+                  AND pfa.person_id IN ({placeholders})
+                GROUP BY pfa.person_id
+                """,
+                tuple(person_ids),
+            ).fetchall()
+            assignment_count_by_person = {
+                int(row["person_id"]): int(row["assignment_count"])
+                for row in assignment_rows
+            }
+            seed_count_rows = self.conn.execute(
+                f"""
+                SELECT pts.person_id,
+                       COUNT(*) AS seed_count
+                FROM person_trusted_sample AS pts
+                WHERE pts.active = 1
+                  AND pts.person_id IN ({placeholders})
+                GROUP BY pts.person_id
+                """,
+                tuple(person_ids),
+            ).fetchall()
+            seed_count_by_person = {
+                int(row["person_id"]): int(row["seed_count"])
+                for row in seed_count_rows
+            }
+            seed_observation_rows = self.conn.execute(
+                f"""
+                SELECT pts.person_id,
+                       pts.id,
+                       pts.face_observation_id,
+                       pts.quality_score_snapshot,
+                       pts.trust_source,
+                       pts.trust_score
+                FROM person_trusted_sample AS pts
+                WHERE pts.active = 1
+                  AND pts.person_id IN ({placeholders})
+                ORDER BY pts.person_id ASC, pts.quality_score_snapshot DESC, pts.id ASC
+                """,
+                tuple(person_ids),
+            ).fetchall()
+            for row in seed_observation_rows:
+                person_id = int(row["person_id"])
+                seed_rows_by_person.setdefault(person_id, []).append(
+                    {
+                        "trusted_sample_id": int(row["id"]),
+                        "observation_id": int(row["face_observation_id"]),
+                        "quality_score_snapshot": float(row["quality_score_snapshot"]),
+                        "trust_source": str(row["trust_source"]),
+                        "trust_score": float(row["trust_score"]),
+                        "crop_url": f"/api/observations/{row['face_observation_id']}/crop",
+                    }
+                )
+
+        anonymous_people: list[dict[str, Any]] = []
+        for row in anonymous_rows:
+            person_id = int(row["id"])
+            cover_observation_id = (
+                int(row["cover_observation_id"]) if row["cover_observation_id"] is not None else None
+            )
+            anonymous_people.append(
+                {
+                    "person_id": person_id,
+                    "display_name": str(row["display_name"]),
+                    "origin_cluster_id": int(row["origin_cluster_id"]),
+                    "cover_observation_id": cover_observation_id,
+                    "cover_crop_url": (
+                        f"/api/observations/{cover_observation_id}/crop" if cover_observation_id is not None else None
+                    ),
+                    "assignment_count": int(assignment_count_by_person.get(person_id, 0)),
+                    "seed_count": int(seed_count_by_person.get(person_id, 0)),
+                    "seed_observations": seed_rows_by_person.get(person_id, []),
+                    "created_at": row["created_at"],
+                    "updated_at": row["updated_at"],
+                }
+            )
+
+        pending_clusters: list[dict[str, Any]] = []
+        pending_rows = self.conn.execute(
+            """
+            SELECT ac.id,
+                   ac.batch_id,
+                   ac.cluster_status,
+                   ac.representative_observation_id,
+                   ac.resolved_person_id,
+                   ac.diagnostic_json,
+                   ac.created_at,
+                   (
+                       SELECT COUNT(*)
+                       FROM auto_cluster_member AS acm
+                       WHERE acm.cluster_id = ac.id
+                   ) AS member_count,
+                   (
+                       SELECT COUNT(*)
+                       FROM auto_cluster_member AS acm
+                       WHERE acm.cluster_id = ac.id
+                         AND acm.is_seed_candidate = 1
+                   ) AS seed_candidate_count
+            FROM auto_cluster AS ac
+            WHERE ac.batch_id = ?
+              AND ac.cluster_status = 'review_pending'
+            ORDER BY ac.id ASC
+            """,
+            (latest_batch_id,),
+        ).fetchall()
+        for row in pending_rows:
+            diagnostic = self._parse_review_payload(row["diagnostic_json"])
+            pending_clusters.append(
+                {
+                    "cluster_id": int(row["id"]),
+                    "batch_id": int(row["batch_id"]),
+                    "cluster_status": str(row["cluster_status"]),
+                    "representative_observation_id": (
+                        int(row["representative_observation_id"])
+                        if row["representative_observation_id"] is not None
+                        else None
+                    ),
+                    "representative_crop_url": (
+                        f"/api/observations/{int(row['representative_observation_id'])}/crop"
+                        if row["representative_observation_id"] is not None
+                        else None
+                    ),
+                    "member_count": int(row["member_count"]),
+                    "seed_candidate_count": int(row["seed_candidate_count"]),
+                    "created_at": row["created_at"],
+                    "diagnostics": {
+                        "cluster_size": diagnostic.get("cluster_size"),
+                        "distinct_photo_count": diagnostic.get("distinct_photo_count"),
+                        "quality_distribution": diagnostic.get("quality_distribution", {}),
+                        "external_margin": diagnostic.get("external_margin"),
+                        "reject_reason": diagnostic.get("reject_reason"),
+                        "selected_seed_count": diagnostic.get("selected_seed_count"),
+                        "pre_dedup_seed_candidate_count": diagnostic.get("pre_dedup_seed_candidate_count"),
+                    },
+                }
+            )
+
+        return {
+            "active_profile": active_profile,
+            "bootstrap_batch": bootstrap_batch,
+            "anonymous_people": anonymous_people,
+            "pending_clusters": pending_clusters,
+        }
+
     def get_person_detail(self, person_id: int) -> dict[str, Any] | None:
         person = self.person_repo.get_person(int(person_id))
         if person is None:
@@ -1008,7 +1244,6 @@ class WebQueryService:
             """
             SELECT pfa.id,
                    pfa.assignment_source,
-                   pfa.confidence,
                    pfa.locked,
                    pfa.active,
                    pfa.created_at,
