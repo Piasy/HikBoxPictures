@@ -1159,6 +1159,122 @@ class IdentityRealWorkspace:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    def count_table(self, table: str) -> int:
+        row = self.conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+        if row is None:
+            return 0
+        return int(row["c"])
+
+    def count_person_rows(self) -> int:
+        return self.count_table("person")
+
+    def build_profile_candidate(self) -> dict[str, Any]:
+        active = self.get_active_profile()
+        if active is None:
+            raise RuntimeError("当前工作区缺少 active profile")
+        from hikbox_pictures.services.identity_threshold_profile_service import IdentityThresholdProfileService
+
+        svc = IdentityThresholdProfileService(self.conn)
+        keys = svc.roundtrip_columns()
+        return {key: active[key] for key in keys}
+
+    def get_active_profile(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT *
+            FROM identity_threshold_profile
+            WHERE active = 1
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def write_json(self, path: Path, payload: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def load_last_rebuild_summary(self) -> dict[str, Any] | None:
+        return read_workspace_rebuild_summary(self.root)
+
+    def latest_backup_db(self) -> Path | None:
+        backup_dir = self.root / ".tmp" / "rebuild-identities-v3" / "backups"
+        if not backup_dir.exists():
+            return None
+        candidates = [item for item in backup_dir.glob("*.db") if item.is_file()]
+        if not candidates:
+            return None
+        return sorted(candidates)[-1]
+
+    def list_observation_scores(self) -> list[float]:
+        rows = self.conn.execute(
+            """
+            SELECT COALESCE(quality_score, 0.0) AS quality_score
+            FROM face_observation
+            WHERE active = 1
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [float(row["quality_score"]) for row in rows]
+
+    def list_observation_sharpness_scores(self) -> list[float]:
+        rows = self.conn.execute(
+            """
+            SELECT COALESCE(sharpness_score, 0.0) AS sharpness_score
+            FROM face_observation
+            WHERE active = 1
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        return [float(row["sharpness_score"]) for row in rows]
+
+    def any_cluster_diagnostic(self, key: str, expected: Any) -> bool:
+        rows = self.conn.execute(
+            """
+            SELECT diagnostic_json
+            FROM auto_cluster
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        for row in rows:
+            payload = self.parse_json(row["diagnostic_json"])
+            if payload.get(key) == expected:
+                return True
+        return False
+
+    def find_cluster_diagnostic_by_status(self, cluster_status: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT diagnostic_json
+            FROM auto_cluster
+            WHERE cluster_status = ?
+            ORDER BY id ASC
+            LIMIT 1
+            """,
+            (str(cluster_status),),
+        ).fetchone()
+        if row is None:
+            return None
+        return self.parse_json(row["diagnostic_json"])
+
+    def latest_auto_cluster_batch(self) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            """
+            SELECT id, model_key, algorithm_version, batch_type, threshold_profile_id
+            FROM auto_cluster_batch
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def parse_json(self, payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return payload
+        if payload is None:
+            return {}
+        return json.loads(str(payload))
+
 
 def _write_checker_image(target: Path, *, size: int = 160, cell: int = 8) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1217,9 +1333,9 @@ def build_identity_real_workspace(root: Path) -> IdentityRealWorkspace:
     _crop_from_original(photo_b_path, crop_b, left=24, top=24, right=136, bottom=136)
 
     observation_ids: list[int] = []
-    for photo_id, crop_path, area_ratio in (
-        (photo_a_id, crop_a, 0.49),
-        (photo_b_id, crop_b, 0.21),
+    for photo_id, crop_path, area_ratio, vector in (
+        (photo_a_id, crop_a, 0.49, [0.11, 0.22, 0.33, 0.44]),
+        (photo_b_id, crop_b, 0.21, [0.11, 0.22, 0.33, 0.40]),
     ):
         cursor = conn.execute(
             """
@@ -1251,7 +1367,7 @@ def build_identity_real_workspace(root: Path) -> IdentityRealWorkspace:
         )
         observation_id = int(cursor.lastrowid)
         observation_ids.append(observation_id)
-        vector = np.asarray([0.11, 0.22, 0.33, 0.44], dtype=np.float32)
+        vector = np.asarray(vector, dtype=np.float32)
         conn.execute(
             """
             INSERT INTO face_embedding(
@@ -1635,3 +1751,35 @@ def build_identity_seed_workspace(root: Path) -> IdentitySeedWorkspace:
         model_key=model_key,
         person_repo=person_repo,
     )
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def read_workspace_rebuild_summary(workspace: Path) -> dict[str, Any] | None:
+    summary_path = Path(workspace) / ".tmp" / "rebuild-identities-v3" / "last-summary.json"
+    if not summary_path.exists():
+        return None
+    return read_json(summary_path)
+
+
+def build_identity_profile_candidate_from_active_db(workspace: Path) -> dict[str, Any]:
+    db_path = Path(workspace) / ".hikbox" / "library.db"
+    conn = connect_db(db_path)
+    try:
+        from hikbox_pictures.services.identity_threshold_profile_service import IdentityThresholdProfileService
+
+        svc = IdentityThresholdProfileService(conn)
+        active = svc.get_active_profile()
+        if active is None:
+            raise RuntimeError("当前工作区缺少 active profile")
+        keys = svc.roundtrip_columns()
+        return {key: active[key] for key in keys}
+    finally:
+        conn.close()

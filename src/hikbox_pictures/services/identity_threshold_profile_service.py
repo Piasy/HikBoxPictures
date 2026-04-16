@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 try:
@@ -45,14 +47,17 @@ class IdentityThresholdProfileService:
 
     def insert_candidate_profile_from_json_dict(self, candidate: dict[str, Any]) -> int:
         self.validate_candidate_keys(candidate)
+        managed_transaction = not self.conn.in_transaction
         try:
             profile_id = self.repo.insert_profile(
                 {column: candidate[column] for column in self.roundtrip_columns()}
             )
-            self.conn.commit()
+            if managed_transaction:
+                self.conn.commit()
             return profile_id
         except Exception:
-            self.conn.rollback()
+            if managed_transaction and self.conn.in_transaction:
+                self.conn.rollback()
             raise
 
     def activate_profile(self, profile_id: int) -> dict[str, Any]:
@@ -61,13 +66,16 @@ class IdentityThresholdProfileService:
             raise ValueError(f"目标 profile 不存在：{int(profile_id)}")
         self._validate_activation_preconditions(profile)
 
+        managed_transaction = not self.conn.in_transaction
         try:
             changed = self.repo.activate_profile_transactional(profile_id)
             if changed == 0:
                 raise RuntimeError(f"激活 profile 失败：{int(profile_id)}")
-            self.conn.commit()
+            if managed_transaction:
+                self.conn.commit()
         except Exception:
-            self.conn.rollback()
+            if managed_transaction and self.conn.in_transaction:
+                self.conn.rollback()
             raise
 
         active_profile = self.repo.get_active_profile()
@@ -77,6 +85,40 @@ class IdentityThresholdProfileService:
 
     def get_active_profile(self) -> dict[str, Any] | None:
         return self.repo.get_active_profile()
+
+    def resolve_profile_for_rebuild(self, threshold_profile_path: Path | None) -> dict[str, Any]:
+        if threshold_profile_path is not None:
+            payload = json.loads(Path(threshold_profile_path).read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("threshold-profile JSON 必须是对象")
+            profile_id = self.insert_candidate_profile_from_json_dict(payload)
+            self.activate_profile(profile_id)
+            return {
+                "profile_id": int(profile_id),
+                "profile_mode": "imported",
+                "imported_threshold_profile": True,
+                "update_profile_quantiles": False,
+            }
+
+        active = self.get_active_profile()
+        if active is None:
+            raise ValueError("当前没有 active profile，无法执行重建。")
+        candidate = self.build_candidate_profile_from_active()
+        profile_id = self.insert_candidate_profile_from_json_dict(candidate)
+        self.activate_profile(profile_id)
+        return {
+            "profile_id": int(profile_id),
+            "profile_mode": "derived",
+            "imported_threshold_profile": False,
+            "update_profile_quantiles": True,
+        }
+
+    def get_profile_model_key(self, profile_id: int) -> str:
+        profile = self.repo.get_profile_required(int(profile_id))
+        model_key = str(profile.get("embedding_model_key") or "").strip()
+        if not model_key:
+            raise ValueError(f"profile 缺少 embedding_model_key: {int(profile_id)}")
+        return model_key
 
     def _validate_activation_preconditions(self, profile: dict[str, Any]) -> None:
         if int(profile["bootstrap_min_high_quality_count"]) < int(profile["bootstrap_seed_min_count"]):

@@ -1101,7 +1101,7 @@ git commit -m "feat: implement bootstrap materialize closure and trusted prototy
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 - Modify: `src/hikbox_pictures/services/identity_threshold_profile_service.py`
 
-- [ ] **Step 1: 写失败测试，锁定阶段顺序、幂等、profile 输出与真实链路**
+- [x] **Step 1: 写失败测试，锁定阶段顺序、幂等、profile 输出与真实链路**
 
 ```python
 # tests/people_gallery/test_rebuild_identities_v3_script.py
@@ -1208,12 +1208,12 @@ def test_rebuild_v3_runs_on_real_images_without_mock_engine(identity_real_worksp
     assert "threshold_profile_id" in diag
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_rebuild_identities_v3_script.py tests/people_gallery/test_identity_rebuild_v3_real_pipeline.py -v`
 Expected: FAIL（脚本与 orchestrator 尚不存在）。
 
-- [ ] **Step 3: 实现重建编排服务，严格执行 phase1 顺序**
+- [x] **Step 3: 实现重建编排服务，严格执行 phase1 顺序**
 
 ```python
 # src/hikbox_pictures/services/identity_rebuild_service.py
@@ -1259,7 +1259,7 @@ if args.threshold_profile is not None:
     profile_service.validate_candidate_keys(candidate_dict)
 ```
 
-- [ ] **Step 4: 运行脚本回归（包含真实图片链路）**
+- [x] **Step 4: 运行脚本回归（包含真实图片链路）**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_rebuild_identities_v3_script.py tests/people_gallery/test_identity_rebuild_v3_real_pipeline.py tests/people_gallery/test_identity_bootstrap_service.py tests/people_gallery/test_identity_threshold_profile_contract.py -q`
 Expected: PASS。
