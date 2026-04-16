@@ -151,3 +151,149 @@ class IdentityRepo:
             ),
         )
         return int(cursor.rowcount)
+
+    def list_high_quality_observations(
+        self,
+        *,
+        model_key: str,
+        min_quality: float,
+    ) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT fo.id AS observation_id,
+                   fo.photo_asset_id,
+                   COALESCE(fo.quality_score, 0.0) AS quality_score,
+                   fe.vector_blob
+            FROM face_observation AS fo
+            JOIN face_embedding AS fe
+              ON fe.face_observation_id = fo.id
+             AND fe.feature_type = 'face'
+             AND fe.model_key = ?
+             AND fe.normalized = 1
+            WHERE fo.active = 1
+              AND COALESCE(fo.quality_score, 0.0) >= ?
+            ORDER BY fo.id ASC
+            """,
+            (str(model_key), float(min_quality)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_bootstrap_batch(
+        self,
+        *,
+        model_key: str,
+        threshold_profile_id: int,
+        algorithm_version: str,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO auto_cluster_batch(
+                model_key,
+                algorithm_version,
+                batch_type,
+                threshold_profile_id,
+                scan_session_id
+            )
+            VALUES (?, ?, 'bootstrap', ?, NULL)
+            """,
+            (str(model_key), str(algorithm_version), int(threshold_profile_id)),
+        )
+        return int(cursor.lastrowid)
+
+    def create_cluster(
+        self,
+        *,
+        batch_id: int,
+        representative_observation_id: int,
+        cluster_status: str,
+        resolved_person_id: int | None,
+        diagnostic_json: str,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO auto_cluster(
+                batch_id,
+                representative_observation_id,
+                cluster_status,
+                resolved_person_id,
+                diagnostic_json
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                int(batch_id),
+                int(representative_observation_id),
+                str(cluster_status),
+                int(resolved_person_id) if resolved_person_id is not None else None,
+                str(diagnostic_json),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def add_cluster_member(
+        self,
+        *,
+        cluster_id: int,
+        face_observation_id: int,
+        membership_score: float | None,
+        quality_score_snapshot: float,
+        is_seed_candidate: bool,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO auto_cluster_member(
+                cluster_id,
+                face_observation_id,
+                membership_score,
+                quality_score_snapshot,
+                is_seed_candidate
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                int(cluster_id),
+                int(face_observation_id),
+                float(membership_score) if membership_score is not None else None,
+                float(quality_score_snapshot),
+                1 if is_seed_candidate else 0,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def update_cluster_resolution(
+        self,
+        *,
+        cluster_id: int,
+        cluster_status: str,
+        resolved_person_id: int | None,
+        diagnostic_json: str,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE auto_cluster
+            SET cluster_status = ?,
+                resolved_person_id = ?,
+                diagnostic_json = ?
+            WHERE id = ?
+            """,
+            (
+                str(cluster_status),
+                int(resolved_person_id) if resolved_person_id is not None else None,
+                str(diagnostic_json),
+                int(cluster_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def get_cluster_status(self, cluster_id: int) -> str | None:
+        row = self.conn.execute(
+            """
+            SELECT cluster_status
+            FROM auto_cluster
+            WHERE id = ?
+            """,
+            (int(cluster_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return str(row["cluster_status"])

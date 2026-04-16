@@ -477,9 +477,10 @@ def handle_rebuild_artifacts(args: argparse.Namespace) -> int:
         rebuilt_count = prototype_service.rebuild_all_person_prototypes(model_key=resolved_model_key)
         indexed_count = prototype_service.rebuild_ann_index_from_active_prototypes(model_key=resolved_model_key)
         conn.commit()
+        model_key_label = "none" if resolved_model_key is None else str(resolved_model_key)
         print(
             "ANN 与人物原型重建完成: "
-            f"model_key={resolved_model_key} "
+            f"model_key={model_key_label} "
             f"prototypes={rebuilt_count} "
             f"indexed={indexed_count}"
         )

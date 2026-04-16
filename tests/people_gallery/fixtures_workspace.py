@@ -17,6 +17,7 @@ except ModuleNotFoundError:
 
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.db.migrator import apply_migrations
+from hikbox_pictures.ann import AnnIndexStore
 from hikbox_pictures.repositories import (
     AssetRepo,
     ExportRepo,
@@ -26,6 +27,7 @@ from hikbox_pictures.repositories import (
     ScanRepo,
     SourceRepo,
 )
+from hikbox_pictures.services.prototype_service import PrototypeService
 from hikbox_pictures.workspace import WorkspacePaths, init_workspace_layout
 
 _IMAGE_FACTORY_PATH = Path(__file__).with_name("image_factory.py")
@@ -1289,4 +1291,347 @@ def build_identity_real_workspace(root: Path) -> IdentityRealWorkspace:
         profile_id=int(seed["active_profile_id"]),
         observation_ids=observation_ids,
         photo_ids=[int(photo_a_id), int(photo_b_id)],
+    )
+
+
+class _FailOncePrototypeService(PrototypeService):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        person_repo: PersonRepo,
+        ann_index_store: AnnIndexStore,
+        *,
+        fail_next_ann_sync: bool,
+    ) -> None:
+        super().__init__(conn, person_repo, ann_index_store)
+        self._fail_next_ann_sync = bool(fail_next_ann_sync)
+
+    def sync_person_ann_entry(self, *, person_id: int, model_key: str | None = None) -> int:
+        if self._fail_next_ann_sync:
+            self._fail_next_ann_sync = False
+            raise RuntimeError("注入故障：ANN 同步失败")
+        return super().sync_person_ann_entry(person_id=person_id, model_key=model_key)
+
+
+@dataclass
+class IdentitySeedWorkspace:
+    root: Path
+    paths: WorkspacePaths
+    conn: sqlite3.Connection
+    source_id: int
+    profile_id: int
+    model_key: str
+    person_repo: PersonRepo
+    _fail_ann_sync_once: bool = False
+
+    def close(self) -> None:
+        self.conn.close()
+
+    def parse_json(self, payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return payload
+        if payload is None:
+            return {}
+        return json.loads(str(payload))
+
+    def fail_next_ann_sync(self) -> None:
+        self._fail_ann_sync_once = True
+
+    def new_bootstrap_service(self) -> Any:
+        from hikbox_pictures.repositories.identity_repo import IdentityRepo
+        from hikbox_pictures.services.identity_bootstrap_service import IdentityBootstrapService
+
+        ann_store = AnnIndexStore(self.paths.artifacts_dir / "ann" / "prototype_index.npz")
+        prototype_service = _FailOncePrototypeService(
+            self.conn,
+            self.person_repo,
+            ann_store,
+            fail_next_ann_sync=self._fail_ann_sync_once,
+        )
+        self._fail_ann_sync_once = False
+        return IdentityBootstrapService(
+            self.conn,
+            identity_repo=IdentityRepo(self.conn),
+            person_repo=self.person_repo,
+            prototype_service=prototype_service,
+        )
+
+    def insert_observation_with_embedding(
+        self,
+        *,
+        vector: list[float],
+        quality_score: float,
+        photo_label: str,
+        area_ratio: float = 0.22,
+    ) -> dict[str, int]:
+        photo_path = self.paths.root / "identity-seed-input" / f"{photo_label}.jpg"
+        photo_path.parent.mkdir(parents=True, exist_ok=True)
+        write_number_jpeg(photo_path, text=photo_label[:8] if photo_label else "seed")
+        existing = self.conn.execute(
+            """
+            SELECT id
+            FROM photo_asset
+            WHERE library_source_id = ?
+              AND primary_path = ?
+            LIMIT 1
+            """,
+            (int(self.source_id), str(photo_path.resolve())),
+        ).fetchone()
+        if existing is None:
+            asset_id = self.conn.execute(
+                """
+                INSERT INTO photo_asset(
+                    library_source_id,
+                    primary_path,
+                    processing_status,
+                    capture_month
+                )
+                VALUES (?, ?, 'assignment_done', '2026-04')
+                """,
+                (
+                    int(self.source_id),
+                    str(photo_path.resolve()),
+                ),
+            ).lastrowid
+            assert asset_id is not None
+        else:
+            asset_id = int(existing["id"])
+
+        obs_id = self.conn.execute(
+            """
+            INSERT INTO face_observation(
+                photo_asset_id,
+                bbox_top,
+                bbox_right,
+                bbox_bottom,
+                bbox_left,
+                face_area_ratio,
+                sharpness_score,
+                quality_score,
+                crop_path,
+                detector_key,
+                detector_version,
+                active
+            )
+            VALUES (?, 0.1, 0.9, 0.9, 0.1, ?, ?, ?, ?, 'fixture', 'identity-seed-v1', 1)
+            """,
+            (
+                int(asset_id),
+                float(area_ratio),
+                float(quality_score + 0.2),
+                float(quality_score),
+                str(photo_path.resolve()),
+            ),
+        ).lastrowid
+        assert obs_id is not None
+        vector_array = np.asarray(vector, dtype=np.float32)
+        self.conn.execute(
+            """
+            INSERT INTO face_embedding(
+                face_observation_id,
+                feature_type,
+                model_key,
+                dimension,
+                vector_blob,
+                normalized
+            )
+            VALUES (?, 'face', ?, ?, ?, 1)
+            """,
+            (int(obs_id), self.model_key, int(vector_array.size), vector_array.tobytes()),
+        )
+        self.conn.commit()
+        return {"asset_id": int(asset_id), "observation_id": int(obs_id)}
+
+    def seed_edge_rule_challenge_case(self) -> None:
+        # cluster-A: 预期 materialized（3 人、3 图、seed 足够）
+        self.insert_observation_with_embedding(
+            vector=[0.00, 0.00, 0.00, 0.00],
+            quality_score=0.98,
+            photo_label="edge-materialize-a",
+        )
+        self.insert_observation_with_embedding(
+            vector=[0.021, 0.00, 0.00, 0.00],
+            quality_score=0.97,
+            photo_label="edge-materialize-b",
+        )
+        self.insert_observation_with_embedding(
+            vector=[-0.079, 0.00, 0.00, 0.00],
+            quality_score=0.96,
+            photo_label="edge-materialize-c",
+        )
+
+        # cluster-B: 预期 review_pending（dedup 后 seed 不足）
+        self.insert_observation_with_embedding(
+            vector=[1.00, 0.00, 0.00, 0.00],
+            quality_score=0.99,
+            photo_label="edge-pending-photo-a",
+        )
+        self.insert_observation_with_embedding(
+            vector=[1.00, 0.00, 0.00, 0.00],
+            quality_score=0.98,
+            photo_label="edge-pending-photo-b",
+        )
+        self.insert_observation_with_embedding(
+            vector=[1.079, 0.00, 0.00, 0.00],
+            quality_score=0.97,
+            photo_label="edge-pending-photo-a",
+        )
+        self.insert_observation_with_embedding(
+            vector=[1.05, 0.00, 0.00, 0.00],
+            quality_score=0.96,
+            photo_label="edge-pending-photo-c",
+        )
+
+        # cluster-C: 显式制造 photo_conflict reject
+        self.insert_observation_with_embedding(
+            vector=[2.00, 0.00, 0.00, 0.00],
+            quality_score=0.95,
+            photo_label="edge-photo-conflict",
+        )
+        self.insert_observation_with_embedding(
+            vector=[2.03, 0.00, 0.00, 0.00],
+            quality_score=0.94,
+            photo_label="edge-photo-conflict",
+        )
+
+        self.conn.commit()
+
+    def seed_materialize_happy_case(self) -> None:
+        # 构造稳定通过 gate 的 3 节点 cluster，保证 materialize。
+        self.insert_observation_with_embedding(
+            vector=[0.00, 0.00, 0.00, 0.00],
+            quality_score=0.98,
+            photo_label="mat-a",
+        )
+        self.insert_observation_with_embedding(
+            vector=[0.021, 0.00, 0.00, 0.00],
+            quality_score=0.96,
+            photo_label="mat-b",
+        )
+        self.insert_observation_with_embedding(
+            vector=[-0.079, 0.00, 0.00, 0.00],
+            quality_score=0.95,
+            photo_label="mat-c",
+        )
+        self.conn.commit()
+
+    def seed_bootstrap_dedup_collision_case(self) -> None:
+        # 4 节点同簇：exact + burst 双重去重后 seed 不足，触发 review_pending。
+        self.insert_observation_with_embedding(
+            vector=[0.70, 0.10, 0.00, 0.00],
+            quality_score=0.99,
+            photo_label="dedup-photo-a",
+        )
+        self.insert_observation_with_embedding(
+            vector=[0.70, 0.10, 0.00, 0.00],
+            quality_score=0.98,
+            photo_label="dedup-photo-b",
+        )
+        self.insert_observation_with_embedding(
+            vector=[0.779, 0.10, 0.00, 0.00],
+            quality_score=0.97,
+            photo_label="dedup-photo-a",
+        )
+        self.insert_observation_with_embedding(
+            vector=[0.75, 0.10, 0.00, 0.00],
+            quality_score=0.96,
+            photo_label="dedup-photo-c",
+        )
+        self.conn.commit()
+
+def build_identity_seed_workspace(root: Path) -> IdentitySeedWorkspace:
+    paths = init_workspace_layout(root, root / ".hikbox")
+    conn = connect_db(paths.db_path)
+    apply_migrations(conn)
+    source_repo = SourceRepo(conn)
+    person_repo = PersonRepo(conn)
+    source_root = paths.root / "identity-seed-source"
+    source_root.mkdir(parents=True, exist_ok=True)
+    source_id = source_repo.add_source(
+        "identity-seed",
+        str(source_root.resolve()),
+        root_fingerprint="fp-identity-seed",
+        active=True,
+    )
+
+    warmup_photo = paths.root / "identity-seed-input" / "warmup.jpg"
+    warmup_photo.parent.mkdir(parents=True, exist_ok=True)
+    write_number_jpeg(warmup_photo, text="warmup")
+    warmup_asset_id = conn.execute(
+        """
+        INSERT INTO photo_asset(
+            library_source_id,
+            primary_path,
+            processing_status
+        )
+        VALUES (?, ?, 'assignment_done')
+        """,
+        (int(source_id), str(warmup_photo.resolve())),
+    ).lastrowid
+    assert warmup_asset_id is not None
+    warmup_obs_id = conn.execute(
+        """
+        INSERT INTO face_observation(
+            photo_asset_id,
+            bbox_top,
+            bbox_right,
+            bbox_bottom,
+            bbox_left,
+            face_area_ratio,
+            sharpness_score,
+            quality_score,
+            crop_path,
+            detector_key,
+            detector_version,
+            active
+        )
+        VALUES (?, 0.1, 0.9, 0.9, 0.1, 0.3, 1.2, 0.9, ?, 'fixture', 'warmup-v1', 1)
+        """,
+        (int(warmup_asset_id), str(warmup_photo.resolve())),
+    ).lastrowid
+    assert warmup_obs_id is not None
+    model_key = "pipeline-stub-v1"
+    warmup_vector = np.asarray([0.01, 0.01, 0.01, 0.01], dtype=np.float32)
+    conn.execute(
+        """
+        INSERT INTO face_embedding(
+            face_observation_id,
+            feature_type,
+            model_key,
+            dimension,
+            vector_blob,
+            normalized
+        )
+        VALUES (?, 'face', ?, ?, ?, 1)
+        """,
+        (int(warmup_obs_id), model_key, int(warmup_vector.size), warmup_vector.tobytes()),
+    )
+
+    profile_seed = seed_active_identity_threshold_profile(
+        conn,
+        overrides={
+            "bootstrap_edge_accept_threshold": 0.08,
+            "bootstrap_edge_candidate_threshold": 0.16,
+            "bootstrap_margin_threshold": 0.02,
+            "bootstrap_min_cluster_size": 3,
+            "bootstrap_min_distinct_photo_count": 2,
+            "bootstrap_min_high_quality_count": 3,
+            "bootstrap_seed_min_count": 3,
+            "bootstrap_seed_max_count": 4,
+            "trusted_seed_quality_threshold": 0.9,
+            "high_quality_threshold": 0.85,
+        },
+    )
+    conn.execute("DELETE FROM face_observation WHERE id = ?", (int(warmup_obs_id),))
+    conn.execute("DELETE FROM photo_asset WHERE id = ?", (int(warmup_asset_id),))
+    conn.commit()
+
+    return IdentitySeedWorkspace(
+        root=paths.root,
+        paths=paths,
+        conn=conn,
+        source_id=int(source_id),
+        profile_id=int(profile_seed["active_profile_id"]),
+        model_key=model_key,
+        person_repo=person_repo,
     )

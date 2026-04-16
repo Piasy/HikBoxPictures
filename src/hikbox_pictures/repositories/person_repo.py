@@ -93,6 +93,16 @@ class PersonRepo:
             origin_cluster_id=origin_cluster_id,
         )
 
+    def next_anonymous_sequence(self) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM person
+            WHERE display_name LIKE '未命名人物-%'
+            """
+        ).fetchone()
+        return int(row["c"]) + 1
+
     def list_active_person_ids(self) -> list[int]:
         rows = self.conn.execute(
             """
@@ -194,6 +204,74 @@ class PersonRepo:
                 model_key,
                 vector_blob,
                 quality_score,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def create_bootstrap_assignment(
+        self,
+        *,
+        person_id: int,
+        face_observation_id: int,
+        threshold_profile_id: int,
+        diagnostic_json: str,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO person_face_assignment(
+                person_id,
+                face_observation_id,
+                assignment_source,
+                diagnostic_json,
+                threshold_profile_id,
+                locked,
+                active
+            )
+            VALUES (?, ?, 'bootstrap', ?, ?, 0, 1)
+            """,
+            (
+                int(person_id),
+                int(face_observation_id),
+                str(diagnostic_json),
+                int(threshold_profile_id),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def create_trusted_sample(
+        self,
+        *,
+        person_id: int,
+        face_observation_id: int,
+        trust_source: str,
+        trust_score: float,
+        quality_score_snapshot: float,
+        threshold_profile_id: int,
+        source_auto_cluster_id: int | None,
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO person_trusted_sample(
+                person_id,
+                face_observation_id,
+                trust_source,
+                trust_score,
+                quality_score_snapshot,
+                threshold_profile_id,
+                source_auto_cluster_id,
+                active,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+            """,
+            (
+                int(person_id),
+                int(face_observation_id),
+                str(trust_source),
+                float(trust_score),
+                float(quality_score_snapshot),
+                int(threshold_profile_id),
+                int(source_auto_cluster_id) if source_auto_cluster_id is not None else None,
             ),
         )
         return int(cursor.lastrowid)

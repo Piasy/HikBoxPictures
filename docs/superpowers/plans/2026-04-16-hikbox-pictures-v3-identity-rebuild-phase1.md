@@ -828,7 +828,7 @@ git commit -m "feat: implement real sharpness and quality backfill chain (Task 3
 - Create: `tests/people_gallery/test_prototype_from_trusted_samples.py`
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 
-- [ ] **Step 1: 写失败测试，锁定算法约束与闭环字段**
+- [x] **Step 1: 写失败测试，锁定算法约束与闭环字段**
 
 ```python
 # tests/people_gallery/test_identity_bootstrap_service.py
@@ -991,12 +991,12 @@ def test_prototype_reads_person_trusted_sample_only(identity_seed_workspace):
     assert float(row["quality_score"]) > 0.0
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_bootstrap_service.py tests/people_gallery/test_prototype_from_trusted_samples.py -v`
 Expected: FAIL（bootstrap/materialize/prototype 尚未改造）。
 
-- [ ] **Step 3: 实现算法硬约束 + 事务闭环 + trusted 驱动 prototype**
+- [x] **Step 3: 实现算法硬约束 + 事务闭环 + trusted 驱动 prototype**
 
 ```python
 # src/hikbox_pictures/services/identity_bootstrap_service.py
@@ -1072,7 +1072,7 @@ JOIN face_embedding AS fe ON fe.face_observation_id = pts.face_observation_id
 WHERE pts.active = 1
 ```
 
-- [ ] **Step 4: 运行 bootstrap/prototype 回归**
+- [x] **Step 4: 运行 bootstrap/prototype 回归**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_bootstrap_service.py tests/people_gallery/test_prototype_from_trusted_samples.py tests/people_gallery/test_cli_control_plane.py::test_rebuild_artifacts_command -q`
 Expected: PASS。

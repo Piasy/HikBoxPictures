@@ -61,19 +61,19 @@ class PrototypeService:
         grouped_embeddings: dict[int, list[np.ndarray[Any, np.dtype[np.float32]]]] = defaultdict(list)
         rows = self.conn.execute(
             """
-            SELECT pfa.person_id, fe.vector_blob
-            FROM person_face_assignment AS pfa
+            SELECT pts.person_id, fe.vector_blob
+            FROM person_trusted_sample AS pts
             JOIN face_embedding AS fe
-              ON fe.face_observation_id = pfa.face_observation_id
+              ON fe.face_observation_id = pts.face_observation_id
              AND fe.feature_type = 'face'
             JOIN person AS p
-              ON p.id = pfa.person_id
-            WHERE pfa.active = 1
+              ON p.id = pts.person_id
+            WHERE pts.active = 1
               AND p.status = 'active'
               AND p.ignored = 0
               AND fe.model_key = ?
               AND fe.normalized = 1
-            ORDER BY pfa.person_id ASC, pfa.id ASC
+            ORDER BY pts.person_id ASC, pts.id ASC
             """,
             (resolved_model_key,),
         ).fetchall()
@@ -135,15 +135,15 @@ class PrototypeService:
         rows = self.conn.execute(
             """
             SELECT fe.vector_blob
-            FROM person_face_assignment AS pfa
+            FROM person_trusted_sample AS pts
             JOIN face_embedding AS fe
-              ON fe.face_observation_id = pfa.face_observation_id
+              ON fe.face_observation_id = pts.face_observation_id
              AND fe.feature_type = 'face'
-            WHERE pfa.person_id = ?
-              AND pfa.active = 1
+            WHERE pts.person_id = ?
+              AND pts.active = 1
               AND fe.model_key = ?
               AND fe.normalized = 1
-            ORDER BY pfa.id ASC
+            ORDER BY pts.id ASC
             """,
             (int(person_id), resolved_model_key),
         ).fetchall()
