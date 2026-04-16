@@ -122,7 +122,7 @@ def test_people_page_shows_cover_and_metrics_when_assignments_exist(tmp_path) ->
         ws.close()
 
 
-def test_person_detail_assignment_tiles_use_original_photo_urls(tmp_path) -> None:
+def test_person_detail_assignment_tiles_use_photo_preview_urls(tmp_path) -> None:
     ws = build_seed_workspace(tmp_path, seed_export_assets=True)
     try:
         detail = WebQueryService(ws.conn).get_person_detail(1)
@@ -130,8 +130,10 @@ def test_person_detail_assignment_tiles_use_original_photo_urls(tmp_path) -> Non
         assignments = detail["assignments"]
         assert assignments
         for assignment in assignments:
-            assert assignment["preview_url"] == assignment["original_url"]
+            assert assignment["preview_url"].startswith("/api/photos/")
+            assert assignment["preview_url"].endswith("/preview")
             assert assignment["preview_url"] != assignment["crop_url"]
+            assert assignment["preview_url"] != assignment["original_url"]
 
         client = TestClient(create_app(workspace=ws.root))
         html = client.get("/people/1").text
@@ -141,7 +143,7 @@ def test_person_detail_assignment_tiles_use_original_photo_urls(tmp_path) -> Non
             html,
         )
         assert tile_srcs
-        assert all(src.startswith("/api/photos/") and src.endswith("/original") for src in tile_srcs)
+        assert all(src.startswith("/api/photos/") and src.endswith("/preview") for src in tile_srcs)
     finally:
         ws.close()
 

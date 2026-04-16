@@ -65,21 +65,31 @@
     <div class="export-preview-grid-shell person-detail-preview-grid-shell">
       <div class="export-preview-grid person-detail-preview-grid" role="list" aria-label="{{ person.display_name }} 归属样本列表">
       {% for assignment in assignments %}
-        <button
-          type="button"
-          class="export-preview-tile person-detail-preview-tile"
-          data-person-focus-index="{{ assignment.viewer_index }}"
-          data-person-focus-label="{{ assignment.viewer_label }}"
-          title="{{ assignment.viewer_label }}"
-          aria-label="{{ assignment.viewer_label }}"
-        >
-          <img src="{{ assignment.preview_url }}" alt="{{ assignment.viewer_label }}" loading="lazy">
-          {% if assignment.is_live_photo %}
-          <span class="export-preview-tile-badges">
-            <span class="export-preview-tile-badge is-live">{{ assignment.live_label }}</span>
-          </span>
-          {% endif %}
-        </button>
+        <div class="person-detail-preview-item" data-person-preview-item data-assignment-id="{{ assignment.id }}">
+          <label class="person-detail-preview-select" title="选择 {{ assignment.viewer_label }}">
+            <input
+              type="checkbox"
+              data-person-select-assignment
+              value="{{ assignment.id }}"
+              aria-label="选择 {{ assignment.viewer_label }}"
+            >
+          </label>
+          <button
+            type="button"
+            class="export-preview-tile person-detail-preview-tile"
+            data-person-focus-index="{{ assignment.viewer_index }}"
+            data-person-focus-label="{{ assignment.viewer_label }}"
+            title="{{ assignment.viewer_label }}"
+            aria-label="{{ assignment.viewer_label }}"
+          >
+            <img src="{{ assignment.preview_url }}" alt="{{ assignment.viewer_label }}" loading="lazy">
+            {% if assignment.is_live_photo %}
+            <span class="export-preview-tile-badges">
+              <span class="export-preview-tile-badge is-live">{{ assignment.live_label }}</span>
+            </span>
+            {% endif %}
+          </button>
+        </div>
       {% endfor %}
       </div>
     </div>

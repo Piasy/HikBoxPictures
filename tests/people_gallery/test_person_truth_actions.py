@@ -267,3 +267,88 @@ def test_people_exclude_assignment_deactivates_history_and_syncs_person_artifact
         assert int(recalled[0][0]) == person_id
     finally:
         conn.close()
+
+
+def test_people_exclude_assignments_batch_deactivates_all_selected_and_syncs_person_artifacts(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    seeded = build_seed_workspace_with_mock_embeddings(workspace)
+    paths = load_workspace_paths(workspace)
+    conn = connect_db(paths.db_path)
+    try:
+        person_id = int(seeded["person_ids_by_name"]["人物甲"])
+        assignment_rows = conn.execute(
+            """
+            SELECT id, face_observation_id
+            FROM person_face_assignment
+            WHERE person_id = ?
+              AND active = 1
+            ORDER BY id ASC
+            """,
+            (person_id,),
+        ).fetchall()
+        assert len(assignment_rows) == 2
+        assignment_ids = [int(row["id"]) for row in assignment_rows]
+        observation_ids = [int(row["face_observation_id"]) for row in assignment_rows]
+
+        ann_path = paths.artifacts_dir / "ann" / "prototype_index.npz"
+        prototype_service = PrototypeService(conn, PersonRepo(conn), AnnIndexStore(ann_path))
+        prototype_service.rebuild_all_person_prototypes(model_key="pipeline-stub-v1")
+        prototype_service.rebuild_ann_index_from_active_prototypes(model_key="pipeline-stub-v1")
+        conn.commit()
+
+        client = TestClient(create_app(workspace=workspace))
+        response = client.post(
+            f"/api/people/{person_id}/actions/exclude-assignments",
+            json={"assignment_ids": assignment_ids},
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["person_id"] == person_id
+        assert body["excluded_count"] == 2
+        assert sorted(int(value) for value in body["assignment_ids"]) == assignment_ids
+        assert sorted(int(value) for value in body["face_observation_ids"]) == sorted(observation_ids)
+        assert len(body["review_ids"]) == 2
+        assert int(body["remaining_sample_count"]) == 0
+        assert bool(body["prototype_active"]) is False
+
+        inactive_count = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM person_face_assignment
+            WHERE person_id = ?
+              AND active = 0
+              AND id IN (?, ?)
+            """,
+            (person_id, assignment_ids[0], assignment_ids[1]),
+        ).fetchone()
+        assert inactive_count is not None
+        assert int(inactive_count["c"]) == 2
+
+        exclusion_count = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM person_face_exclusion
+            WHERE person_id = ?
+              AND active = 1
+            """,
+            (person_id,),
+        ).fetchone()
+        assert exclusion_count is not None
+        assert int(exclusion_count["c"]) == 2
+
+        prototype_count = conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM person_prototype
+            WHERE person_id = ?
+              AND prototype_type = 'centroid'
+              AND model_key = 'pipeline-stub-v1'
+              AND active = 1
+            """,
+            (person_id,),
+        ).fetchone()
+        assert prototype_count is not None
+        assert int(prototype_count["c"]) == 0
+    finally:
+        conn.close()

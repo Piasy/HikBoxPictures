@@ -417,6 +417,97 @@
     });
   }
 
+  function bindPersonDetailBatchSelection() {
+    var detailPage = document.querySelector(".person-detail-page");
+    if (!detailPage) {
+      return;
+    }
+    var checkboxes = detailPage.querySelectorAll("[data-person-select-assignment]");
+    var batchButton = detailPage.querySelector('[data-action="person-exclude-selected-assignments"]');
+    var countNode = detailPage.querySelector("[data-person-selection-count]");
+    if (!checkboxes.length || !batchButton) {
+      return;
+    }
+
+    function selectedAssignmentIds() {
+      return Array.prototype.map
+        .call(checkboxes, function (checkbox) {
+          if (!checkbox.checked) {
+            return NaN;
+          }
+          return Number(checkbox.value);
+        })
+        .filter(function (assignmentId) {
+          return Number.isFinite(assignmentId) && assignmentId > 0;
+        });
+    }
+
+    function syncSelectionUi() {
+      var selectedIds = selectedAssignmentIds();
+      Array.prototype.forEach.call(checkboxes, function (checkbox) {
+        var previewItem = checkbox.closest("[data-person-preview-item]");
+        if (!previewItem) {
+          return;
+        }
+        previewItem.classList.toggle("is-selected", checkbox.checked);
+      });
+      if (countNode) {
+        countNode.textContent = "已选 " + selectedIds.length + " 条";
+      }
+      batchButton.disabled = selectedIds.length === 0;
+    }
+
+    Array.prototype.forEach.call(checkboxes, function (checkbox) {
+      checkbox.addEventListener("change", syncSelectionUi);
+    });
+
+    batchButton.addEventListener("click", function () {
+      var personId = batchButton.getAttribute("data-person-id");
+      var assignmentIds = selectedAssignmentIds();
+      if (!personId) {
+        setPersonDetailFeedback("失败: person_id 缺失");
+        return;
+      }
+      if (!assignmentIds.length) {
+        setPersonDetailFeedback("失败: 请先在归属记录里选择要排除的样本");
+        syncSelectionUi();
+        return;
+      }
+      batchButton.disabled = true;
+      setPersonDetailFeedback("批量排除中...");
+      fetch("/api/people/" + personId + "/actions/exclude-assignments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assignment_ids: assignmentIds })
+      })
+        .then(parseJsonResponse)
+        .then(function (result) {
+          if (!result.ok) {
+            var detail = result.payload && result.payload.detail ? String(result.payload.detail) : "请求失败";
+            setPersonDetailFeedback("失败: " + detail);
+            syncSelectionUi();
+            return;
+          }
+          var excludedCount =
+            result.payload && Object.prototype.hasOwnProperty.call(result.payload, "excluded_count")
+              ? String(result.payload.excluded_count)
+              : String(assignmentIds.length);
+          var remaining =
+            result.payload && Object.prototype.hasOwnProperty.call(result.payload, "remaining_sample_count")
+              ? String(result.payload.remaining_sample_count)
+              : "-";
+          setPersonDetailFeedback("完成: 已批量排除 " + excludedCount + " 条，remaining=" + remaining);
+          window.location.reload();
+        })
+        .catch(function (error) {
+          setPersonDetailFeedback("失败: " + (error && error.message ? error.message : "网络错误"));
+          syncSelectionUi();
+        });
+    });
+
+    syncSelectionUi();
+  }
+
   function bindReviewEvidenceFocus(root) {
     var scope = root || document;
     var buttons = scope.querySelectorAll("[data-review-focus-index]");
@@ -1040,6 +1131,7 @@
   } else if (page === "people") {
     bindPersonDetailPreviewFocus();
     bindPersonDetailExcludeAction();
+    bindPersonDetailBatchSelection();
   } else if (page === "reviews") {
     var reviewQueues = document.querySelector(".review-queues");
     bindReviewEvidenceFocus(reviewQueues || document);

@@ -92,6 +92,19 @@ class ActionService:
         }
 
     def exclude_person_assignment(self, person_id: int, assignment_id: int) -> dict[str, Any]:
+        result = self.exclude_person_assignments(person_id=person_id, assignment_ids=[assignment_id])
+        return {
+            "assignment_id": int(assignment_id),
+            "person_id": int(person_id),
+            "face_observation_id": int(result["face_observation_ids"][0]),
+            "exclusion_id": int(result["exclusion_ids"][0]),
+            "review_id": int(result["review_ids"][0]),
+            "remaining_sample_count": int(result["remaining_sample_count"]),
+            "prototype_active": bool(result["prototype_active"]),
+            "ann_index_size": int(result["ann_index_size"]),
+        }
+
+    def exclude_person_assignments(self, person_id: int, assignment_ids: Sequence[int]) -> dict[str, Any]:
         if self.ann_artifact_path is None:
             raise RuntimeError("exclude_person_assignment 缺少 ann_artifact_path")
 
@@ -99,50 +112,72 @@ class ActionService:
         if person is None:
             raise LookupError(f"person {person_id} 不存在")
 
-        assignment = self.person_truth_service.asset_repo.get_assignment(int(assignment_id))
-        if assignment is None:
-            raise LookupError(f"assignment {assignment_id} 不存在")
-        if int(assignment["person_id"]) != int(person_id):
-            raise ValueError(f"assignment {assignment_id} 不属于 person {person_id}")
-        if int(assignment["active"]) != 1:
-            raise ValueError(f"assignment {assignment_id} 不是 active 状态")
+        ordered_assignment_ids = self._normalize_assignment_ids(assignment_ids)
+        targets = self._load_excludable_assignments(
+            person_id=int(person_id),
+            assignment_ids=ordered_assignment_ids,
+        )
 
-        observation_id = int(assignment["face_observation_id"])
-        embedding_row = self.person_truth_service.asset_repo.get_face_embedding(observation_id)
-        model_key = str(embedding_row["model_key"]) if embedding_row is not None and embedding_row["model_key"] else None
-
+        exclusion_ids: list[int] = []
+        review_ids: list[int] = []
+        prototype_active = False
+        ann_size = 0
         try:
-            excluded = self.person_truth_service.asset_repo.deactivate_assignment(
-                int(assignment_id),
-                person_id=int(person_id),
-            )
-            if excluded == 0:
-                raise RuntimeError(f"assignment {assignment_id} 排除失败")
+            for target in targets:
+                excluded = self.person_truth_service.asset_repo.deactivate_assignment(
+                    int(target["assignment_id"]),
+                    person_id=int(person_id),
+                )
+                if excluded == 0:
+                    raise RuntimeError(f"assignment {target['assignment_id']} 排除失败")
 
-            exclusion_id = self.person_truth_service.asset_repo.upsert_assignment_exclusion(
-                person_id=int(person_id),
-                face_observation_id=observation_id,
-                assignment_id=int(assignment_id),
-                reason="manual_exclude",
-            )
-            review_id = self._ensure_excluded_observation_review(
-                observation_id=observation_id,
-                excluded_person_id=int(person_id),
-                model_key=model_key,
-            )
+                exclusion_ids.append(
+                    int(
+                        self.person_truth_service.asset_repo.upsert_assignment_exclusion(
+                            person_id=int(person_id),
+                            face_observation_id=int(target["observation_id"]),
+                            assignment_id=int(target["assignment_id"]),
+                            reason="manual_exclude",
+                        )
+                    )
+                )
+                review_ids.append(
+                    int(
+                        self._ensure_excluded_observation_review(
+                            observation_id=int(target["observation_id"]),
+                            excluded_person_id=int(person_id),
+                            model_key=target["model_key"],
+                        )
+                    )
+                )
+
             prototype_service = PrototypeService(
                 self.conn,
                 self.person_repo,
                 AnnIndexStore(self.ann_artifact_path),
             )
-            prototype_active = prototype_service.rebuild_person_prototype(
-                person_id=int(person_id),
-                model_key=model_key,
-            )
-            ann_size = prototype_service.sync_person_ann_entry(
-                person_id=int(person_id),
-                model_key=model_key,
-            )
+            affected_model_keys: list[str | None] = []
+            for target in targets:
+                model_key = target["model_key"]
+                if model_key in affected_model_keys:
+                    continue
+                affected_model_keys.append(model_key)
+            if not affected_model_keys:
+                affected_model_keys = [None]
+
+            for model_key in affected_model_keys:
+                prototype_active = (
+                    prototype_service.rebuild_person_prototype(
+                        person_id=int(person_id),
+                        model_key=model_key,
+                    )
+                    or prototype_active
+                )
+                ann_size = prototype_service.sync_person_ann_entry(
+                    person_id=int(person_id),
+                    model_key=model_key,
+                )
+
             remaining_sample_count = self._count_active_assignments_for_person(int(person_id))
             self.conn.commit()
         except Exception:
@@ -150,12 +185,13 @@ class ActionService:
             raise
 
         return {
-            "assignment_id": int(assignment_id),
             "person_id": int(person_id),
-            "face_observation_id": observation_id,
-            "exclusion_id": int(exclusion_id),
-            "review_id": int(review_id),
-            "remaining_sample_count": remaining_sample_count,
+            "assignment_ids": [int(target["assignment_id"]) for target in targets],
+            "face_observation_ids": [int(target["observation_id"]) for target in targets],
+            "exclusion_ids": exclusion_ids,
+            "review_ids": review_ids,
+            "excluded_count": len(targets),
+            "remaining_sample_count": int(remaining_sample_count),
             "prototype_active": bool(prototype_active),
             "ann_index_size": int(ann_size),
         }
@@ -696,6 +732,47 @@ class ActionService:
                 face_observation_id=int(observation_id),
             )
         )
+
+    def _normalize_assignment_ids(self, assignment_ids: Sequence[int]) -> list[int]:
+        ordered: list[int] = []
+        seen: set[int] = set()
+        for assignment_id in assignment_ids:
+            clean_assignment_id = int(assignment_id)
+            if clean_assignment_id <= 0:
+                raise ValueError("assignment_ids 只能包含正整数")
+            if clean_assignment_id in seen:
+                continue
+            seen.add(clean_assignment_id)
+            ordered.append(clean_assignment_id)
+        if not ordered:
+            raise ValueError("assignment_ids 不能为空")
+        return ordered
+
+    def _load_excludable_assignments(self, *, person_id: int, assignment_ids: Sequence[int]) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        for assignment_id in assignment_ids:
+            assignment = self.person_truth_service.asset_repo.get_assignment(int(assignment_id))
+            if assignment is None:
+                raise LookupError(f"assignment {assignment_id} 不存在")
+            if int(assignment["person_id"]) != int(person_id):
+                raise ValueError(f"assignment {assignment_id} 不属于 person {person_id}")
+            if int(assignment["active"]) != 1:
+                raise ValueError(f"assignment {assignment_id} 不是 active 状态")
+
+            observation_id = int(assignment["face_observation_id"])
+            embedding_row = self.person_truth_service.asset_repo.get_face_embedding(observation_id)
+            targets.append(
+                {
+                    "assignment_id": int(assignment_id),
+                    "observation_id": observation_id,
+                    "model_key": (
+                        str(embedding_row["model_key"])
+                        if embedding_row is not None and embedding_row["model_key"]
+                        else None
+                    ),
+                }
+            )
+        return targets
 
     def _count_active_assignments_for_person(self, person_id: int) -> int:
         row = self.conn.execute(

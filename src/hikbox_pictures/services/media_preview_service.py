@@ -5,7 +5,7 @@ import mimetypes
 from pathlib import Path
 from typing import Callable, Iterator
 
-from PIL import Image, UnidentifiedImageError
+from PIL import UnidentifiedImageError
 
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.repositories import AssetRepo
@@ -115,8 +115,10 @@ class MediaPreviewService:
     def read_preview_stream(self, photo_id: int) -> MediaStreamPayload:
         payload = self.read_original_stream(photo_id, range_header=None)
         try:
-            with Image.open(payload.file_path) as image:
-                image.verify()
+            preview_path = self.preview_artifact_service.ensure_photo_preview(
+                photo_id=int(photo_id),
+                source_path=payload.file_path,
+            )
         except (UnidentifiedImageError, OSError, ValueError) as exc:
             self._emit_event(
                 level="warning",
@@ -134,7 +136,11 @@ class MediaPreviewService:
                 error_code=PREVIEW_ASSET_DECODE_FAILED_ERROR,
                 message="预览解码失败",
             ) from exc
-        return payload
+        return self._build_stream_payload(
+            source_path=preview_path,
+            range_header=None,
+            allowed_roots=self._artifact_allowed_roots(),
+        )
 
     def read_observation_crop(self, observation_id: int) -> MediaStreamPayload:
         try:

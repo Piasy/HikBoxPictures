@@ -11,6 +11,13 @@
       data-person-id="{{ person.id }}"
       {% if not initial or initial.assignment_id is none %}disabled{% endif %}
     >排除</button>
+    <button
+      type="button"
+      data-action="person-exclude-selected-assignments"
+      data-person-id="{{ person.id }}"
+      disabled
+    >批量排除已选</button>
+    <span class="person-detail-selection-count" data-person-selection-count>已选 0 条</span>
     {% endif %}
     <span class="viewer-status" data-viewer-status>
       {% if viewer_items %}1 / {{ viewer_items|length }}{% else %}无样例{% endif %}

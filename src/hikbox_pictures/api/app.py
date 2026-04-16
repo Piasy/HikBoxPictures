@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
@@ -22,12 +23,19 @@ def create_app(workspace: Path) -> FastAPI:
     paths = initialize_workspace(workspace)
     web_root = Path(__file__).resolve().parent.parent / "web"
     templates = Jinja2Templates(directory=str(web_root / "templates"))
+    static_root = web_root / "static"
+    asset_version = max(
+        (path.stat().st_mtime_ns for path in static_root.rglob("*") if path.is_file()),
+        default=time.time_ns(),
+    )
+    templates.env.globals["asset_version"] = str(asset_version)
 
     app = FastAPI(title="HikBox Pictures API")
     app.state.workspace_paths = paths
     app.state.workspace = str(paths.root)
     app.state.db_path = str(paths.db_path)
     app.state.templates = templates
+    app.state.asset_version = str(asset_version)
     app.state.media_preview_service = MediaPreviewService(
         db_path=paths.db_path,
         workspace=paths.root,

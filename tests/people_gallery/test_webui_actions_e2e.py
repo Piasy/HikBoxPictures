@@ -47,7 +47,22 @@ def test_web_viewer_actions_visible_in_people_reviews_exports(tmp_path) -> None:
             assert 'data-action="viewer-toggle-bbox"' not in html
 
         assert 'data-action="person-exclude-assignment"' in person_html
+        assert 'data-action="person-exclude-selected-assignments"' in person_html
         assert 'data-action="person-exclude-assignment"' not in review_html
+        assert 'data-action="person-exclude-selected-assignments"' not in review_html
         assert 'data-action="person-exclude-assignment"' not in export_html
+        assert 'data-action="person-exclude-selected-assignments"' not in export_html
+    finally:
+        ws.close()
+
+
+def test_web_pages_append_version_to_static_assets(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_export_assets=True)
+    try:
+        client = TestClient(create_app(workspace=ws.root))
+        html = client.get("/people/1").text
+
+        assert '/static/style.css?v=' in html
+        assert '/static/app.js?v=' in html
     finally:
         ws.close()

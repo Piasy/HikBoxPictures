@@ -1034,6 +1034,7 @@ class WebQueryService:
         for index, row in enumerate(assignment_rows):
             observation_id = int(row["face_observation_id"])
             photo_id = int(row["photo_asset_id"])
+            preview_url = f"/api/photos/{photo_id}/preview"
             crop_url = f"/api/observations/{observation_id}/crop"
             context_url = f"/api/observations/{observation_id}/context"
             original_url = f"/api/photos/{photo_id}/original"
@@ -1043,7 +1044,7 @@ class WebQueryService:
             if is_live_photo:
                 viewer_label += " · live"
 
-            row["preview_url"] = original_url
+            row["preview_url"] = preview_url
             row["crop_url"] = crop_url
             row["context_url"] = context_url
             row["original_url"] = original_url

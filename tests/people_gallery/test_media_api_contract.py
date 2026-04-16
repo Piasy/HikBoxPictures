@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from hikbox_pictures.api.app import create_app
+from hikbox_pictures.services.preview_artifact_service import PHOTO_PREVIEW_MAX_SIDE
 
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
@@ -65,6 +66,31 @@ def test_media_endpoints_return_images_from_workspace_data(tmp_path) -> None:
         assert original_image.width > 0
         assert original_image.height > 0
         assert _has_bbox_highlight(context_image) is True
+    finally:
+        ws.close()
+
+
+def test_media_preview_endpoint_downsamples_large_original(tmp_path) -> None:
+    ws = build_seed_workspace(tmp_path, seed_media_assets=True)
+    try:
+        assert ws.media_photo_id is not None
+        original_path = ws.paths.artifacts_dir / "media-test-assets" / "photo-1.jpg"
+        Image.new("RGB", (2400, 1600), color=(180, 120, 90)).save(original_path, format="JPEG", quality=92)
+
+        client = TestClient(create_app(workspace=ws.root))
+        original = client.get(f"/api/photos/{ws.media_photo_id}/original")
+        preview = client.get(f"/api/photos/{ws.media_photo_id}/preview")
+
+        assert original.status_code == 200
+        assert preview.status_code == 200
+
+        original_image = Image.open(io.BytesIO(original.content)).convert("RGB")
+        preview_image = Image.open(io.BytesIO(preview.content)).convert("RGB")
+
+        assert max(original_image.size) == 2400
+        assert max(preview_image.size) <= PHOTO_PREVIEW_MAX_SIDE
+        assert max(preview_image.size) < max(original_image.size)
+        assert len(preview.content) < len(original.content)
     finally:
         ws.close()
 

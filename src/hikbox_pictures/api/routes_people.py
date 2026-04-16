@@ -33,6 +33,10 @@ class ExcludeAssignmentRequest(BaseModel):
     assignment_id: int
 
 
+class ExcludeAssignmentsRequest(BaseModel):
+    assignment_ids: list[int]
+
+
 @router.get("/people")
 def list_people(request: Request) -> list[dict[str, object]]:
     conn = connect_db(Path(request.app.state.db_path))
@@ -111,6 +115,29 @@ def exclude_person_assignment(person_id: int, payload: ExcludeAssignmentRequest,
         ).exclude_person_assignment(
             person_id=person_id,
             assignment_id=payload.assignment_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    finally:
+        conn.close()
+
+
+@router.post("/people/{person_id}/actions/exclude-assignments")
+def exclude_person_assignments(
+    person_id: int,
+    payload: ExcludeAssignmentsRequest,
+    request: Request,
+) -> dict[str, object]:
+    conn = connect_db(Path(request.app.state.db_path))
+    try:
+        return ActionService(
+            conn,
+            ann_artifact_path=request.app.state.workspace_paths.artifacts_dir / "ann" / "prototype_index.npz",
+        ).exclude_person_assignments(
+            person_id=person_id,
+            assignment_ids=payload.assignment_ids,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

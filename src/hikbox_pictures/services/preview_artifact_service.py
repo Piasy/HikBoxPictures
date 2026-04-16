@@ -13,6 +13,8 @@ from hikbox_pictures.services.path_guard import ensure_safe_asset_path
 from hikbox_pictures.workspace import load_workspace_paths
 
 LEGACY_CONTEXT_MAX_SIDE = 48
+PHOTO_PREVIEW_MAX_SIDE = 320
+PHOTO_PREVIEW_JPEG_QUALITY = 72
 CONTEXT_PREVIEW_MIN_SIDE = 160
 CONTEXT_PREVIEW_MAX_SIDE = 320
 CONTEXT_PREVIEW_MARGIN_FACTOR = 1.0
@@ -32,6 +34,18 @@ class PreviewArtifactService:
         self.db_path = Path(db_path)
         self.workspace = Path(workspace)
         self.paths = load_workspace_paths(self.workspace)
+
+    def ensure_photo_preview(self, *, photo_id: int, source_path: Path) -> str:
+        safe_source_path = Path(source_path).expanduser().resolve()
+        preview_path = self.paths.artifacts_dir / "photo-preview" / f"photo-{int(photo_id)}.jpg"
+        if preview_path.exists() and preview_path.is_file() and self._is_photo_preview_usable(
+            source_path=safe_source_path,
+            preview_path=preview_path,
+        ):
+            return str(preview_path)
+
+        rebuilt_path = self._rebuild_photo_preview(source_path=safe_source_path, out_path=preview_path)
+        return str(rebuilt_path)
 
     def ensure_crop(self, observation_id: int) -> str:
         conn = connect_db(self.db_path)
@@ -276,6 +290,32 @@ class PreviewArtifactService:
             out_path,
             format="JPEG",
             quality=68,
+            optimize=True,
+            progressive=True,
+        )
+        return out_path
+
+    def _is_photo_preview_usable(self, *, source_path: Path, preview_path: Path) -> bool:
+        try:
+            if preview_path.stat().st_mtime_ns < source_path.stat().st_mtime_ns:
+                return False
+            with Image.open(preview_path) as image:
+                size = image.size
+            return max(size) <= PHOTO_PREVIEW_MAX_SIDE
+        except (FileNotFoundError, UnidentifiedImageError, OSError, ValueError):
+            return False
+
+    def _rebuild_photo_preview(self, *, source_path: Path, out_path: Path) -> Path:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        image = load_oriented_image(source_path).convert("RGB")
+        image.thumbnail(
+            (PHOTO_PREVIEW_MAX_SIDE, PHOTO_PREVIEW_MAX_SIDE),
+            resample=Image.Resampling.LANCZOS,
+        )
+        image.save(
+            out_path,
+            format="JPEG",
+            quality=PHOTO_PREVIEW_JPEG_QUALITY,
             optimize=True,
             progressive=True,
         )
