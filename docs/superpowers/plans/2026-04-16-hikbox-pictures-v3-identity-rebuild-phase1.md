@@ -1543,7 +1543,7 @@ git commit -m "feat: add field-complete read-only identity tuning page for phase
 - Modify: `tests/test_repo_samples.py`
 - Modify: `docs/superpowers/plans/2026-04-16-hikbox-pictures-v3-identity-rebuild-phase1.md`
 
-- [ ] **Step 1: 写失败测试，锁定 README 的副本试跑与 round-trip 命令**
+- [x] **Step 1: 写失败测试，锁定 README 的副本试跑与 round-trip 命令**
 
 ```python
 # tests/test_repo_samples.py
@@ -1557,12 +1557,12 @@ for snippet in (
     assert snippet in readme
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/test_repo_samples.py::test_readme_mentions_deepface_runtime_basics -v`
 Expected: FAIL（README 尚未包含 phase1 新流程）。
 
-- [ ] **Step 3: 更新 README 的 phase1 最小闭环章节**
+- [x] **Step 3: 更新 README 的 phase1 最小闭环章节**
 
 ````markdown
 ## v3 第一阶段：身份层重建与调参验收（phase1）
@@ -1581,7 +1581,7 @@ python -m hikbox_pictures.cli serve --workspace <workspace> --host 0.0.0.0 --por
 - 主链验收必须包含真实图片路径，不允许只跑 seed/mock 夹具。
 ````
 
-- [ ] **Step 4: 跑最终最小回归矩阵**
+- [x] **Step 4: 跑最终最小回归矩阵**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_v3_schema_migration.py tests/people_gallery/test_identity_threshold_profile_contract.py tests/people_gallery/test_observation_quality_backfill_service.py tests/people_gallery/test_identity_bootstrap_service.py tests/people_gallery/test_prototype_from_trusted_samples.py tests/people_gallery/test_rebuild_identities_v3_script.py tests/people_gallery/test_identity_threshold_evaluation_script.py tests/people_gallery/test_identity_rebuild_v3_real_pipeline.py tests/people_gallery/test_web_identity_tuning_page.py tests/test_repo_samples.py -q`
 Expected: PASS。

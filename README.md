@@ -121,6 +121,22 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /logs`：运行日志列表
 - `GET /static/style.css`、`GET /static/app.js`：静态资源
 
+## v3 第一阶段：身份层重建与调参验收（phase1）
+
+```bash
+source .venv/bin/activate
+python scripts/rebuild_identities_v3.py --workspace <workspace> --dry-run
+python scripts/rebuild_identities_v3.py --workspace <workspace> --backup-db
+python scripts/evaluate_identity_thresholds.py --workspace <workspace> --output-dir .tmp/identity-threshold-tuning/<timestamp>/
+cp -R <workspace> <workspace-copy>
+python scripts/rebuild_identities_v3.py --workspace <workspace-copy> --backup-db --threshold-profile <candidate-thresholds.json 文件路径>
+python -m hikbox_pictures.cli serve --workspace <workspace> --host 0.0.0.0 --port 8000
+```
+
+- 调参验收入口：`/identity-tuning`（只读）。
+- phase1 明确允许 scan/review/actions/export 旧功能暂时失效；不在本阶段做封禁或兼容兜底。
+- 主链验收必须包含真实图片路径，不允许只跑 seed/mock 夹具。
+
 ## 测试
 
 运行全部测试：
