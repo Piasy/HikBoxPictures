@@ -45,6 +45,10 @@ class IdentityRepo:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_profile_columns(self) -> list[str]:
+        rows = self.conn.execute("PRAGMA table_info(identity_threshold_profile)").fetchall()
+        return [str(row["name"]) for row in rows]
+
     def insert_profile(self, values: dict[str, Any]) -> int:
         if not values:
             raise ValueError("identity_threshold_profile 写入不能为空")
@@ -92,18 +96,20 @@ class IdentityRepo:
         return int(cursor.rowcount)
 
     def detect_workspace_embedding_binding(self) -> dict[str, str] | None:
-        row = self.conn.execute(
+        rows = self.conn.execute(
             """
-            SELECT fe.feature_type, fe.model_key
+            SELECT DISTINCT fe.feature_type, fe.model_key
             FROM face_embedding AS fe
             WHERE fe.feature_type IS NOT NULL
               AND fe.model_key IS NOT NULL
-            ORDER BY fe.id DESC
-            LIMIT 1
+            ORDER BY fe.feature_type ASC, fe.model_key ASC
             """
-        ).fetchone()
-        if row is None:
+        ).fetchall()
+        if not rows:
             return None
+        if len(rows) != 1:
+            raise ValueError("embedding 绑定不唯一，当前 workspace 存在多组 feature/model 组合。")
+        row = rows[0]
         return {
             "embedding_feature_type": str(row["feature_type"]),
             "embedding_model_key": str(row["model_key"]),

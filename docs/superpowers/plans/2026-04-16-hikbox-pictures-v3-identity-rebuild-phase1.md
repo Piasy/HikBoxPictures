@@ -497,7 +497,7 @@ git commit -m "feat: add v3 schema migration with real legacy-upgrade validation
 - Create: `tests/people_gallery/test_identity_threshold_profile_contract.py`
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 
-- [ ] **Step 1: 写失败测试，锁定 JSON<->表列一一对应与激活约束**
+- [x] **Step 1: 写失败测试，锁定 JSON<->表列一一对应与激活约束**
 
 ```python
 # tests/people_gallery/test_identity_threshold_profile_contract.py
@@ -574,12 +574,12 @@ def test_profile_roundtrip_export_then_import(identity_seed_workspace, tmp_path)
     assert int(active["id"]) == profile_id
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_threshold_profile_contract.py -v`
 Expected: FAIL（service 尚不存在，激活前约束校验未实现）。
 
-- [ ] **Step 3: 实现 strict round-trip service 与激活前置校验**
+- [x] **Step 3: 实现 strict round-trip service 与激活前置校验**
 
 ```python
 # src/hikbox_pictures/services/identity_threshold_profile_service.py
@@ -623,7 +623,7 @@ class IdentityThresholdProfileService:
 
 说明：`scripts/rebuild_identities_v3.py` 对 `--threshold-profile` 的接入放在 `Task 5` 完成，避免与脚本创建顺序冲突。
 
-- [ ] **Step 4: 运行 profile 契约回归**
+- [x] **Step 4: 运行 profile 契约回归**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_threshold_profile_contract.py -q`
 Expected: PASS。

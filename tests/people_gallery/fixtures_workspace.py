@@ -907,3 +907,176 @@ def build_seed_workspace_with_mock_embeddings(
     result["dataset_dir"] = dataset_dir
     result["created_images"] = created
     return result
+
+
+_IDENTITY_PROFILE_NON_SYSTEM_COLUMNS: tuple[str, ...] = (
+    "profile_name",
+    "profile_version",
+    "quality_formula_version",
+    "embedding_feature_type",
+    "embedding_model_key",
+    "embedding_distance_metric",
+    "embedding_schema_version",
+    "quality_area_weight",
+    "quality_sharpness_weight",
+    "quality_pose_weight",
+    "area_log_p10",
+    "area_log_p90",
+    "sharpness_log_p10",
+    "sharpness_log_p90",
+    "pose_score_p10",
+    "pose_score_p90",
+    "low_quality_threshold",
+    "high_quality_threshold",
+    "trusted_seed_quality_threshold",
+    "bootstrap_edge_accept_threshold",
+    "bootstrap_edge_candidate_threshold",
+    "bootstrap_margin_threshold",
+    "bootstrap_min_cluster_size",
+    "bootstrap_min_distinct_photo_count",
+    "bootstrap_min_high_quality_count",
+    "bootstrap_seed_min_count",
+    "bootstrap_seed_max_count",
+    "assignment_auto_min_quality",
+    "assignment_auto_distance_threshold",
+    "assignment_auto_margin_threshold",
+    "assignment_review_distance_threshold",
+    "assignment_require_photo_conflict_free",
+    "trusted_min_quality",
+    "trusted_centroid_distance_threshold",
+    "trusted_margin_threshold",
+    "trusted_block_exact_duplicate",
+    "trusted_block_burst_duplicate",
+    "burst_time_window_seconds",
+    "possible_merge_distance_threshold",
+    "possible_merge_margin_threshold",
+)
+
+
+def ensure_identity_threshold_profile_table(conn: sqlite3.Connection) -> None:
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name = 'identity_threshold_profile'
+        """
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("缺少 identity_threshold_profile 表，请先执行数据库 migration。")
+
+    columns = {
+        str(item["name"])
+        for item in conn.execute("PRAGMA table_info(identity_threshold_profile)").fetchall()
+    }
+    required = set(_IDENTITY_PROFILE_NON_SYSTEM_COLUMNS) | {"id", "active", "created_at", "updated_at"}
+    missing = sorted(required - columns)
+    if missing:
+        raise RuntimeError(f"identity_threshold_profile 表缺少字段: {missing}")
+
+
+def get_workspace_embedding_binding(conn: sqlite3.Connection) -> dict[str, str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT feature_type, model_key
+        FROM face_embedding
+        WHERE feature_type IS NOT NULL
+          AND model_key IS NOT NULL
+        ORDER BY feature_type ASC, model_key ASC
+        """
+    ).fetchall()
+    if not rows:
+        raise ValueError("缺少可用 face_embedding，无法推导 workspace embedding 绑定")
+    if len(rows) != 1:
+        raise ValueError("face_embedding 绑定不唯一，无法创建 identity profile seed")
+    row = rows[0]
+    return {
+        "embedding_feature_type": str(row["feature_type"]),
+        "embedding_model_key": str(row["model_key"]),
+        "embedding_distance_metric": "cosine",
+        "embedding_schema_version": "face_embedding.v1",
+    }
+
+
+def build_identity_profile_candidate(
+    conn: sqlite3.Connection,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    binding = get_workspace_embedding_binding(conn)
+    candidate: dict[str, Any] = {
+        "profile_name": "默认阈值档",
+        "profile_version": "v1",
+        "quality_formula_version": "quality.v1",
+        "embedding_feature_type": binding["embedding_feature_type"],
+        "embedding_model_key": binding["embedding_model_key"],
+        "embedding_distance_metric": binding["embedding_distance_metric"],
+        "embedding_schema_version": binding["embedding_schema_version"],
+        "quality_area_weight": 0.6,
+        "quality_sharpness_weight": 0.4,
+        "quality_pose_weight": 0.0,
+        "area_log_p10": -3.1,
+        "area_log_p90": -1.4,
+        "sharpness_log_p10": 2.0,
+        "sharpness_log_p90": 3.0,
+        "pose_score_p10": None,
+        "pose_score_p90": None,
+        "low_quality_threshold": 0.45,
+        "high_quality_threshold": 0.75,
+        "trusted_seed_quality_threshold": 0.85,
+        "bootstrap_edge_accept_threshold": 0.8,
+        "bootstrap_edge_candidate_threshold": 0.88,
+        "bootstrap_margin_threshold": 0.28,
+        "bootstrap_min_cluster_size": 3,
+        "bootstrap_min_distinct_photo_count": 3,
+        "bootstrap_min_high_quality_count": 3,
+        "bootstrap_seed_min_count": 3,
+        "bootstrap_seed_max_count": 8,
+        "assignment_auto_min_quality": 0.75,
+        "assignment_auto_distance_threshold": 0.88,
+        "assignment_auto_margin_threshold": 0.35,
+        "assignment_review_distance_threshold": 0.98,
+        "assignment_require_photo_conflict_free": 1,
+        "trusted_min_quality": 0.85,
+        "trusted_centroid_distance_threshold": 0.88,
+        "trusted_margin_threshold": 0.35,
+        "trusted_block_exact_duplicate": 1,
+        "trusted_block_burst_duplicate": 1,
+        "burst_time_window_seconds": 3,
+        "possible_merge_distance_threshold": None,
+        "possible_merge_margin_threshold": None,
+    }
+    if overrides:
+        candidate.update(overrides)
+    return candidate
+
+
+def seed_active_identity_threshold_profile(
+    conn: sqlite3.Connection,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    ensure_identity_threshold_profile_table(conn)
+    candidate = build_identity_profile_candidate(conn, overrides=overrides)
+    columns = ", ".join(_IDENTITY_PROFILE_NON_SYSTEM_COLUMNS)
+    placeholders = ", ".join("?" for _ in _IDENTITY_PROFILE_NON_SYSTEM_COLUMNS)
+    values = tuple(candidate[column] for column in _IDENTITY_PROFILE_NON_SYSTEM_COLUMNS)
+    conn.execute("UPDATE identity_threshold_profile SET active = 0")
+    cursor = conn.execute(
+        f"""
+        INSERT INTO identity_threshold_profile(
+            {columns},
+            active,
+            activated_at
+        )
+        VALUES ({placeholders}, 1, CURRENT_TIMESTAMP)
+        """,
+        values,
+    )
+    conn.commit()
+    binding = get_workspace_embedding_binding(conn)
+    return {
+        "active_profile_id": int(cursor.lastrowid),
+        "candidate_profile": dict(candidate),
+        "workspace_embedding_binding": binding,
+    }
