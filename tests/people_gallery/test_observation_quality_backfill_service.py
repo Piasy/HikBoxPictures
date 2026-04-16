@@ -97,6 +97,28 @@ def test_backfill_can_update_profile_quantiles_when_explicitly_enabled(identity_
     assert float(profile["sharpness_log_p90"]) > float(profile["sharpness_log_p10"])
 
 
+def test_backfill_reports_total_completed_and_percent(identity_real_workspace) -> None:
+    svc = ObservationQualityBackfillService(identity_real_workspace.conn)
+    events: list[dict[str, Any]] = []
+
+    report = svc.backfill_all_observations(
+        profile_id=identity_real_workspace.profile_id,
+        progress_reporter=events.append,
+    )
+
+    total = int(report["updated_observation_count"])
+    write_events = [
+        item
+        for item in events
+        if item.get("phase") == "quality_backfill" and item.get("subphase") == "write_scores"
+    ]
+    assert write_events
+    final = write_events[-1]
+    assert int(final["total_count"]) == total
+    assert int(final["completed_count"]) == total
+    assert float(final["percent"]) == 100.0
+
+
 def test_backfill_rollbacks_without_partial_db_update_and_cleans_new_crop(identity_real_workspace, monkeypatch) -> None:
     conn = identity_real_workspace.conn
     svc = ObservationQualityBackfillService(conn)

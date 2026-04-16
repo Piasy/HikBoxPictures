@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from collections import defaultdict
 from typing import Any
 
@@ -53,7 +54,12 @@ class PrototypeService:
             return preferred
         return str(row["model_key"])
 
-    def rebuild_all_person_prototypes(self, *, model_key: str | None = None) -> int:
+    def rebuild_all_person_prototypes(
+        self,
+        *,
+        model_key: str | None = None,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
+    ) -> int:
         resolved_model_key = self.resolve_default_model_key(preferred=model_key)
         if resolved_model_key is None:
             return 0
@@ -95,25 +101,34 @@ class PrototypeService:
             grouped_embeddings[person_id].append(vector.astype(np.float32, copy=False))
 
         rebuilt_count = 0
-        for person_id in self.person_repo.list_active_person_ids():
+        active_person_ids = self.person_repo.list_active_person_ids()
+        total_person_count = len(active_person_ids)
+        for index, person_id in enumerate(active_person_ids, start=1):
             samples = grouped_embeddings.get(person_id, [])
             if not samples:
                 self.person_repo.deactivate_active_centroid_prototypes(
                     person_id=person_id,
                     model_key=resolved_model_key,
                 )
-                continue
-            centroid = np.mean(np.vstack(samples), axis=0).astype(np.float32, copy=False)
-            norm = float(np.linalg.norm(centroid))
-            if norm > 0:
-                centroid = centroid / norm
-            self.person_repo.replace_centroid_prototype(
-                person_id=person_id,
-                vector_blob=embedding_to_blob(centroid),
-                model_key=resolved_model_key,
-                quality_score=float(len(samples)),
+            else:
+                centroid = np.mean(np.vstack(samples), axis=0).astype(np.float32, copy=False)
+                norm = float(np.linalg.norm(centroid))
+                if norm > 0:
+                    centroid = centroid / norm
+                self.person_repo.replace_centroid_prototype(
+                    person_id=person_id,
+                    vector_blob=embedding_to_blob(centroid),
+                    model_key=resolved_model_key,
+                    quality_score=float(len(samples)),
+                )
+                rebuilt_count += 1
+            self._report_progress(
+                progress_reporter,
+                subphase="rebuild_prototypes",
+                total_count=total_person_count,
+                completed_count=index,
+                unit="person",
             )
-            rebuilt_count += 1
 
         return rebuilt_count
 
@@ -182,15 +197,36 @@ class PrototypeService:
         )
         return True
 
-    def rebuild_ann_index_from_active_prototypes(self, *, model_key: str | None = None) -> int:
+    def rebuild_ann_index_from_active_prototypes(
+        self,
+        *,
+        model_key: str | None = None,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
+    ) -> int:
         resolved_model_key = self.resolve_default_model_key(preferred=model_key)
         if resolved_model_key is None:
-            return self.ann_index_store.rebuild_from_prototypes([])
+            result = self.ann_index_store.rebuild_from_prototypes([])
+            self._report_progress(
+                progress_reporter,
+                subphase="rebuild_ann_index",
+                total_count=0,
+                completed_count=0,
+                unit="prototype",
+            )
+            return result
         prototypes = self.person_repo.list_active_prototypes(
             prototype_type="centroid",
             model_key=resolved_model_key,
         )
-        return self.ann_index_store.rebuild_from_prototypes(prototypes)
+        result = self.ann_index_store.rebuild_from_prototypes(prototypes)
+        self._report_progress(
+            progress_reporter,
+            subphase="rebuild_ann_index",
+            total_count=len(prototypes),
+            completed_count=len(prototypes),
+            unit="prototype",
+        )
+        return result
 
     def sync_person_ann_entry(self, *, person_id: int, model_key: str | None = None) -> int:
         resolved_model_key = self.resolve_default_model_key(preferred=model_key)
@@ -215,3 +251,29 @@ class PrototypeService:
                 model_key=resolved_model_key,
             )
             return self.ann_index_store.rebuild_from_prototypes(all_prototypes)
+
+    def _report_progress(
+        self,
+        progress_reporter: Callable[[dict[str, object]], None] | None,
+        *,
+        subphase: str,
+        total_count: int,
+        completed_count: int,
+        unit: str,
+    ) -> None:
+        if progress_reporter is None:
+            return
+        total = max(0, int(total_count))
+        completed = min(max(0, int(completed_count)), total)
+        percent = 100.0 if total <= 0 else round((completed / total) * 100.0, 1)
+        progress_reporter(
+            {
+                "phase": "prototype_ann_rebuild_optional",
+                "subphase": str(subphase),
+                "status": "running",
+                "unit": str(unit),
+                "total_count": total,
+                "completed_count": completed,
+                "percent": percent,
+            }
+        )

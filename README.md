@@ -133,6 +133,7 @@ python scripts/rebuild_identities_v3.py --workspace <workspace-copy> --backup-db
 python -m hikbox_pictures.cli serve --workspace <workspace> --host 0.0.0.0 --port 8000
 ```
 
+- 如果当前 workspace 还没有 active `identity_threshold_profile`，首次执行 `rebuild_identities_v3.py` 且未传 `--threshold-profile` 时，会按当前 `face_embedding` 绑定自动创建一份默认 profile，并在本轮质量回填阶段更新面积/清晰度分位点。
 - 调参验收入口：`/identity-tuning`（只读）。
 - phase1 明确允许 scan/review/actions/export 旧功能暂时失效；不在本阶段做封禁或兼容兜底。
 - 主链验收必须包含真实图片路径，不允许只跑 seed/mock 夹具。

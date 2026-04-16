@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 import json
 from pathlib import Path
@@ -63,11 +64,17 @@ class IdentityRebuildService:
         backup_db: bool,
         skip_ann_rebuild: bool,
         threshold_profile_path: Path | None,
+        progress_reporter: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         profile_service = IdentityThresholdProfileService(self.conn)
         clear_scope = self._collect_clear_scope()
         ann_artifacts = self._list_ann_artifacts()
 
+        self._report_progress(
+            progress_reporter,
+            phase="backup_db",
+            backup_db_enabled=bool(backup_db),
+        )
         backup_path = self._backup_db_if_needed(enabled=backup_db)
         summary: dict[str, Any] = {
             "workspace": str(self.workspace),
@@ -96,6 +103,7 @@ class IdentityRebuildService:
         }
 
         if dry_run:
+            self._report_progress(progress_reporter, phase="summary", dry_run=True)
             threshold_candidate_validated = False
             if threshold_profile_path is not None:
                 payload = json.loads(threshold_profile_path.read_text(encoding="utf-8"))
@@ -117,18 +125,22 @@ class IdentityRebuildService:
             if managed_transaction:
                 self.conn.execute("BEGIN")
 
+            self._report_progress(progress_reporter, phase="profile_resolve")
             profile_resolution = profile_service.resolve_profile_for_rebuild(threshold_profile_path)
             summary["executed_phase1_order"].append("profile_resolve")
             profile_id = int(profile_resolution["profile_id"])
             model_key = profile_service.get_profile_model_key(profile_id)
 
+            self._report_progress(progress_reporter, phase="clear_identity_export_layers")
             cleared_counts, fk_break_updates = self._clear_identity_export_layers()
             summary["executed_phase1_order"].append("clear_identity_export_layers")
             removed_ann_artifact_count = self._clear_ann_artifacts()
 
+            self._report_progress(progress_reporter, phase="quality_backfill")
             backfill_summary = ObservationQualityBackfillService(self.conn).backfill_all_observations(
                 profile_id=profile_id,
                 update_profile_quantiles=bool(profile_resolution["update_profile_quantiles"]),
+                progress_reporter=progress_reporter,
             )
             summary["executed_phase1_order"].append("quality_backfill")
 
@@ -138,18 +150,31 @@ class IdentityRebuildService:
                 person_repo,
                 AnnIndexStore(self.paths.artifacts_dir / "ann" / "prototype_index.npz"),
             )
+            self._report_progress(progress_reporter, phase="bootstrap_materialize")
             bootstrap_summary = IdentityBootstrapService(
                 self.conn,
                 identity_repo=IdentityRepo(self.conn),
                 person_repo=person_repo,
                 prototype_service=prototype_service,
+                progress_reporter=progress_reporter,
             ).run_bootstrap(profile_id=profile_id)
             summary["executed_phase1_order"].append("bootstrap_materialize")
 
             prototype_rebuild_summary: dict[str, int] | None = None
+            self._report_progress(
+                progress_reporter,
+                phase="prototype_ann_rebuild_optional",
+                enabled=not bool(skip_ann_rebuild),
+            )
             if not skip_ann_rebuild:
-                rebuilt_count = prototype_service.rebuild_all_person_prototypes(model_key=model_key)
-                indexed_count = prototype_service.rebuild_ann_index_from_active_prototypes(model_key=model_key)
+                rebuilt_count = prototype_service.rebuild_all_person_prototypes(
+                    model_key=model_key,
+                    progress_reporter=progress_reporter,
+                )
+                indexed_count = prototype_service.rebuild_ann_index_from_active_prototypes(
+                    model_key=model_key,
+                    progress_reporter=progress_reporter,
+                )
                 prototype_rebuild_summary = {
                     "rebuilt_person_prototype_count": int(rebuilt_count),
                     "ann_index_person_count": int(indexed_count),
@@ -198,6 +223,7 @@ class IdentityRebuildService:
             )
             if managed_transaction:
                 self.conn.commit()
+            self._report_progress(progress_reporter, phase="summary")
             summary["executed_phase1_order"].append("summary")
             self._persist_summary(summary)
             return summary
@@ -334,3 +360,19 @@ class IdentityRebuildService:
     def _count_rows(self, table: str) -> int:
         row = self.conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
         return int(row["c"]) if row is not None else 0
+
+    def _report_progress(
+        self,
+        progress_reporter: Callable[[dict[str, Any]], None] | None,
+        *,
+        phase: str,
+        **payload: Any,
+    ) -> None:
+        if progress_reporter is None:
+            return
+        progress_payload: dict[str, Any] = {
+            "phase": str(phase),
+            "status": "running",
+        }
+        progress_payload.update(payload)
+        progress_reporter(progress_payload)

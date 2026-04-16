@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,11 +48,13 @@ class IdentityBootstrapService:
         identity_repo: IdentityRepo,
         person_repo: PersonRepo | None,
         prototype_service: PrototypeService | None,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         self.conn = conn
         self.identity_repo = identity_repo
         self.person_repo = person_repo
         self.prototype_service = prototype_service
+        self._progress_reporter = progress_reporter
 
     def plan_bootstrap(self, *, profile_id: int) -> dict[str, Any]:
         profile = self.identity_repo.get_profile_required(int(profile_id))
@@ -86,7 +89,8 @@ class IdentityBootstrapService:
                 threshold_profile_id=int(profile_id),
                 algorithm_version="identity.bootstrap.v1",
             )
-            for cluster_plan in plan["cluster_plans"]:
+            total_clusters = len(plan["cluster_plans"])
+            for index, cluster_plan in enumerate(plan["cluster_plans"], start=1):
                 cluster_id = self._persist_cluster_and_maybe_materialize(
                     batch_id=int(batch_id),
                     profile=profile,
@@ -100,6 +104,12 @@ class IdentityBootstrapService:
                     discarded_cluster_count += 1
                 else:
                     review_pending_cluster_count += 1
+                self._report_progress(
+                    subphase="persist_clusters",
+                    total_count=total_clusters,
+                    completed_count=index,
+                    unit="cluster",
+                )
 
             if managed_transaction:
                 self.conn.commit()
@@ -149,7 +159,20 @@ class IdentityBootstrapService:
         profile: dict[str, Any],
     ) -> tuple[list[tuple[int, int]], dict[str, int]]:
         n = len(observations)
+        total_pairs = (n * max(0, n - 1)) // 2
         if n <= 1:
+            self._report_progress(
+                subphase="distance_matrix",
+                total_count=total_pairs,
+                completed_count=total_pairs,
+                unit="pair",
+            )
+            self._report_progress(
+                subphase="evaluate_edges",
+                total_count=total_pairs,
+                completed_count=total_pairs,
+                unit="pair",
+            )
             return [], {
                 "not_mutual": 0,
                 "distance_recheck_failed": 0,
@@ -161,11 +184,19 @@ class IdentityBootstrapService:
         margin_threshold = float(profile["bootstrap_margin_threshold"])
 
         distances = np.full((n, n), np.inf, dtype=np.float64)
+        completed_pairs = 0
         for i in range(n):
             for j in range(i + 1, n):
                 distance = float(np.linalg.norm(observations[i].vector - observations[j].vector))
                 distances[i, j] = distance
                 distances[j, i] = distance
+            completed_pairs += max(0, n - i - 1)
+            self._report_progress(
+                subphase="distance_matrix",
+                total_count=total_pairs,
+                completed_count=completed_pairs,
+                unit="pair",
+            )
 
         top_k = 2
         near_neighbors: dict[int, set[int]] = {}
@@ -180,6 +211,12 @@ class IdentityBootstrapService:
                 best = float(ordered[0][0])
                 second = float(ordered[1][0]) if len(ordered) > 1 else best
                 margin_values[i] = max(0.0, second - best)
+            self._report_progress(
+                subphase="select_neighbors",
+                total_count=n,
+                completed_count=i + 1,
+                unit="observation",
+            )
 
         reject_counts = {
             "not_mutual": 0,
@@ -187,6 +224,7 @@ class IdentityBootstrapService:
             "photo_conflict": 0,
         }
         accepted_edges: list[tuple[int, int]] = []
+        completed_pairs = 0
         for i in range(n):
             for j in range(i + 1, n):
                 d = float(distances[i, j])
@@ -202,6 +240,13 @@ class IdentityBootstrapService:
                     reject_counts["photo_conflict"] += 1
                     continue
                 accepted_edges.append((i, j))
+            completed_pairs += max(0, n - i - 1)
+            self._report_progress(
+                subphase="evaluate_edges",
+                total_count=total_pairs,
+                completed_count=completed_pairs,
+                unit="pair",
+            )
 
         return accepted_edges, reject_counts
 
@@ -244,6 +289,12 @@ class IdentityBootstrapService:
             model_key=str(profile["embedding_model_key"]),
             min_quality=float(profile["high_quality_threshold"]),
         )
+        self._report_progress(
+            subphase="load_observations",
+            total_count=len(observations),
+            completed_count=len(observations),
+            unit="observation",
+        )
         accepted_edges, edge_reject_counts = self._build_edges(observations=observations, profile=profile)
         clusters = self._build_clusters(observations=observations, accepted_edges=accepted_edges)
 
@@ -257,7 +308,8 @@ class IdentityBootstrapService:
         discarded_cluster_count = 0
         estimated_low_confidence_assignment_count = 0
 
-        for cluster_observations in clusters:
+        total_clusters = len(clusters)
+        for index, cluster_observations in enumerate(clusters, start=1):
             cluster_plan = self._plan_cluster(profile=profile, cluster_observations=cluster_observations)
             cluster_plans.append(cluster_plan)
 
@@ -281,6 +333,12 @@ class IdentityBootstrapService:
                 trusted_reject_reason_distribution[cluster_plan.reject_reason] = (
                     trusted_reject_reason_distribution.get(cluster_plan.reject_reason, 0) + 1
                 )
+            self._report_progress(
+                subphase="plan_clusters",
+                total_count=total_clusters,
+                completed_count=index,
+                unit="cluster",
+            )
 
         quality_distribution = {
             "count": len(quality_values),
@@ -534,3 +592,28 @@ class IdentityBootstrapService:
             self.conn.execute("ROLLBACK TO SAVEPOINT bootstrap_materialize")
             self.conn.execute("RELEASE SAVEPOINT bootstrap_materialize")
             raise
+
+    def _report_progress(
+        self,
+        *,
+        subphase: str,
+        total_count: int,
+        completed_count: int,
+        unit: str,
+    ) -> None:
+        if self._progress_reporter is None:
+            return
+        total = max(0, int(total_count))
+        completed = min(max(0, int(completed_count)), total)
+        percent = 100.0 if total <= 0 else round((completed / total) * 100.0, 1)
+        self._progress_reporter(
+            {
+                "phase": "bootstrap_materialize",
+                "subphase": str(subphase),
+                "status": "running",
+                "unit": str(unit),
+                "total_count": total,
+                "completed_count": completed,
+                "percent": percent,
+            }
+        )

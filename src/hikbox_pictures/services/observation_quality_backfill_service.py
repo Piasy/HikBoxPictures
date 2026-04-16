@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 import math
 from pathlib import Path
 
@@ -31,12 +32,14 @@ class ObservationQualityBackfillService:
         *,
         profile_id: int,
         update_profile_quantiles: bool = False,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, int | float]:
         rows = self.asset_repo.list_active_observations_for_quality_backfill()
         return self._backfill_rows(
             rows=rows,
             profile_id=int(profile_id),
             update_profile_quantiles=update_profile_quantiles,
+            progress_reporter=progress_reporter,
         )
 
     def backfill_observations(
@@ -45,12 +48,14 @@ class ObservationQualityBackfillService:
         observation_ids: list[int],
         profile_id: int | None = None,
         update_profile_quantiles: bool = False,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, int | float]:
         rows = self.asset_repo.list_active_observations_for_quality_backfill_by_ids(observation_ids)
         return self._backfill_rows(
             rows=rows,
             profile_id=profile_id,
             update_profile_quantiles=update_profile_quantiles,
+            progress_reporter=progress_reporter,
         )
 
     def _backfill_rows(
@@ -59,12 +64,19 @@ class ObservationQualityBackfillService:
         rows: list[dict[str, object]],
         profile_id: int | None,
         update_profile_quantiles: bool,
+        progress_reporter: Callable[[dict[str, object]], None] | None,
     ) -> dict[str, int | float]:
         managed_transaction = not self.conn.in_transaction
         created_crop_files: list[Path] = []
         db_write_started = False
         try:
             if not rows:
+                self._report_progress(
+                    progress_reporter,
+                    subphase="write_scores",
+                    total_count=0,
+                    completed_count=0,
+                )
                 result = {
                     "updated_observation_count": 0,
                     "area_log_p10": 0.0,
@@ -81,7 +93,8 @@ class ObservationQualityBackfillService:
 
             prepared_rows: list[dict[str, object]] = []
             sharpness_logs: list[float] = []
-            for row in rows:
+            total_rows = len(rows)
+            for index, row in enumerate(rows, start=1):
                 observation_id = int(row["id"])
                 crop_path, created_now = self._resolve_or_rebuild_crop_path(row)
                 sharpness_raw = self._compute_sharpness_raw(crop_path)
@@ -97,11 +110,17 @@ class ObservationQualityBackfillService:
                     }
                 )
                 sharpness_logs.append(math.log1p(max(sharpness_raw, 0.0)))
+                self._report_progress(
+                    progress_reporter,
+                    subphase="prepare_sharpness",
+                    total_count=total_rows,
+                    completed_count=index,
+                )
             sharpness_p10, sharpness_p90 = self._quantile_pair(sharpness_logs)
 
             db_write_started = True
             sharpness_by_observation: dict[int, float] = {}
-            for prepared in prepared_rows:
+            for index, prepared in enumerate(prepared_rows, start=1):
                 observation_id = int(prepared["observation_id"])
                 if bool(prepared["created_crop"]):
                     self.asset_repo.update_observation_crop_path(observation_id, str(prepared["crop_path"]))
@@ -120,7 +139,7 @@ class ObservationQualityBackfillService:
 
             if profile_id is not None:
                 profile = self.identity_repo.get_profile_required(int(profile_id))
-                for prepared in prepared_rows:
+                for index, prepared in enumerate(prepared_rows, start=1):
                     row = prepared["row"]
                     if not isinstance(row, dict):
                         continue
@@ -132,6 +151,12 @@ class ObservationQualityBackfillService:
                         profile=profile,
                     )
                     self.asset_repo.update_observation_quality_score(observation_id, quality_score)
+                    self._report_progress(
+                        progress_reporter,
+                        subphase="write_scores",
+                        total_count=total_rows,
+                        completed_count=index,
+                    )
 
             if managed_transaction:
                 self.conn.commit()
@@ -212,3 +237,28 @@ class ObservationQualityBackfillService:
             if raw_path:
                 return Path(str(raw_path)).resolve()
         raise RuntimeError("无法解析当前连接对应的数据库路径")
+
+    def _report_progress(
+        self,
+        progress_reporter: Callable[[dict[str, object]], None] | None,
+        *,
+        subphase: str,
+        total_count: int,
+        completed_count: int,
+    ) -> None:
+        if progress_reporter is None:
+            return
+        total = max(0, int(total_count))
+        completed = min(max(0, int(completed_count)), total)
+        percent = 100.0 if total <= 0 else round((completed / total) * 100.0, 1)
+        progress_reporter(
+            {
+                "phase": "quality_backfill",
+                "subphase": str(subphase),
+                "status": "running",
+                "unit": "observation",
+                "total_count": total,
+                "completed_count": completed,
+                "percent": percent,
+            }
+        )

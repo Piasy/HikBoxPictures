@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import time
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -100,6 +101,106 @@ def test_rebuild_script_dry_run_reports_scope_and_backup_without_destructive_wri
     backup_path = Path(str(summary["backup_db_path"]))
     assert backup_path.exists()
     assert backup_path.is_file()
+
+
+def test_rebuild_without_existing_active_profile_bootstraps_default_profile(tmp_path: Path) -> None:
+    workspace = tmp_path / "task5-script-bootstrap-profile"
+    build_seed_workspace_with_mock_embeddings(workspace)
+
+    conn = connect_db(workspace / ".hikbox" / "library.db")
+    try:
+        assert _count(conn, "identity_threshold_profile") == 0
+        assert _active_profile_id(conn) is None
+    finally:
+        conn.close()
+
+    rc = rebuild_main(["--workspace", str(workspace), "--backup-db"])
+    assert rc == 0
+
+    summary = _FIXTURE_MODULE.read_workspace_rebuild_summary(workspace)
+    assert summary is not None
+    assert summary["threshold_profile_id"] is not None
+    assert summary["profile_mode"] == "seeded"
+    assert summary["profile"]["profile_mode"] == "seeded"
+    assert summary["imported_threshold_profile"] is False
+    assert summary["update_profile_quantiles"] is True
+
+    conn2 = connect_db(workspace / ".hikbox" / "library.db")
+    try:
+        assert _count(conn2, "identity_threshold_profile") == 1
+        active = conn2.execute(
+            "SELECT * FROM identity_threshold_profile WHERE active = 1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        assert active is not None
+        assert int(active["id"]) == int(summary["threshold_profile_id"])
+        assert str(active["embedding_model_key"]) == "pipeline-stub-v1"
+    finally:
+        conn2.close()
+
+
+def test_rebuild_script_emits_periodic_progress_logs_for_long_phase(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+) -> None:
+    closed = {"value": False}
+
+    class _FakeRebuildService:
+        def __init__(self, workspace: Path) -> None:
+            self.workspace = Path(workspace)
+
+        def run_rebuild(
+            self,
+            *,
+            dry_run: bool,
+            backup_db: bool,
+            skip_ann_rebuild: bool,
+            threshold_profile_path: Path | None,
+            progress_reporter=None,
+        ) -> dict[str, object]:
+            assert dry_run is False
+            assert backup_db is True
+            assert skip_ann_rebuild is False
+            assert threshold_profile_path is None
+            assert progress_reporter is not None
+            progress_reporter(
+                {
+                    "phase": "quality_backfill",
+                    "subphase": "write_scores",
+                    "status": "running",
+                    "total_count": 100,
+                    "completed_count": 25,
+                    "percent": 25.0,
+                    "unit": "observation",
+                }
+            )
+            time.sleep(0.035)
+            return {
+                "threshold_profile_id": 1,
+                "profile_mode": "seeded",
+                "materialized_cluster_count": 0,
+                "review_pending_cluster_count": 0,
+                "discarded_cluster_count": 0,
+            }
+
+        def close(self) -> None:
+            closed["value"] = True
+
+    monkeypatch.setattr(_SCRIPT_MODULE, "IdentityRebuildService", _FakeRebuildService)
+    monkeypatch.setattr(_SCRIPT_MODULE, "_PROGRESS_HEARTBEAT_SECONDS", 0.01, raising=False)
+
+    rc = rebuild_main(["--workspace", str(tmp_path), "--backup-db"])
+
+    assert rc == 0
+    assert closed["value"] is True
+    captured = capsys.readouterr()
+    assert "identity v3 进度:" in captured.err
+    assert "quality_backfill" in captured.err
+    assert "\"subphase\": \"write_scores\"" in captured.err
+    assert "\"total_count\": 100" in captured.err
+    assert "\"completed_count\": 25" in captured.err
+    assert "\"percent\": 25.0" in captured.err
+    assert "identity v3 重建完成:" in captured.out
 
 
 def test_rebuild_script_roundtrip_profile_idempotent_and_clears_identity_export_layers(tmp_path: Path) -> None:

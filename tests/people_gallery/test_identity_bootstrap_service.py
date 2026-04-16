@@ -4,6 +4,10 @@ import sys
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
+from hikbox_pictures.ann import AnnIndexStore
+from hikbox_pictures.repositories.identity_repo import IdentityRepo
+from hikbox_pictures.services.identity_bootstrap_service import IdentityBootstrapService
+
 _FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
 _SPEC = spec_from_file_location("people_gallery_fixtures_workspace_identity_bootstrap", _FIXTURE_PATH)
 if _SPEC is None or _SPEC.loader is None:
@@ -230,5 +234,40 @@ def test_bootstrap_ann_sync_failure_compensates_to_review_pending_without_half_s
         assert row["resolved_person_id"] is None
         diagnostic = ws.parse_json(row["diagnostic_json"])
         assert diagnostic["reject_reason"] == "artifact_rebuild_failed"
+    finally:
+        ws.close()
+
+
+def test_bootstrap_reports_total_completed_and_percent(tmp_path: Path) -> None:
+    ws = build_identity_seed_workspace(tmp_path)
+    try:
+        ws.seed_edge_rule_challenge_case()
+        events: list[dict[str, object]] = []
+        service = IdentityBootstrapService(
+            ws.conn,
+            identity_repo=IdentityRepo(ws.conn),
+            person_repo=ws.person_repo,
+            prototype_service=ws.new_bootstrap_service().prototype_service,
+            progress_reporter=events.append,
+        )
+
+        service.run_bootstrap(profile_id=ws.profile_id)
+
+        distance_events = [
+            item
+            for item in events
+            if item.get("phase") == "bootstrap_materialize" and item.get("subphase") == "distance_matrix"
+        ]
+        persist_events = [
+            item
+            for item in events
+            if item.get("phase") == "bootstrap_materialize" and item.get("subphase") == "persist_clusters"
+        ]
+        assert distance_events
+        assert persist_events
+        final_persist = persist_events[-1]
+        assert int(final_persist["total_count"]) >= 1
+        assert int(final_persist["completed_count"]) == int(final_persist["total_count"])
+        assert float(final_persist["percent"]) == 100.0
     finally:
         ws.close()

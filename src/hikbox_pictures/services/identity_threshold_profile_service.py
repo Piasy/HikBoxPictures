@@ -20,6 +20,44 @@ class IdentityThresholdProfileService:
         "embedding_distance_metric",
         "embedding_schema_version",
     )
+    DEFAULT_PROFILE_BASE: dict[str, Any] = {
+        "profile_name": "默认阈值档",
+        "profile_version": "v1",
+        "quality_formula_version": "quality.v1",
+        "quality_area_weight": 0.6,
+        "quality_sharpness_weight": 0.4,
+        "quality_pose_weight": 0.0,
+        "area_log_p10": -3.1,
+        "area_log_p90": -1.4,
+        "sharpness_log_p10": 2.0,
+        "sharpness_log_p90": 3.0,
+        "pose_score_p10": None,
+        "pose_score_p90": None,
+        "low_quality_threshold": 0.45,
+        "high_quality_threshold": 0.75,
+        "trusted_seed_quality_threshold": 0.85,
+        "bootstrap_edge_accept_threshold": 0.8,
+        "bootstrap_edge_candidate_threshold": 0.88,
+        "bootstrap_margin_threshold": 0.28,
+        "bootstrap_min_cluster_size": 3,
+        "bootstrap_min_distinct_photo_count": 3,
+        "bootstrap_min_high_quality_count": 3,
+        "bootstrap_seed_min_count": 3,
+        "bootstrap_seed_max_count": 8,
+        "assignment_auto_min_quality": 0.75,
+        "assignment_auto_distance_threshold": 0.88,
+        "assignment_auto_margin_threshold": 0.35,
+        "assignment_review_distance_threshold": 0.98,
+        "assignment_require_photo_conflict_free": 1,
+        "trusted_min_quality": 0.85,
+        "trusted_centroid_distance_threshold": 0.88,
+        "trusted_margin_threshold": 0.35,
+        "trusted_block_exact_duplicate": 1,
+        "trusted_block_burst_duplicate": 1,
+        "burst_time_window_seconds": 3,
+        "possible_merge_distance_threshold": None,
+        "possible_merge_margin_threshold": None,
+    }
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
@@ -44,6 +82,20 @@ class IdentityThresholdProfileService:
         if active_profile is None:
             raise ValueError("当前没有 active profile，无法导出候选配置。")
         return {key: active_profile[key] for key in self.roundtrip_columns()}
+
+    def build_default_profile_from_workspace(self) -> dict[str, Any]:
+        binding = self.repo.detect_workspace_embedding_binding()
+        if binding is None:
+            raise ValueError("当前 workspace 没有可用向量，无法创建默认 profile。")
+        candidate = {
+            "embedding_feature_type": binding["embedding_feature_type"],
+            "embedding_model_key": binding["embedding_model_key"],
+            "embedding_distance_metric": binding["embedding_distance_metric"],
+            "embedding_schema_version": binding["embedding_schema_version"],
+            **self.DEFAULT_PROFILE_BASE,
+        }
+        self.validate_candidate_keys(candidate)
+        return candidate
 
     def insert_candidate_profile_from_json_dict(self, candidate: dict[str, Any]) -> int:
         self.validate_candidate_keys(candidate)
@@ -102,7 +154,16 @@ class IdentityThresholdProfileService:
 
         active = self.get_active_profile()
         if active is None:
-            raise ValueError("当前没有 active profile，无法执行重建。")
+            candidate = self.build_default_profile_from_workspace()
+            profile_id = self.insert_candidate_profile_from_json_dict(candidate)
+            self.activate_profile(profile_id)
+            return {
+                "profile_id": int(profile_id),
+                "profile_mode": "seeded",
+                "imported_threshold_profile": False,
+                "update_profile_quantiles": True,
+            }
+
         candidate = self.build_candidate_profile_from_active()
         profile_id = self.insert_candidate_profile_from_json_dict(candidate)
         self.activate_profile(profile_id)
