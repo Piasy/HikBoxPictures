@@ -5,6 +5,7 @@ from hashlib import sha256
 from importlib.util import module_from_spec, spec_from_file_location
 import json
 from pathlib import Path
+import shutil
 from typing import Any
 
 import numpy as np
@@ -1442,6 +1443,42 @@ class IdentitySeedWorkspace:
 
     def close(self) -> None:
         self.conn.close()
+
+    def read_json(self, path: Path) -> dict[str, Any]:
+        return read_json(path)
+
+    def db_checksum(self) -> str:
+        digest = sha256()
+        tables = self.conn.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name NOT LIKE 'sqlite_%'
+            ORDER BY name ASC
+            """
+        ).fetchall()
+        for row in tables:
+            table = str(row["name"])
+            digest.update(table.encode("utf-8"))
+            table_rows = self.conn.execute(f"SELECT * FROM {table} ORDER BY rowid ASC").fetchall()
+            for item in table_rows:
+                payload = json.dumps(dict(item), sort_keys=True, ensure_ascii=False, default=str)
+                digest.update(payload.encode("utf-8"))
+        return digest.hexdigest()
+
+    def identity_profile_roundtrip_columns(self) -> list[str]:
+        from hikbox_pictures.services.identity_threshold_profile_service import IdentityThresholdProfileService
+
+        return IdentityThresholdProfileService(self.conn).roundtrip_columns()
+
+    def copy_workspace(self, target: Path) -> Path:
+        self.conn.commit()
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(self.root, target)
+        return target
 
     def parse_json(self, payload: Any) -> dict[str, Any]:
         if isinstance(payload, dict):

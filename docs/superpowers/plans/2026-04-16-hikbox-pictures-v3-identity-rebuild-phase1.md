@@ -1287,7 +1287,7 @@ git commit -m "feat: add strict phase1 rebuild orchestrator and real-pipeline ac
 - Create: `tests/people_gallery/test_identity_threshold_evaluation_script.py`
 - Modify: `tests/people_gallery/fixtures_workspace.py`
 
-- [ ] **Step 1: 写失败测试，锁定评估输出维度与 round-trip 验证**
+- [x] **Step 1: 写失败测试，锁定评估输出维度与 round-trip 验证**
 
 ```python
 # tests/people_gallery/test_identity_threshold_evaluation_script.py
@@ -1334,12 +1334,12 @@ def test_candidate_profile_can_be_consumed_by_rebuild_script(identity_seed_works
     assert rc_rebuild == 0
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_threshold_evaluation_script.py -v`
 Expected: FAIL（评估脚本/服务尚不存在）。
 
-- [ ] **Step 3: 实现评估脚本，复用同一算法但零业务写入**
+- [x] **Step 3: 实现评估脚本，复用同一算法但零业务写入**
 
 ```python
 # src/hikbox_pictures/services/identity_threshold_evaluation_service.py
@@ -1372,7 +1372,7 @@ output_dir.mkdir(parents=True, exist_ok=True)
 (output_dir / "candidate-thresholds.json").write_text(json.dumps(report["candidate_profile"], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 ```
 
-- [ ] **Step 4: 运行评估脚本回归 + round-trip 联调**
+- [x] **Step 4: 运行评估脚本回归 + round-trip 联调**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_threshold_evaluation_script.py tests/people_gallery/test_rebuild_identities_v3_script.py -q`
 Expected: PASS。

@@ -24,63 +24,74 @@ class _Observation:
     vector: np.ndarray[Any, np.dtype[np.float32]]
 
 
+@dataclass
+class _ClusterPlan:
+    observations: list[_Observation]
+    selected_seeds: list[_Observation]
+    reject_reason: str | None
+    cluster_status: str
+    decision_kind: str
+    pre_dedup_seed_candidate_count: int
+    dedup_drop_counts: dict[str, int]
+    member_count: int
+    distinct_photo_count: int
+    quality_distribution: dict[str, float]
+    representative_observation_id: int
+
+
 class IdentityBootstrapService:
     def __init__(
         self,
         conn: sqlite3.Connection,
         *,
         identity_repo: IdentityRepo,
-        person_repo: PersonRepo,
-        prototype_service: PrototypeService,
+        person_repo: PersonRepo | None,
+        prototype_service: PrototypeService | None,
     ) -> None:
         self.conn = conn
         self.identity_repo = identity_repo
         self.person_repo = person_repo
         self.prototype_service = prototype_service
 
+    def plan_bootstrap(self, *, profile_id: int) -> dict[str, Any]:
+        profile = self.identity_repo.get_profile_required(int(profile_id))
+        plan = self._build_bootstrap_plan(profile=profile)
+        return {
+            "materialized_cluster_count": int(plan["materialized_cluster_count"]),
+            "review_pending_cluster_count": int(plan["review_pending_cluster_count"]),
+            "discarded_cluster_count": int(plan["discarded_cluster_count"]),
+            "estimated_low_confidence_assignment_count": int(plan["estimated_low_confidence_assignment_count"]),
+            "cluster_size_distribution": dict(plan["cluster_size_distribution"]),
+            "distinct_photo_distribution": dict(plan["distinct_photo_distribution"]),
+            "quality_distribution": dict(plan["quality_distribution"]),
+            "trusted_reject_reason_distribution": dict(plan["trusted_reject_reason_distribution"]),
+            "edge_reject_counts": dict(plan["edge_reject_counts"]),
+            "algorithm_version": "identity.bootstrap.v1",
+        }
+
     def run_bootstrap(self, *, profile_id: int) -> dict[str, Any]:
+        if self.person_repo is None or self.prototype_service is None:
+            raise RuntimeError("run_bootstrap 需要可写 person_repo/prototype_service 依赖。")
         managed_transaction = not self.conn.in_transaction
         try:
             profile = self.identity_repo.get_profile_required(int(profile_id))
             model_key = str(profile["embedding_model_key"])
-            observations = self._load_observations(
-                model_key=model_key,
-                min_quality=float(profile["high_quality_threshold"]),
-            )
+            plan = self._build_bootstrap_plan(profile=profile)
 
+            materialized_cluster_count = 0
+            review_pending_cluster_count = 0
+            discarded_cluster_count = 0
             batch_id = self.identity_repo.create_bootstrap_batch(
                 model_key=model_key,
                 threshold_profile_id=int(profile_id),
                 algorithm_version="identity.bootstrap.v1",
             )
-
-            if not observations:
-                summary = {
-                    "materialized_cluster_count": 0,
-                    "review_pending_cluster_count": 0,
-                    "discarded_cluster_count": 0,
-                    "edge_reject_counts": {
-                        "not_mutual": 0,
-                        "distance_recheck_failed": 0,
-                        "photo_conflict": 0,
-                    },
-                }
-                if managed_transaction:
-                    self.conn.commit()
-                return summary
-
-            accepted_edges, edge_reject_counts = self._build_edges(observations=observations, profile=profile)
-            clusters = self._build_clusters(observations=observations, accepted_edges=accepted_edges)
-
-            materialized_cluster_count = 0
-            review_pending_cluster_count = 0
-            discarded_cluster_count = 0
-            for cluster_observations in clusters:
+            for cluster_plan in plan["cluster_plans"]:
                 cluster_id = self._persist_cluster_and_maybe_materialize(
                     batch_id=int(batch_id),
                     profile=profile,
-                    cluster_observations=cluster_observations,
-                    edge_reject_counts=edge_reject_counts,
+                    cluster_plan=cluster_plan,
+                    edge_reject_counts=plan["edge_reject_counts"],
                 )
                 status = self.identity_repo.get_cluster_status(int(cluster_id))
                 if status == "materialized":
@@ -96,7 +107,7 @@ class IdentityBootstrapService:
                 "materialized_cluster_count": int(materialized_cluster_count),
                 "review_pending_cluster_count": int(review_pending_cluster_count),
                 "discarded_cluster_count": int(discarded_cluster_count),
-                "edge_reject_counts": dict(edge_reject_counts),
+                "edge_reject_counts": dict(plan["edge_reject_counts"]),
             }
         except Exception:
             if managed_transaction and self.conn.in_transaction:
@@ -228,17 +239,85 @@ class IdentityBootstrapService:
 
         return sorted(grouped.values(), key=lambda group: min(item.observation_id for item in group))
 
-    def _persist_cluster_and_maybe_materialize(
+    def _build_bootstrap_plan(self, *, profile: dict[str, Any]) -> dict[str, Any]:
+        observations = self._load_observations(
+            model_key=str(profile["embedding_model_key"]),
+            min_quality=float(profile["high_quality_threshold"]),
+        )
+        accepted_edges, edge_reject_counts = self._build_edges(observations=observations, profile=profile)
+        clusters = self._build_clusters(observations=observations, accepted_edges=accepted_edges)
+
+        cluster_plans: list[_ClusterPlan] = []
+        cluster_size_distribution: dict[str, int] = {}
+        distinct_photo_distribution: dict[str, int] = {}
+        trusted_reject_reason_distribution: dict[str, int] = {}
+        quality_values: list[float] = []
+        materialized_cluster_count = 0
+        review_pending_cluster_count = 0
+        discarded_cluster_count = 0
+        estimated_low_confidence_assignment_count = 0
+
+        for cluster_observations in clusters:
+            cluster_plan = self._plan_cluster(profile=profile, cluster_observations=cluster_observations)
+            cluster_plans.append(cluster_plan)
+
+            cluster_size_key = str(cluster_plan.member_count)
+            distinct_photo_key = str(cluster_plan.distinct_photo_count)
+            cluster_size_distribution[cluster_size_key] = cluster_size_distribution.get(cluster_size_key, 0) + 1
+            distinct_photo_distribution[distinct_photo_key] = (
+                distinct_photo_distribution.get(distinct_photo_key, 0) + 1
+            )
+            quality_values.extend(item.quality_score for item in cluster_observations)
+
+            if cluster_plan.cluster_status == "materialized":
+                materialized_cluster_count += 1
+            elif cluster_plan.cluster_status == "discarded":
+                discarded_cluster_count += 1
+            else:
+                review_pending_cluster_count += 1
+                estimated_low_confidence_assignment_count += cluster_plan.member_count
+
+            if cluster_plan.reject_reason is not None:
+                trusted_reject_reason_distribution[cluster_plan.reject_reason] = (
+                    trusted_reject_reason_distribution.get(cluster_plan.reject_reason, 0) + 1
+                )
+
+        quality_distribution = {
+            "count": len(quality_values),
+            "min": min(quality_values) if quality_values else 0.0,
+            "max": max(quality_values) if quality_values else 0.0,
+            "avg": (sum(quality_values) / len(quality_values)) if quality_values else 0.0,
+            "high_quality_threshold": float(profile["high_quality_threshold"]),
+            "trusted_seed_quality_threshold": float(profile["trusted_seed_quality_threshold"]),
+            "edge_reject_counts": dict(edge_reject_counts),
+        }
+
+        return {
+            "cluster_plans": cluster_plans,
+            "edge_reject_counts": edge_reject_counts,
+            "materialized_cluster_count": int(materialized_cluster_count),
+            "review_pending_cluster_count": int(review_pending_cluster_count),
+            "discarded_cluster_count": int(discarded_cluster_count),
+            "estimated_low_confidence_assignment_count": int(estimated_low_confidence_assignment_count),
+            "cluster_size_distribution": dict(sorted(cluster_size_distribution.items(), key=lambda item: int(item[0]))),
+            "distinct_photo_distribution": dict(
+                sorted(distinct_photo_distribution.items(), key=lambda item: int(item[0]))
+            ),
+            "quality_distribution": quality_distribution,
+            "trusted_reject_reason_distribution": dict(sorted(trusted_reject_reason_distribution.items())),
+        }
+
+    def _plan_cluster(
         self,
         *,
-        batch_id: int,
         profile: dict[str, Any],
         cluster_observations: list[_Observation],
-        edge_reject_counts: dict[str, int],
-    ) -> int:
+    ) -> _ClusterPlan:
         member_count = len(cluster_observations)
         distinct_photo_count = len({item.photo_asset_id for item in cluster_observations})
-        high_quality_count = sum(1 for item in cluster_observations if item.quality_score >= float(profile["high_quality_threshold"]))
+        high_quality_count = sum(
+            1 for item in cluster_observations if item.quality_score >= float(profile["high_quality_threshold"])
+        )
 
         seed_candidates = [
             item
@@ -289,12 +368,17 @@ class IdentityBootstrapService:
         elif reject_reason is None:
             decision_kind = "candidate_materialize"
 
-        diagnostic = {
-            "cluster_size": member_count,
-            "distinct_photo_count": distinct_photo_count,
-            "selected_seed_count": len(selected_seeds),
-            "pre_dedup_seed_candidate_count": pre_dedup_seed_candidate_count,
-            "quality_distribution": {
+        return _ClusterPlan(
+            observations=cluster_observations,
+            selected_seeds=selected_seeds,
+            reject_reason=reject_reason,
+            cluster_status=cluster_status,
+            decision_kind=decision_kind,
+            pre_dedup_seed_candidate_count=pre_dedup_seed_candidate_count,
+            dedup_drop_counts=dedup_drop_counts,
+            member_count=member_count,
+            distinct_photo_count=distinct_photo_count,
+            quality_distribution={
                 "min": min((item.quality_score for item in cluster_observations), default=0.0),
                 "max": max((item.quality_score for item in cluster_observations), default=0.0),
                 "avg": (
@@ -303,26 +387,42 @@ class IdentityBootstrapService:
                     else 0.0
                 ),
             },
+            representative_observation_id=max(
+                cluster_observations,
+                key=lambda item: (item.quality_score, -item.observation_id),
+            ).observation_id,
+        )
+
+    def _persist_cluster_and_maybe_materialize(
+        self,
+        *,
+        batch_id: int,
+        profile: dict[str, Any],
+        cluster_plan: _ClusterPlan,
+        edge_reject_counts: dict[str, int],
+    ) -> int:
+        diagnostic = {
+            "cluster_size": cluster_plan.member_count,
+            "distinct_photo_count": cluster_plan.distinct_photo_count,
+            "selected_seed_count": len(cluster_plan.selected_seeds),
+            "pre_dedup_seed_candidate_count": cluster_plan.pre_dedup_seed_candidate_count,
+            "quality_distribution": cluster_plan.quality_distribution,
             "external_margin": float(profile["bootstrap_margin_threshold"]),
             "edge_reject_counts": dict(edge_reject_counts),
-            "dedup_drop_counts": dict(dedup_drop_counts),
-            "reject_reason": reject_reason,
-            "decision_kind": decision_kind,
+            "dedup_drop_counts": dict(cluster_plan.dedup_drop_counts),
+            "reject_reason": cluster_plan.reject_reason,
+            "decision_kind": cluster_plan.decision_kind,
         }
 
-        representative_observation_id = max(
-            cluster_observations,
-            key=lambda item: (item.quality_score, -item.observation_id),
-        ).observation_id
         cluster_id = self.identity_repo.create_cluster(
             batch_id=int(batch_id),
-            representative_observation_id=int(representative_observation_id),
-            cluster_status=cluster_status,
+            representative_observation_id=int(cluster_plan.representative_observation_id),
+            cluster_status=cluster_plan.cluster_status,
             resolved_person_id=None,
             diagnostic_json=json.dumps(diagnostic, ensure_ascii=False, sort_keys=True),
         )
-        seed_observation_ids = {item.observation_id for item in selected_seeds}
-        for member in cluster_observations:
+        seed_observation_ids = {item.observation_id for item in cluster_plan.selected_seeds}
+        for member in cluster_plan.observations:
             self.identity_repo.add_cluster_member(
                 cluster_id=int(cluster_id),
                 face_observation_id=int(member.observation_id),
@@ -331,7 +431,7 @@ class IdentityBootstrapService:
                 is_seed_candidate=int(member.observation_id) in seed_observation_ids,
             )
 
-        if reject_reason is not None:
+        if cluster_plan.reject_reason is not None:
             return int(cluster_id)
 
         self.conn.execute("SAVEPOINT bootstrap_cluster_finalize")
@@ -340,8 +440,8 @@ class IdentityBootstrapService:
                 cluster_id=int(cluster_id),
                 profile_id=int(profile["id"]),
                 model_key=str(profile["embedding_model_key"]),
-                members=cluster_observations,
-                seeds=selected_seeds,
+                members=cluster_plan.observations,
+                seeds=cluster_plan.selected_seeds,
             )
 
             finalized = dict(diagnostic)
@@ -378,6 +478,8 @@ class IdentityBootstrapService:
         members: list[_Observation],
         seeds: list[_Observation],
     ) -> int:
+        if self.person_repo is None or self.prototype_service is None:
+            raise RuntimeError("_materialize_cluster 缺少可写依赖。")
         self.conn.execute("SAVEPOINT bootstrap_materialize")
         try:
             person_id = self.person_repo.create_anonymous_person(
