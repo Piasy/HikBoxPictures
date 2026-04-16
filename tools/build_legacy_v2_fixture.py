@@ -2,208 +2,196 @@
 from __future__ import annotations
 
 import argparse
-import sqlite3
 from pathlib import Path
 
-MIGRATION_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS schema_migration (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
+try:
+    import sqlite3
+except ModuleNotFoundError:
+    import pysqlite3 as sqlite3  # type: ignore[no-redef]
 
 
-# 该选择集来自 2026-04-16 本地旧库快照，用于生成体积小且关系完整的 v2 测试库。
-SELECTION = {
-    "library_source": [1, 2],
-    "scan_session": [1, 2],
-    "scan_session_source": [1, 2, 4, 5],
-    "photo_asset": [1, 4, 10, 205, 206],
-    "face_observation": [1, 2, 3, 5, 8, 25, 219, 220],
-    "person": [1, 2, 3],
-    "person_face_assignment": [1, 2, 28, 29, 59, 72],
-    "person_prototype": [3, 33, 34],
-    "review_item": [1, 5, 219],
-    "export_template": [1],
-    "export_template_person": [1, 2],
-}
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
 
 
-def _load_columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    return [str(row[1]) for row in rows]
+def _migration_path(version: int) -> Path:
+    return _repo_root() / "src" / "hikbox_pictures" / "db" / "migrations" / f"{version:04d}_{_migration_name(version)}.sql"
 
 
-def _copy_by_ids(
-    *,
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    table: str,
-    ids: list[int],
-    id_col: str = "id",
-) -> int:
-    if not ids:
-        return 0
-
-    columns = _load_columns(src, table)
-    col_sql = ", ".join(columns)
-    placeholders = ",".join("?" for _ in ids)
-    rows = src.execute(
-        f"SELECT {col_sql} FROM {table} WHERE {id_col} IN ({placeholders}) ORDER BY {id_col} ASC",
-        tuple(ids),
-    ).fetchall()
-    if not rows:
-        return 0
-
-    value_marks = ", ".join("?" for _ in columns)
-    insert_sql = f"INSERT INTO {table}({col_sql}) VALUES ({value_marks})"
-    for row in rows:
-        dst.execute(insert_sql, tuple(row[idx] for idx in range(len(columns))))
-    return len(rows)
+def _migration_name(version: int) -> str:
+    names = {
+        1: "people_gallery",
+        2: "photo_asset_progress_index",
+        3: "person_face_exclusion",
+    }
+    return names[version]
 
 
-def _copy_by_where(
-    *,
-    src: sqlite3.Connection,
-    dst: sqlite3.Connection,
-    table: str,
-    where_sql: str,
-    params: tuple[object, ...] = (),
-) -> int:
-    columns = _load_columns(src, table)
-    col_sql = ", ".join(columns)
-    rows = src.execute(
-        f"SELECT {col_sql} FROM {table} WHERE {where_sql}",
-        params,
-    ).fetchall()
-    if not rows:
-        return 0
-
-    value_marks = ", ".join("?" for _ in columns)
-    insert_sql = f"INSERT INTO {table}({col_sql}) VALUES ({value_marks})"
-    for row in rows:
-        dst.execute(insert_sql, tuple(row[idx] for idx in range(len(columns))))
-    return len(rows)
+def _reset_db(path: Path) -> sqlite3.Connection:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.unlink()
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
-def _init_v2_schema(dst: sqlite3.Connection, repo_root: Path) -> None:
-    dst.execute(MIGRATION_TABLE_SQL)
-
-    scripts = [
-        repo_root / "src/hikbox_pictures/db/migrations/0001_people_gallery.sql",
-        repo_root / "src/hikbox_pictures/db/migrations/0002_photo_asset_progress_index.sql",
-        repo_root / "src/hikbox_pictures/db/migrations/0003_person_face_exclusion.sql",
-    ]
-    for path in scripts:
-        dst.executescript(path.read_text(encoding="utf-8"))
-
-    for version, name in [(1, "people_gallery"), (2, "photo_asset_progress_index"), (3, "person_face_exclusion")]:
-        dst.execute(
+def _apply_legacy_schema(conn: sqlite3.Connection) -> None:
+    for version in (1, 2, 3):
+        conn.executescript(_migration_path(version).read_text(encoding="utf-8"))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migration (
+            version INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    for version in (1, 2, 3):
+        conn.execute(
             "INSERT INTO schema_migration(version, name) VALUES (?, ?)",
-            (version, name),
+            (version, _migration_name(version)),
         )
 
 
-def build_fixture(*, source_db: Path, output_db: Path, repo_root: Path) -> None:
-    if not source_db.exists():
-        raise FileNotFoundError(f"旧库不存在: {source_db}")
+def _seed_legacy_data(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        INSERT INTO library_source(id, name, root_path, root_fingerprint, active)
+        VALUES (1, 'legacy-source', '/legacy/source', 'legacy-fp-1', 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO scan_session(id, mode, status, started_at, finished_at)
+        VALUES (1, 'initial', 'completed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO photo_asset(id, library_source_id, primary_path, processing_status, capture_datetime, capture_month)
+        VALUES
+            (1, 1, '/legacy/source/a.jpg', 'assignment_done', '2025-01-01T10:00:00+08:00', '2025-01'),
+            (2, 1, '/legacy/source/b.jpg', 'assignment_done', '2025-01-02T10:00:00+08:00', '2025-01')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO face_observation(
+            id, photo_asset_id, bbox_top, bbox_right, bbox_bottom, bbox_left, face_area_ratio, active
+        )
+        VALUES
+            (101, 1, 0.0, 0.5, 0.5, 0.0, 0.25, 1),
+            (102, 1, 0.5, 1.0, 1.0, 0.5, 0.20, 1),
+            (103, 2, 0.0, 0.5, 0.5, 0.0, 0.22, 1),
+            (104, 2, 0.5, 1.0, 1.0, 0.5, 0.18, 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO auto_cluster_batch(id, model_key, algorithm_version)
+        VALUES (11, 'pipeline-stub-v1', 'hdbscan-v1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO auto_cluster(id, batch_id, confidence, representative_observation_id)
+        VALUES (21, 11, 0.93, 101)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO auto_cluster_member(id, cluster_id, face_observation_id, membership_score)
+        VALUES
+            (31, 21, 101, 0.97),
+            (32, 21, 102, 0.81)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO person(
+            id, display_name, cover_observation_id, status, confirmed, ignored, merged_into_person_id
+        )
+        VALUES
+            (1, 'Penny', 101, 'active', 1, 0, NULL),
+            (2, 'Piasy', 102, 'active', 1, 0, NULL),
+            (3, 'Legacy-03', NULL, 'active', 1, 0, NULL)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO person_face_assignment(
+            id, person_id, face_observation_id, assignment_source, confidence, locked, confirmed_at, active
+        )
+        VALUES
+            (1, 1, 101, 'manual', 1.0, 1, NULL, 1),
+            (2, 2, 102, 'manual', 0.9, 1, NULL, 1),
+            (3, 1, 103, 'auto', 0.6, 0, NULL, 1),
+            (4, 3, 104, 'split', 0.4, 0, NULL, 0)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO person_face_exclusion(
+            id, person_id, face_observation_id, assignment_id, reason, active
+        )
+        VALUES (1, 2, 103, 3, 'manual_exclude', 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO review_item(
+            id, review_type, primary_person_id, secondary_person_id, face_observation_id, payload_json, priority, status
+        )
+        VALUES
+            (1, 'new_person', 1, NULL, 103, '{}', 10, 'open')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO export_template(
+            id, name, output_root, include_group, export_live_mov, enabled
+        )
+        VALUES (1, 'legacy-template', '/tmp/export', 1, 0, 1)
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO export_template_person(id, template_id, person_id, position)
+        VALUES
+            (1, 1, 1, 0),
+            (2, 1, 2, 1)
+        """
+    )
 
-    output_db.parent.mkdir(parents=True, exist_ok=True)
-    if output_db.exists():
-        output_db.unlink()
 
-    src = sqlite3.connect(source_db)
-    dst = sqlite3.connect(output_db)
-
+def build_fixture(output: Path) -> Path:
+    conn = _reset_db(output)
     try:
-        _init_v2_schema(dst, repo_root)
-        dst.commit()
-
-        dst.execute("PRAGMA foreign_keys = OFF")
-
-        copied: dict[str, int] = {}
-        copied["library_source"] = _copy_by_ids(src=src, dst=dst, table="library_source", ids=SELECTION["library_source"])
-        copied["scan_session"] = _copy_by_ids(src=src, dst=dst, table="scan_session", ids=SELECTION["scan_session"])
-        copied["scan_session_source"] = _copy_by_ids(src=src, dst=dst, table="scan_session_source", ids=SELECTION["scan_session_source"])
-
-        copied["scan_checkpoint"] = _copy_by_where(
-            src=src,
-            dst=dst,
-            table="scan_checkpoint",
-            where_sql="scan_session_source_id IN (1, 2, 4, 5)",
-        )
-
-        copied["photo_asset"] = _copy_by_ids(src=src, dst=dst, table="photo_asset", ids=SELECTION["photo_asset"])
-        copied["face_observation"] = _copy_by_ids(src=src, dst=dst, table="face_observation", ids=SELECTION["face_observation"])
-        copied["face_embedding"] = _copy_by_ids(
-            src=src,
-            dst=dst,
-            table="face_embedding",
-            ids=SELECTION["face_observation"],
-            id_col="face_observation_id",
-        )
-
-        copied["person"] = _copy_by_ids(src=src, dst=dst, table="person", ids=SELECTION["person"])
-        copied["person_face_assignment"] = _copy_by_ids(
-            src=src,
-            dst=dst,
-            table="person_face_assignment",
-            ids=SELECTION["person_face_assignment"],
-        )
-        copied["person_prototype"] = _copy_by_ids(src=src, dst=dst, table="person_prototype", ids=SELECTION["person_prototype"])
-        copied["review_item"] = _copy_by_ids(src=src, dst=dst, table="review_item", ids=SELECTION["review_item"])
-
-        copied["export_template"] = _copy_by_ids(src=src, dst=dst, table="export_template", ids=SELECTION["export_template"])
-        copied["export_template_person"] = _copy_by_ids(
-            src=src,
-            dst=dst,
-            table="export_template_person",
-            ids=SELECTION["export_template_person"],
-        )
-
-        # 当前抽样不包含这些表的业务数据，保留空表结构即可。
-        _copy_by_where(src=src, dst=dst, table="person_face_exclusion", where_sql="0")
-        _copy_by_where(src=src, dst=dst, table="export_run", where_sql="0")
-        _copy_by_where(src=src, dst=dst, table="export_delivery", where_sql="0")
-        _copy_by_where(src=src, dst=dst, table="ops_event", where_sql="0")
-
-        dst.commit()
-        dst.execute("PRAGMA foreign_keys = ON")
-
-        violations = dst.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:
-            raise RuntimeError(f"fixture 外键校验失败: {violations[:5]}")
-
-        dst.execute("VACUUM")
-        size = output_db.stat().st_size
-        print(f"已生成: {output_db}")
-        print(f"文件大小: {size} bytes")
-        for table, count in copied.items():
-            print(f"{table}: {count}")
+        _apply_legacy_schema(conn)
+        _seed_legacy_data(conn)
+        fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if fk_violations:
+            raise RuntimeError(f"legacy fixture 外键校验失败: {fk_violations}")
+        conn.commit()
     finally:
-        src.close()
-        dst.close()
+        conn.close()
+    return output
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="从旧版大库构建最小 v2 测试库 fixture")
+    parser = argparse.ArgumentParser(description="生成用于真实升级测试的 legacy v2 小型数据库 fixture")
     parser.add_argument(
-        "--source-db",
+        "--output",
         type=Path,
-        default=Path(".hikbox/.hikbox/library.db"),
-        help="源旧库路径（默认: .hikbox/.hikbox/library.db）",
-    )
-    parser.add_argument(
-        "--output-db",
-        type=Path,
-        default=Path("tests/data/legacy-v2-small.db"),
-        help="输出 fixture 路径（默认: tests/data/legacy-v2-small.db）",
+        default=_repo_root() / "tests" / "data" / "legacy-v2-small.db",
+        help="输出 SQLite 文件路径",
     )
     args = parser.parse_args()
-
-    repo_root = Path(__file__).resolve().parents[1]
-    build_fixture(source_db=args.source_db.resolve(), output_db=(repo_root / args.output_db).resolve(), repo_root=repo_root)
+    output = build_fixture(args.output.resolve())
+    print(f"已生成: {output}")
     return 0
 
 

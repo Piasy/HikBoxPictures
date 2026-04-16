@@ -147,7 +147,7 @@
 - Modify: `tests/people_gallery/test_workspace_bootstrap.py`
 - Modify: `docs/db_schema/README.md`
 
-- [ ] **Step 1: 先写失败测试，锁定“旧库升级 + 契约字段 + 约束仍生效”**
+- [x] **Step 1: 先写失败测试，锁定“旧库升级 + 契约字段 + 约束仍生效”**
 
 ```python
 # tests/people_gallery/test_identity_v3_schema_migration.py
@@ -253,12 +253,12 @@ def test_upgrade_keeps_fk_and_unique_constraints_enabled(tmp_path):
         )
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_v3_schema_migration.py -v`
 Expected: FAIL（0004 迁移与 helper 尚不存在）。
 
-- [ ] **Step 3: 实现迁移与仓储契约（禁止迁移内 foreign_keys OFF）**
+- [x] **Step 3: 实现迁移与仓储契约（禁止迁移内 foreign_keys OFF）**
 
 ```sql
 -- src/hikbox_pictures/db/migrations/0004_identity_rebuild_v3_schema.sql
@@ -469,7 +469,7 @@ DROP TABLE person_face_exclusion_old;
 DROP TABLE person_face_assignment_old;
 ```
 
-- [ ] **Step 4: 回归 migration + db_schema 文档一致性**
+- [x] **Step 4: 回归 migration + db_schema 文档一致性**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_v3_schema_migration.py tests/people_gallery/test_workspace_bootstrap.py -q`
 Expected: PASS。

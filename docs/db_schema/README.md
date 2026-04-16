@@ -3,13 +3,13 @@
 ## 文档定位
 
 - 本文记录当前仓库 `src/hikbox_pictures/db/migrations/` 已落地 migration 链对应的最新数据库 schema 快照。
-- 当前最新 migration 为 `0003_person_face_exclusion.sql`。
+- 当前最新 migration 为 `0004_identity_rebuild_v3_schema.sql`。
 - 数据库类型为 SQLite。
 - 本文只描述已经落地的表、字段、索引和约束，不包含设计稿或讨论中的未来变更。
 
 ## Schema 概览
 
-- 当前共有 20 张表。
+- 当前共有 22 张表。
 - 布尔语义统一使用 `INTEGER`，取值为 `0` 或 `1`。
 - 大部分时间字段使用 `TEXT` 存储，并以 `CURRENT_TIMESTAMP` 作为默认值。
 - `cursor_json`、`payload_json`、`detail_json` 等字段在库中以 JSON 字符串形式存储。
@@ -18,7 +18,7 @@
 | --- | --- |
 | 来源与扫描 | `library_source`、`scan_session`、`scan_session_source`、`scan_checkpoint`、`photo_asset` |
 | 人脸观测与聚类 | `face_observation`、`face_embedding`、`auto_cluster_batch`、`auto_cluster`、`auto_cluster_member` |
-| 人物与复核 | `person`、`person_face_assignment`、`person_face_exclusion`、`person_prototype`、`review_item` |
+| 人物与复核 | `identity_threshold_profile`、`person`、`person_face_assignment`、`person_face_exclusion`、`person_trusted_sample`、`person_prototype`、`review_item` |
 | 导出与运维 | `export_template`、`export_template_person`、`export_run`、`export_delivery`、`ops_event` |
 
 ## 当前表结构
@@ -179,6 +179,9 @@
 | `id` | `INTEGER` | 主键，自增 | 聚类批次主键。 |
 | `model_key` | `TEXT` | 非空 | 聚类所基于的向量模型。 |
 | `algorithm_version` | `TEXT` | 非空 | 聚类算法版本。 |
+| `batch_type` | `TEXT` | 非空，枚举 `bootstrap` / `incremental` | 批次类型。 |
+| `threshold_profile_id` | `INTEGER` | 可空，外键到 `identity_threshold_profile.id` | 该批聚类使用的阈值配置。 |
+| `scan_session_id` | `INTEGER` | 可空，外键到 `scan_session.id` | 触发该批聚类的扫描会话。 |
 | `created_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 批次创建时间。 |
 
 ### `auto_cluster`
@@ -189,8 +192,10 @@
 | --- | --- | --- | --- |
 | `id` | `INTEGER` | 主键，自增 | Cluster 主键。 |
 | `batch_id` | `INTEGER` | 非空，外键到 `auto_cluster_batch.id` | 所属聚类批次。 |
-| `confidence` | `REAL` | 可空 | Cluster 级置信度。 |
 | `representative_observation_id` | `INTEGER` | 可空，外键到 `face_observation.id` | 代表该 cluster 的观测。 |
+| `cluster_status` | `TEXT` | 非空，枚举 `materialized` / `review_pending` / `review_resolved` / `ignored` / `discarded` | 当前 cluster 的处置状态。 |
+| `resolved_person_id` | `INTEGER` | 可空，外键到 `person.id` | cluster 最终落到的人物。 |
+| `diagnostic_json` | `TEXT` | 非空，默认 `'{}'` | cluster 决策诊断信息。 |
 | `created_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 创建时间。 |
 
 ### `auto_cluster_member`
@@ -203,11 +208,67 @@
 | `cluster_id` | `INTEGER` | 非空，外键到 `auto_cluster.id` | 所属 cluster。 |
 | `face_observation_id` | `INTEGER` | 非空，外键到 `face_observation.id` | 参与该 cluster 的人脸观测。 |
 | `membership_score` | `REAL` | 可空 | 该观测落入 cluster 的成员分数。 |
+| `quality_score_snapshot` | `REAL` | 可空 | 写入时刻的质量分快照。 |
+| `is_seed_candidate` | `INTEGER` | 非空，默认 `0`，`0/1` | 是否入选 bootstrap seed 候选。 |
 | `created_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 创建时间。 |
 
 关键索引与约束：
 
 - `UNIQUE (cluster_id, face_observation_id)`：同一观测不能重复加入同一 cluster。
+
+### `identity_threshold_profile`
+
+用途：身份重建与自动归属流程的阈值配置表。
+
+字段契约（按职责分组）：
+
+| 字段组 | 字段 | 类型 | 约束 / 默认值 | 含义 |
+| --- | --- | --- | --- | --- |
+| 基础标识 | `id` | `INTEGER` | 主键，自增 | Profile 主键。 |
+| 基础标识 | `profile_name` | `TEXT` | 非空 | Profile 名称。 |
+| 基础标识 | `profile_version` | `TEXT` | 非空 | Profile 版本号。 |
+| 向量绑定 | `embedding_feature_type` | `TEXT` | 非空 | 向量特征类型（当前为人脸特征）。 |
+| 向量绑定 | `embedding_model_key` | `TEXT` | 非空 | 向量模型标识。 |
+| 向量绑定 | `embedding_distance_metric` | `TEXT` | 非空 | 距离度量（当前流程按 cosine 语义使用）。 |
+| 向量绑定 | `embedding_schema_version` | `TEXT` | 非空 | 向量 schema 版本。 |
+| 质量分参数 | `quality_formula_version` | `TEXT` | 非空 | 质量分公式版本。 |
+| 质量分参数 | `quality_area_weight` | `REAL` | 非空 | 质量分中面积权重。 |
+| 质量分参数 | `quality_sharpness_weight` | `REAL` | 非空 | 质量分中清晰度权重。 |
+| 质量分参数 | `quality_pose_weight` | `REAL` | 非空 | 质量分中姿态权重。 |
+| 质量分参数 | `area_log_p10` / `area_log_p90` | `REAL` | 非空 | 面积对数分布分位点。 |
+| 质量分参数 | `sharpness_log_p10` / `sharpness_log_p90` | `REAL` | 非空 | 清晰度对数分布分位点。 |
+| 质量分参数 | `pose_score_p10` / `pose_score_p90` | `REAL` | 可空 | 姿态分布分位点（可按数据情况缺省）。 |
+| 质量阈值 | `low_quality_threshold` | `REAL` | 非空 | 低质量阈值。 |
+| 质量阈值 | `high_quality_threshold` | `REAL` | 非空 | 高质量阈值。 |
+| 质量阈值 | `trusted_seed_quality_threshold` | `REAL` | 非空 | trusted seed 最低质量阈值。 |
+| Bootstrap 聚类 | `bootstrap_edge_accept_threshold` | `REAL` | 非空 | 边直接接受阈值。 |
+| Bootstrap 聚类 | `bootstrap_edge_candidate_threshold` | `REAL` | 非空 | 边候选阈值。 |
+| Bootstrap 聚类 | `bootstrap_margin_threshold` | `REAL` | 非空 | 候选边距阈值。 |
+| Bootstrap 聚类 | `bootstrap_min_cluster_size` | `INTEGER` | 非空 | 最小 cluster 大小。 |
+| Bootstrap 聚类 | `bootstrap_min_distinct_photo_count` | `INTEGER` | 非空 | 最小不同照片数。 |
+| Bootstrap 聚类 | `bootstrap_min_high_quality_count` | `INTEGER` | 非空 | 最小高质量样本数。 |
+| Bootstrap 聚类 | `bootstrap_seed_min_count` / `bootstrap_seed_max_count` | `INTEGER` | 非空 | seed 数量上下限。 |
+| 自动归属 | `assignment_auto_min_quality` | `REAL` | 非空 | 自动归属最低质量门槛。 |
+| 自动归属 | `assignment_auto_distance_threshold` | `REAL` | 非空 | 自动归属距离阈值。 |
+| 自动归属 | `assignment_auto_margin_threshold` | `REAL` | 非空 | 自动归属边距阈值。 |
+| 自动归属 | `assignment_review_distance_threshold` | `REAL` | 非空 | 进入人工复核的距离阈值。 |
+| 自动归属 | `assignment_require_photo_conflict_free` | `INTEGER` | 非空，`0/1` | 是否要求同图冲突消解后才可自动归属。 |
+| Trusted Sample | `trusted_min_quality` | `REAL` | 非空 | trusted 样本最低质量。 |
+| Trusted Sample | `trusted_centroid_distance_threshold` | `REAL` | 非空 | trusted 样本到质心距离阈值。 |
+| Trusted Sample | `trusted_margin_threshold` | `REAL` | 非空 | trusted 判定边距阈值。 |
+| Trusted Sample | `trusted_block_exact_duplicate` | `INTEGER` | 非空，`0/1` | 是否阻断完全重复样本。 |
+| Trusted Sample | `trusted_block_burst_duplicate` | `INTEGER` | 非空，`0/1` | 是否阻断 burst 重复样本。 |
+| Trusted Sample | `burst_time_window_seconds` | `INTEGER` | 非空 | burst 判定时间窗口（秒）。 |
+| 合并建议 | `possible_merge_distance_threshold` | `REAL` | 可空 | 人物合并建议距离阈值。 |
+| 合并建议 | `possible_merge_margin_threshold` | `REAL` | 可空 | 人物合并建议边距阈值。 |
+| 激活状态 | `active` | `INTEGER` | 非空，默认 `0`，`0/1` | 当前 profile 是否激活。 |
+| 激活状态 | `activated_at` | `TEXT` | 可空 | 最近一次激活时间。 |
+| 审计字段 | `created_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 创建时间。 |
+| 审计字段 | `updated_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 最近更新时间。 |
+
+关键索引与约束：
+
+- `uq_identity_threshold_profile_active`：`active = 1` 的记录在全库内最多一条。
 
 ### `person`
 
@@ -218,6 +279,7 @@
 | `id` | `INTEGER` | 主键，自增 | 人物主键。 |
 | `display_name` | `TEXT` | 非空 | 人物显示名。 |
 | `cover_observation_id` | `INTEGER` | 可空，外键到 `face_observation.id` | 人物封面所用的人脸观测。 |
+| `origin_cluster_id` | `INTEGER` | 可空，外键到 `auto_cluster.id` | 人物最初来源 cluster。 |
 | `status` | `TEXT` | 非空，默认 `active`，枚举 `active` / `merged` / `ignored` | 人物状态。 |
 | `notes` | `TEXT` | 可空 | 人物备注。 |
 | `confirmed` | `INTEGER` | 非空，默认 `0`，`0/1` | 人物是否被人工确认。 |
@@ -235,8 +297,9 @@
 | `id` | `INTEGER` | 主键，自增 | 归属记录主键。 |
 | `person_id` | `INTEGER` | 非空，外键到 `person.id` | 归属到的人物。 |
 | `face_observation_id` | `INTEGER` | 非空，外键到 `face_observation.id` | 被归属的人脸观测。 |
-| `assignment_source` | `TEXT` | 非空，枚举 `auto` / `manual` / `merge` / `split` | 归属来源。当前 schema 仍保留 `split`。 |
-| `confidence` | `REAL` | 可空 | 归属置信度。 |
+| `assignment_source` | `TEXT` | 非空，枚举 `bootstrap` / `auto` / `manual` / `merge` | 归属来源。 |
+| `diagnostic_json` | `TEXT` | 非空，默认 `'{}'` | 归属决策诊断信息。 |
+| `threshold_profile_id` | `INTEGER` | 可空，外键到 `identity_threshold_profile.id` | 归属时使用的阈值配置。 |
 | `locked` | `INTEGER` | 非空，默认 `0`，`0/1` | 归属是否锁定，不允许自动覆盖。 |
 | `confirmed_at` | `TEXT` | 可空 | 人工确认时间。 |
 | `active` | `INTEGER` | 非空，默认 `1`，`0/1` | 该归属是否为当前有效归属。 |
@@ -246,6 +309,29 @@
 关键索引与约束：
 
 - `uq_person_face_assignment_active_observation`：`active = 1` 的记录中，同一 `face_observation_id` 只能有一个有效归属。
+
+### `person_trusted_sample`
+
+用途：人物可信样本池，用于后续原型与 ANN 构建。
+
+| 字段 | 类型 | 约束 / 默认值 | 含义 |
+| --- | --- | --- | --- |
+| `id` | `INTEGER` | 主键，自增 | 可信样本主键。 |
+| `person_id` | `INTEGER` | 非空，外键到 `person.id` | 所属人物。 |
+| `face_observation_id` | `INTEGER` | 非空，外键到 `face_observation.id` | 样本观测。 |
+| `trust_source` | `TEXT` | 非空，枚举 `bootstrap_seed` / `manual_confirm` | 样本来源。 |
+| `trust_score` | `REAL` | 非空，`0.0~1.0` | 可信分。 |
+| `quality_score_snapshot` | `REAL` | 非空 | 样本入池时质量分。 |
+| `threshold_profile_id` | `INTEGER` | 非空，外键到 `identity_threshold_profile.id` | 样本判定使用的阈值配置。 |
+| `source_review_id` | `INTEGER` | 可空，外键到 `review_item.id` | 来源复核项。 |
+| `source_auto_cluster_id` | `INTEGER` | 可空，外键到 `auto_cluster.id` | 来源 cluster。 |
+| `active` | `INTEGER` | 非空，默认 `1`，`0/1` | 样本是否仍有效。 |
+| `created_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 创建时间。 |
+| `updated_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 最近更新时间。 |
+
+关键索引与约束：
+
+- `uq_person_trusted_sample_active_observation`：`active = 1` 的记录中，同一 `face_observation_id` 只能出现一次。
 
 ### `person_face_exclusion`
 
@@ -451,6 +537,22 @@
 - 新建索引：
   - `idx_person_face_exclusion_observation_active`
   - `idx_person_face_exclusion_person_active`
+
+### `0004_identity_rebuild_v3_schema.sql`
+
+- 新增 `identity_threshold_profile` 表与部分唯一索引 `uq_identity_threshold_profile_active`。
+- 重建 `auto_cluster_batch` / `auto_cluster` / `auto_cluster_member` 三张表并迁移旧数据，补充 v3 字段：
+  - `auto_cluster_batch.batch_type` / `threshold_profile_id` / `scan_session_id`
+  - `auto_cluster.cluster_status` / `resolved_person_id` / `diagnostic_json`
+  - `auto_cluster_member.quality_score_snapshot` / `is_seed_candidate`
+- `person` 表新增 `origin_cluster_id` 外键列。
+- 新增 `person_trusted_sample` 表与部分唯一索引 `uq_person_trusted_sample_active_observation`。
+- 重建 `person_face_assignment`：
+  - 移除 `confidence`
+  - 新增 `diagnostic_json`、`threshold_profile_id`
+  - `assignment_source` 收敛为 `bootstrap` / `auto` / `manual` / `merge`
+  - 迁移时历史 `split` 写入为 `manual`
+- 重建 `person_face_exclusion` 并重新绑定 `assignment_id -> person_face_assignment(id)` 外键。
 
 ## 维护要求
 

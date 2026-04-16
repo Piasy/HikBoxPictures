@@ -19,20 +19,38 @@ class PersonRepo:
         confirmed: bool = False,
         ignored: bool = False,
         notes: str | None = None,
+        cover_observation_id: int | None = None,
+        origin_cluster_id: int | None = None,
     ) -> int:
         cursor = self.conn.execute(
             """
-            INSERT INTO person(display_name, status, confirmed, ignored, notes)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO person(
+                display_name,
+                status,
+                confirmed,
+                ignored,
+                notes,
+                cover_observation_id,
+                origin_cluster_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (display_name, status, 1 if confirmed else 0, 1 if ignored else 0, notes),
+            (
+                display_name,
+                status,
+                1 if confirmed else 0,
+                1 if ignored else 0,
+                notes,
+                int(cover_observation_id) if cover_observation_id is not None else None,
+                int(origin_cluster_id) if origin_cluster_id is not None else None,
+            ),
         )
         return int(cursor.lastrowid)
 
     def get_person(self, person_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
-            SELECT id, display_name, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
+            SELECT id, display_name, cover_observation_id, origin_cluster_id, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
             FROM person
             WHERE id = ?
             """,
@@ -43,12 +61,37 @@ class PersonRepo:
     def list_people(self) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
-            SELECT id, display_name, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
+            SELECT id, display_name, cover_observation_id, origin_cluster_id, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
             FROM person
             ORDER BY id ASC
             """
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def set_cover_observation(self, *, person_id: int, cover_observation_id: int | None) -> int:
+        cursor = self.conn.execute(
+            """
+            UPDATE person
+            SET cover_observation_id = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                int(cover_observation_id) if cover_observation_id is not None else None,
+                int(person_id),
+            ),
+        )
+        return int(cursor.rowcount)
+
+    def create_anonymous_person(self, *, origin_cluster_id: int | None, sequence: int) -> int:
+        return self.create_person(
+            display_name=f"未命名人物-{int(sequence)}",
+            status="active",
+            confirmed=False,
+            ignored=False,
+            notes=None,
+            origin_cluster_id=origin_cluster_id,
+        )
 
     def list_active_person_ids(self) -> list[int]:
         rows = self.conn.execute(

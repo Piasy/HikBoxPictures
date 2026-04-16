@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 try:
     import sqlite3
 except ModuleNotFoundError:
     import pysqlite3 as sqlite3  # type: ignore[no-redef]
+
+_UNSET = object()
+
+
+def _legacy_confidence_diagnostic(confidence: float) -> str:
+    return json.dumps(
+        {"legacy_confidence": float(confidence)},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
 
 
 class AssetRepo:
@@ -489,7 +500,7 @@ class AssetRepo:
     def get_assignment(self, assignment_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
-            SELECT id, person_id, face_observation_id, assignment_source, confidence,
+            SELECT id, person_id, face_observation_id, assignment_source, diagnostic_json, threshold_profile_id,
                    locked, confirmed_at, active, created_at, updated_at
             FROM person_face_assignment
             WHERE id = ?
@@ -518,7 +529,7 @@ class AssetRepo:
     def get_active_assignment_for_observation(self, face_observation_id: int) -> dict[str, Any] | None:
         row = self.conn.execute(
             """
-            SELECT id, person_id, face_observation_id, assignment_source, confidence,
+            SELECT id, person_id, face_observation_id, assignment_source, diagnostic_json, threshold_profile_id,
                    locked, confirmed_at, active, created_at, updated_at
             FROM person_face_assignment
             WHERE face_observation_id = ?
@@ -535,26 +546,33 @@ class AssetRepo:
         person_id: int,
         face_observation_id: int,
         assignment_source: str,
-        confidence: float | None,
+        confidence: float | None = None,
+        diagnostic_json: str | None = None,
+        threshold_profile_id: int | None = None,
         locked: bool = False,
     ) -> int:
+        resolved_diagnostic_json = diagnostic_json
+        if confidence is not None and resolved_diagnostic_json is None:
+            resolved_diagnostic_json = _legacy_confidence_diagnostic(float(confidence))
         cursor = self.conn.execute(
             """
             INSERT INTO person_face_assignment(
                 person_id,
                 face_observation_id,
                 assignment_source,
-                confidence,
+                diagnostic_json,
+                threshold_profile_id,
                 locked,
                 active
             )
-            VALUES (?, ?, ?, ?, ?, 1)
+            VALUES (?, ?, ?, ?, ?, ?, 1)
             """,
             (
                 int(person_id),
                 int(face_observation_id),
                 assignment_source,
-                confidence,
+                resolved_diagnostic_json if resolved_diagnostic_json is not None else "{}",
+                int(threshold_profile_id) if threshold_profile_id is not None else None,
                 1 if locked else 0,
             ),
         )
@@ -566,25 +584,40 @@ class AssetRepo:
         *,
         person_id: int,
         assignment_source: str,
-        confidence: float | None,
+        confidence: float | None = None,
+        diagnostic_json: str | None | object = _UNSET,
+        threshold_profile_id: int | None | object = _UNSET,
     ) -> int:
+        if confidence is not None and (diagnostic_json is _UNSET or diagnostic_json is None):
+            diagnostic_json = _legacy_confidence_diagnostic(float(confidence))
+        update_clauses = [
+            "person_id = ?",
+            "assignment_source = ?",
+        ]
+        params: list[Any] = [
+            int(person_id),
+            assignment_source,
+        ]
+        if diagnostic_json is not _UNSET:
+            update_clauses.append("diagnostic_json = ?")
+            params.append(diagnostic_json)
+        if threshold_profile_id is not _UNSET:
+            update_clauses.append("threshold_profile_id = ?")
+            if threshold_profile_id is None:
+                params.append(None)
+            else:
+                params.append(int(threshold_profile_id))
+        update_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        params.append(int(assignment_id))
         cursor = self.conn.execute(
-            """
+            f"""
             UPDATE person_face_assignment
-            SET person_id = ?,
-                assignment_source = ?,
-                confidence = ?,
-                updated_at = CURRENT_TIMESTAMP
+            SET {", ".join(update_clauses)}
             WHERE id = ?
               AND active = 1
               AND locked = 0
             """,
-            (
-                int(person_id),
-                assignment_source,
-                confidence,
-                int(assignment_id),
-            ),
+            tuple(params),
         )
         return int(cursor.rowcount)
 

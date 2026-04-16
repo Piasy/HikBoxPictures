@@ -115,11 +115,11 @@ class SeedWorkspace:
                 person_id,
                 face_observation_id,
                 assignment_source,
-                confidence,
+                diagnostic_json,
                 locked,
                 active
             )
-            VALUES (?, ?, ?, 1.0, ?, 1)
+            VALUES (?, ?, ?, '{}', ?, 1)
             """,
             (
                 int(person_id),
@@ -134,7 +134,7 @@ class SeedWorkspace:
     def get_assignment(self, assignment_id: int) -> dict[str, object] | None:
         row = self.conn.execute(
             """
-            SELECT id, person_id, face_observation_id, assignment_source, confidence, locked, active, updated_at
+            SELECT id, person_id, face_observation_id, assignment_source, diagnostic_json, threshold_profile_id, locked, active, updated_at
             FROM person_face_assignment
             WHERE id = ?
             """,
@@ -398,11 +398,11 @@ def build_seed_workspace(
                     person_id,
                     face_observation_id,
                     assignment_source,
-                    confidence,
+                    diagnostic_json,
                     locked,
                     active
                 )
-                VALUES (?, ?, 'manual', 1.0, 0, 1)
+                VALUES (?, ?, 'manual', '{}', 0, 1)
                 """,
                 (int(person_id), int(face_observation_id)),
             )
@@ -770,11 +770,11 @@ def inject_mock_embeddings_for_assets(
                         person_id,
                         face_observation_id,
                         assignment_source,
-                        confidence,
+                        diagnostic_json,
                         locked,
                         active
                     )
-                    VALUES (?, ?, ?, 1.0, ?, 1)
+                    VALUES (?, ?, ?, '{}', ?, 1)
                     """,
                     (
                         int(person_id),
@@ -788,7 +788,7 @@ def inject_mock_embeddings_for_assets(
                     """
                     UPDATE person_face_assignment
                     SET assignment_source = ?,
-                        confidence = 1.0,
+                        diagnostic_json = '{}',
                         locked = ?,
                         active = 1,
                         updated_at = CURRENT_TIMESTAMP

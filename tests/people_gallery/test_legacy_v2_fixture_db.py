@@ -39,7 +39,15 @@ def test_legacy_v2_small_db_can_drive_real_upgrade_path(tmp_path: Path) -> None:
             "person_face_assignment": _table_count(conn, "person_face_assignment"),
             "review_item": _table_count(conn, "review_item"),
             "export_template": _table_count(conn, "export_template"),
+            "auto_cluster_batch": _table_count(conn, "auto_cluster_batch"),
+            "auto_cluster": _table_count(conn, "auto_cluster"),
+            "auto_cluster_member": _table_count(conn, "auto_cluster_member"),
         }
+        assert before_counts["person"] > 0
+        assert before_counts["person_face_assignment"] > 0
+        assert before_counts["auto_cluster_batch"] > 0
+        assert before_counts["auto_cluster"] > 0
+        assert before_counts["auto_cluster_member"] > 0
 
         apply_migrations(conn)
 
@@ -48,8 +56,21 @@ def test_legacy_v2_small_db_can_drive_real_upgrade_path(tmp_path: Path) -> None:
             "person_face_assignment": _table_count(conn, "person_face_assignment"),
             "review_item": _table_count(conn, "review_item"),
             "export_template": _table_count(conn, "export_template"),
+            "auto_cluster_batch": _table_count(conn, "auto_cluster_batch"),
+            "auto_cluster": _table_count(conn, "auto_cluster"),
+            "auto_cluster_member": _table_count(conn, "auto_cluster_member"),
         }
         assert after_counts == before_counts
+
+        pfa_cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(person_face_assignment)").fetchall()}
+        assert "confidence" not in pfa_cols
+        assert {"diagnostic_json", "threshold_profile_id"}.issubset(pfa_cols)
+        person_cols = {str(row["name"]) for row in conn.execute("PRAGMA table_info(person)").fetchall()}
+        assert "origin_cluster_id" in person_cols
+        assert "cover_observation_id" in person_cols
+        person_row = conn.execute("SELECT cover_observation_id FROM person WHERE id = 1").fetchone()
+        assert person_row is not None
+        assert int(person_row["cover_observation_id"]) == 101
 
         fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
         assert fk_violations == []
@@ -58,7 +79,6 @@ def test_legacy_v2_small_db_can_drive_real_upgrade_path(tmp_path: Path) -> None:
             int(row["version"])
             for row in conn.execute("SELECT version FROM schema_migration ORDER BY version").fetchall()
         ]
-        assert applied_versions[:3] == [1, 2, 3]
-        assert len(applied_versions) >= 3
+        assert applied_versions == [1, 2, 3, 4]
     finally:
         conn.close()
