@@ -135,8 +135,26 @@ python -m hikbox_pictures.cli serve --workspace <workspace> --host 0.0.0.0 --por
 
 - 如果当前 workspace 还没有 active `identity_threshold_profile`，首次执行 `rebuild_identities_v3.py` 且未传 `--threshold-profile` 时，会按当前 `face_embedding` 绑定自动创建一份默认 profile，并在本轮质量回填阶段更新面积/清晰度分位点。
 - 调参验收入口：`/identity-tuning`（只读）。
+
 - phase1 明确允许 scan/review/actions/export 旧功能暂时失效；不在本阶段做封禁或兼容兜底。
 - 主链验收必须包含真实图片路径，不允许只跑 seed/mock 夹具。
+
+指定 observation 最近邻人工核对页：
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=src python scripts/export_observation_neighbors.py \
+  --workspace <workspace> \
+  --observation-ids 20416,24677,7695 \
+  --neighbor-count 8
+```
+
+说明：
+- `--observation-ids` 必填，使用英文逗号分隔多个 observation id。
+- `--neighbor-count` 选填，表示每个目标 observation 展示多少个最近邻，默认 `8`。
+- `--output-root` 选填；默认输出到 `.tmp/observation-nearest-neighbors/<timestamp>/`。
+- 输出目录下会按 `obs-<id>/` 拆分子目录，并生成 `index.html` 与 `manifest.json`，便于直接肉眼核对 crop / preview。
+- HTML 页面中的 `quality`、`distance` 和阈值说明统一保留两位小数，方便快速对比。
 
 ## 测试
 

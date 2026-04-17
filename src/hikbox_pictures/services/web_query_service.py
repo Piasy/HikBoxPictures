@@ -1011,6 +1011,35 @@ class WebQueryService:
             """
         ).fetchone()
         active_profile = dict(active_profile_row) if active_profile_row is not None else None
+        high_quality_threshold = (
+            float(active_profile["high_quality_threshold"])
+            if active_profile is not None and active_profile.get("high_quality_threshold") is not None
+            else None
+        )
+        high_quality_observations: list[dict[str, Any]] = []
+        if high_quality_threshold is not None:
+            high_quality_rows = self.conn.execute(
+                """
+                SELECT fo.id AS observation_id,
+                       fo.photo_asset_id,
+                       fo.quality_score
+                FROM face_observation AS fo
+                WHERE fo.active = 1
+                  AND fo.quality_score >= ?
+                ORDER BY fo.quality_score DESC, fo.id ASC
+                """,
+                (high_quality_threshold,),
+            ).fetchall()
+            high_quality_observations = [
+                {
+                    "observation_id": int(row["observation_id"]),
+                    "photo_asset_id": int(row["photo_asset_id"]),
+                    "quality_score": float(row["quality_score"]),
+                    "crop_url": f"/api/observations/{int(row['observation_id'])}/crop",
+                    "preview_url": f"/api/photos/{int(row['photo_asset_id'])}/preview",
+                }
+                for row in high_quality_rows
+            ]
 
         latest_batch_row = self.conn.execute(
             """
@@ -1030,6 +1059,8 @@ class WebQueryService:
         if latest_batch_row is None:
             return {
                 "active_profile": active_profile,
+                "high_quality_threshold": high_quality_threshold,
+                "high_quality_observations": high_quality_observations,
                 "bootstrap_batch": None,
                 "anonymous_people": [],
                 "pending_clusters": [],
@@ -1197,11 +1228,42 @@ class WebQueryService:
             """,
             (latest_batch_id,),
         ).fetchall()
+        distinct_photo_previews_by_cluster: dict[int, list[dict[str, Any]]] = {}
+        pending_cluster_ids = [int(row["id"]) for row in pending_rows]
+        if pending_cluster_ids:
+            placeholders = ", ".join("?" for _ in pending_cluster_ids)
+            distinct_photo_rows = self.conn.execute(
+                f"""
+                SELECT acm.cluster_id,
+                       fo.photo_asset_id,
+                       MIN(acm.face_observation_id) AS observation_id
+                FROM auto_cluster_member AS acm
+                JOIN face_observation AS fo
+                  ON fo.id = acm.face_observation_id
+                WHERE acm.cluster_id IN ({placeholders})
+                  AND fo.active = 1
+                GROUP BY acm.cluster_id, fo.photo_asset_id
+                ORDER BY acm.cluster_id ASC, MIN(acm.face_observation_id) ASC, fo.photo_asset_id ASC
+                """,
+                tuple(pending_cluster_ids),
+            ).fetchall()
+            for preview_row in distinct_photo_rows:
+                cluster_id = int(preview_row["cluster_id"])
+                photo_asset_id = int(preview_row["photo_asset_id"])
+                observation_id = int(preview_row["observation_id"])
+                distinct_photo_previews_by_cluster.setdefault(cluster_id, []).append(
+                    {
+                        "photo_asset_id": photo_asset_id,
+                        "observation_id": observation_id,
+                        "preview_url": f"/api/photos/{photo_asset_id}/preview",
+                    }
+                )
         for row in pending_rows:
+            cluster_id = int(row["id"])
             diagnostic = self._parse_review_payload(row["diagnostic_json"])
             pending_clusters.append(
                 {
-                    "cluster_id": int(row["id"]),
+                    "cluster_id": cluster_id,
                     "batch_id": int(row["batch_id"]),
                     "cluster_status": str(row["cluster_status"]),
                     "representative_observation_id": (
@@ -1217,6 +1279,7 @@ class WebQueryService:
                     "member_count": int(row["member_count"]),
                     "seed_candidate_count": int(row["seed_candidate_count"]),
                     "created_at": row["created_at"],
+                    "distinct_photo_previews": distinct_photo_previews_by_cluster.get(cluster_id, []),
                     "diagnostics": {
                         "cluster_size": diagnostic.get("cluster_size"),
                         "distinct_photo_count": diagnostic.get("distinct_photo_count"),
@@ -1231,6 +1294,8 @@ class WebQueryService:
 
         return {
             "active_profile": active_profile,
+            "high_quality_threshold": high_quality_threshold,
+            "high_quality_observations": high_quality_observations,
             "bootstrap_batch": bootstrap_batch,
             "anonymous_people": anonymous_people,
             "pending_clusters": pending_clusters,
