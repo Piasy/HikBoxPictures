@@ -1007,7 +1007,7 @@ git commit -m "feat: add v3.1 cluster bootstrap schema foundation (Task 1)"
 - Modify: `src/hikbox_pictures/services/observation_quality_backfill_service.py`
 - Modify: `src/hikbox_pictures/repositories/__init__.py`
 
-- [ ] **Step 1: 先写失败测试，固定 observation profile、snapshot reuse 与 pool entry 诊断字段**
+- [x] **Step 1: 先写失败测试，固定 observation profile、snapshot reuse 与 pool entry 诊断字段**
 
 ```python
 # tests/people_gallery/test_identity_observation_snapshot_service.py
@@ -1122,12 +1122,12 @@ def test_snapshot_rebuilds_when_candidate_policy_or_dataset_changes(tmp_path: Pa
 
 `fixtures_identity_v3_1.py` 中的 `seed_observation_mix_case()` 必须显式构造“可计算距离的真实向量布局”，且至少包含：同图去重、burst 去重、exact duplicate 折叠各 1 例；禁止用全零向量或无法区分距离的占位 embedding 跳过去重逻辑。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_observation_profile_contract.py tests/people_gallery/test_identity_observation_snapshot_service.py -q`
 Expected: FAIL，提示缺少 `fixtures_identity_v3_1.py`、`IdentityObservationSnapshotService` 或相关表/字段。
 
-- [ ] **Step 3: 实现 observation repo/service，并把 quality backfill 接到 snapshot builder 上**
+- [x] **Step 3: 实现 observation repo/service，并把 quality backfill 接到 snapshot builder 上**
 
 ```python
 # src/hikbox_pictures/services/identity_observation_snapshot_service.py
@@ -1210,7 +1210,7 @@ class IdentityObservationProfileService:
         return int(profile["id"])
 ```
 
-- [ ] **Step 4: 创建新的 v3.1 fixture，提供 snapshot/run/publish 全链路可复用 workspace builder**
+- [x] **Step 4: 创建新的 v3.1 fixture，提供 snapshot/run/publish 全链路可复用 workspace builder**
 
 ```python
 # tests/people_gallery/fixtures_identity_v3_1.py
@@ -1292,7 +1292,7 @@ class IdentityPhase1Workspace:
         self.conn.commit()
 ```
 
-- [ ] **Step 5: 回跑 observation profile/snapshot 测试与质量回填回归**
+- [x] **Step 5: 回跑 observation profile/snapshot 测试与质量回填回归**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_observation_quality_backfill_service.py tests/people_gallery/test_identity_observation_profile_contract.py tests/people_gallery/test_identity_observation_snapshot_service.py -q`
 Expected: PASS，除“可复用”正例外，还覆盖 `required_knn > max_knn_supported`、`candidate_policy_hash` 变化、dataset 变化三类“必须重建”反例；`candidate_policy_hash` / `max_knn_supported` 生效，且不回退到旧 `identity_threshold_profile`。

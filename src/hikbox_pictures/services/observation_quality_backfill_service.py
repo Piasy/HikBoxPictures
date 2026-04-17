@@ -12,7 +12,7 @@ except ModuleNotFoundError:
     import pysqlite3 as sqlite3  # type: ignore[no-redef]
 
 from hikbox_pictures.image_io import load_oriented_image
-from hikbox_pictures.repositories import AssetRepo, IdentityRepo
+from hikbox_pictures.repositories import AssetRepo, IdentityObservationRepo, IdentityRepo
 from hikbox_pictures.services.quality_score_service import QualityScoreService
 from hikbox_pictures.workspace import load_workspace_paths_from_db_path
 
@@ -22,6 +22,7 @@ class ObservationQualityBackfillService:
         self.conn = conn
         self.asset_repo = AssetRepo(conn)
         self.identity_repo = IdentityRepo(conn)
+        self.identity_observation_repo = IdentityObservationRepo(conn)
         self.quality_score_service = QualityScoreService()
         db_path = self._resolve_db_path()
         paths = load_workspace_paths_from_db_path(db_path)
@@ -32,6 +33,7 @@ class ObservationQualityBackfillService:
         *,
         profile_id: int,
         update_profile_quantiles: bool = False,
+        allow_legacy_profile: bool = True,
         progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, int | float]:
         rows = self.asset_repo.list_active_observations_for_quality_backfill()
@@ -39,6 +41,7 @@ class ObservationQualityBackfillService:
             rows=rows,
             profile_id=int(profile_id),
             update_profile_quantiles=update_profile_quantiles,
+            allow_legacy_profile=allow_legacy_profile,
             progress_reporter=progress_reporter,
         )
 
@@ -48,6 +51,7 @@ class ObservationQualityBackfillService:
         observation_ids: list[int],
         profile_id: int | None = None,
         update_profile_quantiles: bool = False,
+        allow_legacy_profile: bool = True,
         progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, int | float]:
         rows = self.asset_repo.list_active_observations_for_quality_backfill_by_ids(observation_ids)
@@ -55,6 +59,7 @@ class ObservationQualityBackfillService:
             rows=rows,
             profile_id=profile_id,
             update_profile_quantiles=update_profile_quantiles,
+            allow_legacy_profile=allow_legacy_profile,
             progress_reporter=progress_reporter,
         )
 
@@ -64,6 +69,7 @@ class ObservationQualityBackfillService:
         rows: list[dict[str, object]],
         profile_id: int | None,
         update_profile_quantiles: bool,
+        allow_legacy_profile: bool,
         progress_reporter: Callable[[dict[str, object]], None] | None,
     ) -> dict[str, int | float]:
         managed_transaction = not self.conn.in_transaction
@@ -128,17 +134,23 @@ class ObservationQualityBackfillService:
                 self.asset_repo.update_observation_sharpness_score(observation_id, sharpness_raw)
                 sharpness_by_observation[observation_id] = sharpness_raw
 
-            if profile_id is not None and update_profile_quantiles:
-                self.identity_repo.update_profile_quality_quantiles(
+            if profile_id is not None:
+                profile, is_legacy_profile = self._resolve_quality_profile(
                     profile_id=int(profile_id),
                     area_log_p10=area_p10,
                     area_log_p90=area_p90,
                     sharpness_log_p10=sharpness_p10,
                     sharpness_log_p90=sharpness_p90,
+                    allow_legacy_profile=allow_legacy_profile,
                 )
-
-            if profile_id is not None:
-                profile = self.identity_repo.get_profile_required(int(profile_id))
+                if is_legacy_profile and update_profile_quantiles:
+                    self.identity_repo.update_profile_quality_quantiles(
+                        profile_id=int(profile_id),
+                        area_log_p10=area_p10,
+                        area_log_p90=area_p90,
+                        sharpness_log_p10=sharpness_p10,
+                        sharpness_log_p90=sharpness_p90,
+                    )
                 for index, prepared in enumerate(prepared_rows, start=1):
                     row = prepared["row"]
                     if not isinstance(row, dict):
@@ -236,7 +248,35 @@ class ObservationQualityBackfillService:
             raw_path = row["file"] if isinstance(row, sqlite3.Row) else row[2]
             if raw_path:
                 return Path(str(raw_path)).resolve()
-        raise RuntimeError("无法解析当前连接对应的数据库路径")
+            raise RuntimeError("无法解析当前连接对应的数据库路径")
+
+    def _resolve_quality_profile(
+        self,
+        *,
+        profile_id: int,
+        area_log_p10: float,
+        area_log_p90: float,
+        sharpness_log_p10: float,
+        sharpness_log_p90: float,
+        allow_legacy_profile: bool,
+    ) -> tuple[dict[str, object], bool]:
+        observation_profile = self.identity_observation_repo.get_observation_profile(profile_id)
+        if observation_profile is not None:
+            return (
+                {
+                    "quality_area_weight": float(observation_profile["quality_area_weight"]),
+                    "quality_sharpness_weight": float(observation_profile["quality_sharpness_weight"]),
+                    "quality_pose_weight": float(observation_profile["quality_pose_weight"]),
+                    "area_log_p10": float(area_log_p10),
+                    "area_log_p90": float(area_log_p90),
+                    "sharpness_log_p10": float(sharpness_log_p10),
+                    "sharpness_log_p90": float(sharpness_log_p90),
+                },
+                False,
+            )
+        if not allow_legacy_profile:
+            raise ValueError(f"仅允许 observation profile，禁止回退 legacy threshold profile: {int(profile_id)}")
+        return self.identity_repo.get_profile_required(int(profile_id)), True
 
     def _report_progress(
         self,

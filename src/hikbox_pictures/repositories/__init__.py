@@ -1,5 +1,6 @@
 from .asset_repo import AssetRepo
 from .export_repo import ExportRepo
+from .identity_observation_repo import IdentityObservationRepo
 from .identity_repo import IdentityRepo
 from .ops_event_repo import OpsEventRepo
 from .person_repo import PersonRepo
@@ -10,6 +11,7 @@ from .source_repo import SourceRepo
 __all__ = [
     "AssetRepo",
     "ExportRepo",
+    "IdentityObservationRepo",
     "IdentityRepo",
     "OpsEventRepo",
     "PersonRepo",
