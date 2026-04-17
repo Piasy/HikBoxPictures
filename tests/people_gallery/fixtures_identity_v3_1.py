@@ -13,8 +13,10 @@ from PIL import Image, ImageDraw
 from hikbox_pictures.db.connection import connect_db
 from hikbox_pictures.db.migrator import apply_migrations
 from hikbox_pictures.repositories.asset_repo import AssetRepo
+from hikbox_pictures.repositories.identity_cluster_run_repo import IdentityClusterRunRepo
 from hikbox_pictures.repositories.identity_observation_repo import IdentityObservationRepo
 from hikbox_pictures.repositories.source_repo import SourceRepo
+from hikbox_pictures.services.identity_cluster_run_service import IdentityClusterRunService
 from hikbox_pictures.services.identity_observation_snapshot_service import IdentityObservationSnapshotService
 from hikbox_pictures.workspace import WorkspacePaths, init_workspace_layout
 
@@ -58,6 +60,82 @@ class IdentityPhase1Workspace:
             observation_repo=IdentityObservationRepo(self.conn),
             quality_backfill_service=_NoopBackfillService(self),
         )
+
+    def new_cluster_run_service(self) -> IdentityClusterRunService:
+        return IdentityClusterRunService(
+            self.conn,
+            cluster_run_repo=IdentityClusterRunRepo(self.conn),
+        )
+
+    def get_cluster_run(self, run_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT
+                id,
+                observation_snapshot_id,
+                cluster_profile_id,
+                run_status,
+                is_review_target,
+                review_selected_at,
+                is_materialization_owner,
+                supersedes_run_id,
+                started_at,
+                finished_at,
+                summary_json,
+                failure_json
+            FROM identity_cluster_run
+            WHERE id = ?
+            """,
+            (int(run_id),),
+        ).fetchone()
+        if row is None:
+            raise AssertionError(f"cluster run 不存在: {int(run_id)}")
+        return dict(row)
+
+    def count_review_targets(self) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM identity_cluster_run
+            WHERE is_review_target = 1
+            """
+        ).fetchone()
+        return int(row["c"])
+
+    def count_clusters(self, *, run_id: int) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM identity_cluster
+            WHERE run_id = ?
+            """,
+            (int(run_id),),
+        ).fetchone()
+        return int(row["c"])
+
+    def count_cluster_members(self, *, run_id: int) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM identity_cluster_member AS m
+            JOIN identity_cluster AS c ON c.id = m.cluster_id
+            WHERE c.run_id = ?
+            """,
+            (int(run_id),),
+        ).fetchone()
+        return int(row["c"])
+
+    def count_cluster_resolutions(self, *, run_id: int) -> int:
+        row = self.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM identity_cluster_resolution AS r
+            JOIN identity_cluster AS c ON c.id = r.cluster_id
+            WHERE c.run_id = ?
+            """,
+            (int(run_id),),
+        ).fetchone()
+        return int(row["c"])
 
     def list_pool_entries(self, *, snapshot_id: int, pool_kind: str, excluded_reason: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(

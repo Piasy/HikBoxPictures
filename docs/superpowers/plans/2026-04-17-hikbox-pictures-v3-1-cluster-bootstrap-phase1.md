@@ -1323,7 +1323,7 @@ git commit -m "feat: add observation snapshot pipeline for v3.1 bootstrap (Task 
 - Create: `tests/people_gallery/test_identity_cluster_profile_contract.py`
 - Create: `tests/people_gallery/test_identity_cluster_run_lifecycle.py`
 
-- [ ] **Step 1: 先写失败测试，锁定 `succeeded` 才能选 review target、首个成功 run 自动选中与单例约束**
+- [x] **Step 1: 先写失败测试，锁定 `succeeded` 才能选 review target、首个成功 run 自动选中与单例约束**
 
 ```python
 # tests/people_gallery/test_identity_cluster_run_lifecycle.py
@@ -1456,12 +1456,12 @@ def test_cancelled_run_cannot_be_selected_as_review_target(tmp_path: Path) -> No
         ws.close()
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_profile_contract.py tests/people_gallery/test_identity_cluster_run_lifecycle.py -q`
 Expected: FAIL，提示缺少 `IdentityClusterProfileService`、`IdentityClusterRunService` 或 run 表相关读写接口。
 
-- [ ] **Step 3: 实现 cluster profile service 与 run repo，先把 created/running/succeeded/failed/cancelled/select-review-target 契约写稳**
+- [x] **Step 3: 实现 cluster profile service 与 run repo，先把 created/running/succeeded/failed/cancelled/select-review-target 契约写稳**
 
 ```python
 # src/hikbox_pictures/services/identity_cluster_run_service.py
@@ -1562,7 +1562,7 @@ class IdentityClusterProfileService:
         return int(profile["id"])
 ```
 
-- [ ] **Step 4: 扩展 fixture helper，补 run/profile 查询方法并回跑测试**
+- [x] **Step 4: 扩展 fixture helper，补 run/profile 查询方法并回跑测试**
 
 ```python
 # tests/people_gallery/fixtures_identity_v3_1.py
