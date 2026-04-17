@@ -271,7 +271,7 @@ Phase 1 至少要有两类显式入口：
 - ANN 必须由“该 run 中所有 cluster 级 `prototype_bundle`”聚合生成一个 run-scoped prepared artifact。
 - `identity_cluster_resolution.ann_status` 表达的是“该 cluster 的 prototype 是否已被纳入所属 run 的 ANN prepared bundle / live ANN”，而不是“该 cluster 自己拥有一份独立 ANN 文件”。
 
-为了保证 `activate-run` 可校验、可重试、可审计，prepare 产物必须具备以下 staging 契约：
+为了保证 `activate-run` 可校验、可审计，prepare 产物必须具备以下 staging 契约：
 
 - 所有 prepared artifact 都必须落在 run-scoped staging root 下，而不是直接写 live 路径。
 - cluster 级和 run 级 manifest 至少都要记录：
@@ -284,6 +284,7 @@ Phase 1 至少要有两类显式入口：
 - `activate-run` 只能消费 manifest 完整且 checksum 校验通过的 prepared artifact。
 - 若某个 cluster 的 cluster 级 prepared bundle 不完整，该 cluster 必须回退为 `review_pending`。
 - 若 run 级 `ann_bundle` 构建失败，则该 run 中所有原本准备物化的 cluster 都必须回退为 `review_pending`，并显式记录 `run_ann_bundle_failed` 一类原因；不得带着残缺 ANN 进入 `materialized/prepared`。
+- Phase 1 不引入 activation journal 与自动 crash recovery；若 `activate-run` 过程中进程异常，允许通过人工重新执行 `activate-run` 收敛状态，自动恢复流程留到后续阶段。
 
 ### 这一层必须重跑的内容
 
@@ -1127,14 +1128,16 @@ Phase 1 至少要完整用到：
 - `raw(active)` -> `raw(split)` + 多个 `cleaned(active)`
 - `cleaned(active)` -> `final(active)`
 - `cleaned(active)` -> `final(discarded)`
-- `final(active)` -> `resolution_state = materialized`
-- `final(active)` -> `resolution_state = review_pending`
+- `final(active)` -> `resolution_state = unresolved`
+- `resolution_state = unresolved` -> `resolution_state = materialized`
+- `resolution_state = unresolved` -> `resolution_state = review_pending`
 - `final(discarded)` -> `resolution_state = discarded`
 
 约束如下：
 
 - 只有 `final` stage cluster 才允许进入 `identity_cluster_resolution`。
-- `final(active)` 只允许进入 `materialized` 或 `review_pending`。
+- `final(active)` 允许先进入 `unresolved`，再由 prepare/gate 结果转入 `materialized` 或 `review_pending`。
+- `resolution_state = unresolved` 只允许转入 `materialized` 或 `review_pending`。
 - `final(discarded)` 只允许进入 `resolution_state = discarded`。
 - 被 `split` 的父 cluster 不再直接参与 resolution。
 - `resolution_state = discarded` 必须能追溯到 cluster existence gate 失败，而不是随意手填。
