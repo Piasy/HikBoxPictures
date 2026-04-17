@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
+import math
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -137,6 +138,61 @@ class IdentityPhase1Workspace:
         ).fetchone()
         return int(row["c"])
 
+    def list_clusters(self, *, run_id: int, cluster_stage: str | None = None) -> list[dict[str, Any]]:
+        sql = """
+            SELECT *
+            FROM identity_cluster
+            WHERE run_id = ?
+        """
+        params: list[Any] = [int(run_id)]
+        if cluster_stage is not None:
+            sql += " AND cluster_stage = ?"
+            params.append(str(cluster_stage))
+        sql += " ORDER BY id ASC"
+        rows = self.conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_cluster_lineage(self, *, run_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT l.*
+            FROM identity_cluster_lineage AS l
+            JOIN identity_cluster AS p ON p.id = l.parent_cluster_id
+            JOIN identity_cluster AS c ON c.id = l.child_cluster_id
+            WHERE p.run_id = ?
+              AND c.run_id = ?
+            ORDER BY l.id ASC
+            """,
+            (int(run_id), int(run_id)),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_cluster_members(self, *, run_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT m.*, c.cluster_stage, c.cluster_state, c.run_id
+            FROM identity_cluster_member AS m
+            JOIN identity_cluster AS c ON c.id = m.cluster_id
+            WHERE c.run_id = ?
+            ORDER BY c.id ASC, m.observation_id ASC
+            """,
+            (int(run_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_cluster_resolutions(self, *, run_id: int) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            """
+            SELECT r.*
+            FROM identity_cluster_resolution AS r
+            JOIN identity_cluster AS c ON c.id = r.cluster_id
+            WHERE c.run_id = ?
+            ORDER BY r.cluster_id ASC
+            """,
+            (int(run_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def list_pool_entries(self, *, snapshot_id: int, pool_kind: str, excluded_reason: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
@@ -252,6 +308,389 @@ class IdentityPhase1Workspace:
             self._insert_embedding(obs_id, vector)
         self.conn.commit()
 
+    def seed_split_and_attachment_case(self) -> None:
+        source_id = self._ensure_source()
+        self._reset_observations()
+
+        specs = [
+            ("split-a1.jpg", 0, [1.000, 0.000, 0.000, 0.000], 0.94, 0.95, "diag"),
+            ("split-a2.jpg", 30, [0.980, 0.020, 0.000, 0.000], 0.91, 0.92, "diag"),
+            ("split-a3.jpg", 60, [0.965, 0.035, 0.000, 0.000], 0.89, 0.90, "diag"),
+            ("split-a4.jpg", 90, [0.945, 0.055, 0.000, 0.000], 0.88, 0.89, "diag"),
+            ("split-bridge-1.jpg", 120, [0.640, 0.360, 0.000, 0.000], 0.86, 0.87, "checker"),
+            ("split-bridge-2.jpg", 150, [0.550, 0.450, 0.000, 0.000], 0.84, 0.85, "checker"),
+            ("split-b1.jpg", 180, [0.000, 1.000, 0.000, 0.000], 0.95, 0.95, "stripe"),
+            ("split-b2.jpg", 210, [0.020, 0.980, 0.000, 0.000], 0.92, 0.93, "stripe"),
+            ("split-b3.jpg", 240, [0.040, 0.960, 0.000, 0.000], 0.90, 0.91, "stripe"),
+            ("split-b4.jpg", 270, [0.060, 0.940, 0.000, 0.000], 0.87, 0.88, "stripe"),
+            ("discard-c1.jpg", 300, [0.000, 0.000, 1.000, 0.000], 0.72, 0.78, "solid"),
+            ("discard-c2.jpg", 330, [0.020, 0.000, 0.980, 0.000], 0.70, 0.76, "solid"),
+            ("attach-a.jpg", 360, [0.840, 0.160, 0.000, 0.000], 0.58, 0.50, "checker"),
+            ("attach-b.jpg", 390, [0.790, 0.210, 0.000, 0.000], 0.54, 0.46, "checker"),
+            ("attach-reject.jpg", 420, [0.330, 0.330, 0.340, 0.000], 0.51, 0.44, "checker"),
+            ("same-photo-main.jpg", 450, [0.930, 0.070, 0.000, 0.000], 0.88, 0.93, "diag"),
+        ]
+        same_photo_image = self._make_image("same-photo-main.jpg", pattern="diag")
+        same_photo_id = self._insert_photo(source_id, same_photo_image, capture_second=450)
+        same_main_obs = self._insert_observation(
+            same_photo_id,
+            bbox=(0.10, 0.40, 0.40, 0.10),
+            area_ratio=0.20,
+            pose=0.88,
+            quality=0.93,
+        )
+        self._insert_embedding(same_main_obs, np.asarray([0.930, 0.070, 0.000, 0.000], dtype=np.float32))
+        same_dup_obs = self._insert_observation(
+            same_photo_id,
+            bbox=(0.12, 0.42, 0.42, 0.12),
+            area_ratio=0.19,
+            pose=0.77,
+            quality=0.20,
+        )
+        self._insert_embedding(same_dup_obs, np.asarray([0.920, 0.080, 0.000, 0.000], dtype=np.float32))
+
+        for index, (file_name, capture_second, vector, pose, quality, pattern) in enumerate(specs, start=1):
+            if file_name == "same-photo-main.jpg":
+                continue
+            image_path = self._make_image(file_name, pattern=pattern)
+            photo_id = self._insert_photo(source_id, image_path, capture_second=capture_second)
+            obs_id = self._insert_observation(
+                photo_id,
+                bbox=(0.10, 0.40, 0.40, 0.10),
+                area_ratio=0.17 + float(index) * 0.008,
+                pose=pose,
+                quality=quality,
+            )
+            self._insert_embedding(obs_id, np.asarray(vector, dtype=np.float32))
+        self.conn.commit()
+
+    def seed_known_topology_case(self) -> None:
+        source_id = self._ensure_source()
+        self._reset_observations()
+
+        specs = [
+            ("known-a1.jpg", 0, [1.00, 0.00, 0.00, 0.00], 0.95, 0.95, "diag"),
+            ("known-a2.jpg", 10, [0.97, 0.03, 0.00, 0.00], 0.94, 0.94, "diag"),
+            ("known-a3.jpg", 20, [0.94, 0.06, 0.00, 0.00], 0.93, 0.93, "diag"),
+            ("known-a4.jpg", 30, [0.91, 0.09, 0.00, 0.00], 0.92, 0.92, "diag"),
+            ("known-b1.jpg", 40, [0.00, 1.00, 0.00, 0.00], 0.95, 0.95, "stripe"),
+            ("known-b2.jpg", 50, [0.03, 0.97, 0.00, 0.00], 0.94, 0.94, "stripe"),
+            ("known-b3.jpg", 60, [0.06, 0.94, 0.00, 0.00], 0.93, 0.93, "stripe"),
+            ("known-b4.jpg", 70, [0.09, 0.91, 0.00, 0.00], 0.92, 0.92, "stripe"),
+            ("known-attach.jpg", 80, [0.82, 0.18, 0.00, 0.00], 0.56, 0.48, "checker"),
+            ("known-far.jpg", 90, [0.00, 0.00, 1.00, 0.00], 0.80, 0.79, "solid"),
+        ]
+        for index, (file_name, capture_second, vector, pose, quality, pattern) in enumerate(specs, start=1):
+            image_path = self._make_image(file_name, pattern=pattern)
+            photo_id = self._insert_photo(source_id, image_path, capture_second=capture_second)
+            obs_id = self._insert_observation(
+                photo_id,
+                bbox=(0.10, 0.40, 0.40, 0.10),
+                area_ratio=0.19 + float(index) * 0.004,
+                pose=pose,
+                quality=quality,
+            )
+            self._insert_embedding(obs_id, np.asarray(vector, dtype=np.float32))
+        self.conn.commit()
+
+    def recompute_member_support_ratio(self, *, cluster_id: int, observation_id: int) -> float:
+        profile = self._get_cluster_profile_for_cluster(cluster_id=cluster_id)
+        k = int(profile["discovery_knn_k"])
+        cluster_rows = self.conn.execute(
+            """
+            SELECT m.observation_id
+            FROM identity_cluster_member AS m
+            WHERE m.cluster_id = ?
+              AND m.decision_status = 'retained'
+            """,
+            (int(cluster_id),),
+        ).fetchall()
+        cluster_member_ids = {int(row["observation_id"]) for row in cluster_rows}
+        all_core_rows = self.conn.execute(
+            """
+            SELECT pe.observation_id, fo.photo_asset_id, fe.vector_blob
+            FROM identity_observation_pool_entry AS pe
+            JOIN face_observation AS fo ON fo.id = pe.observation_id
+            JOIN face_embedding AS fe
+              ON fe.face_observation_id = pe.observation_id
+             AND fe.feature_type = 'face'
+             AND fe.model_key = 'insightface'
+             AND fe.normalized = 1
+            WHERE pe.snapshot_id = (
+                SELECT run_ref.observation_snapshot_id
+                FROM identity_cluster AS c
+                JOIN identity_cluster_run AS run_ref ON run_ref.id = c.run_id
+                WHERE c.id = ?
+            )
+              AND pe.pool_kind = 'core_discovery'
+            ORDER BY pe.observation_id ASC
+            """,
+            (int(cluster_id),),
+        ).fetchall()
+        vector_map = {
+            int(row["observation_id"]): np.frombuffer(row["vector_blob"], dtype=np.float32).copy()
+            for row in all_core_rows
+            if isinstance(row["vector_blob"], (bytes, bytearray, memoryview))
+        }
+        photo_map = {int(row["observation_id"]): int(row["photo_asset_id"]) for row in all_core_rows}
+        if int(observation_id) not in vector_map:
+            return 0.0
+        target = vector_map[int(observation_id)]
+        neighbors = sorted(
+            (
+                (oid, self._cosine_distance(target, vec))
+                for oid, vec in vector_map.items()
+                if oid != int(observation_id)
+            ),
+            key=lambda item: (float(item[1]), int(item[0])),
+        )
+        conflicting_ids = {
+            oid
+            for oid, photo_id in photo_map.items()
+            if oid != int(observation_id) and photo_id == photo_map.get(int(observation_id))
+        }
+        effective = [oid for oid, _ in neighbors if oid not in conflicting_ids]
+        effective_count = min(k, len(effective))
+        cluster_neighbor_count = sum(1 for oid in effective[:k] if oid in cluster_member_ids)
+        return float(cluster_neighbor_count) / float(max(1, effective_count))
+
+    def assert_member_support_ratio_formula(self, *, run_id: int, sample_size: int) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT m.support_ratio, m.observation_id, m.cluster_id
+            FROM identity_cluster_member AS m
+            JOIN identity_cluster AS c ON c.id = m.cluster_id
+            WHERE c.run_id = ?
+              AND c.cluster_stage = 'final'
+              AND m.decision_status = 'retained'
+              AND m.member_role IN ('anchor_core', 'core', 'boundary')
+            ORDER BY m.observation_id ASC
+            LIMIT ?
+            """,
+            (int(run_id), int(sample_size)),
+        ).fetchall()
+        assert rows
+        for row in rows:
+            expected = self.recompute_member_support_ratio(
+                cluster_id=int(row["cluster_id"]),
+                observation_id=int(row["observation_id"]),
+            )
+            actual = float(row["support_ratio"] or 0.0)
+            assert math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-6), (
+                f"support_ratio 公式不一致: cluster={int(row['cluster_id'])}, "
+                f"obs={int(row['observation_id'])}, actual={actual}, expected={expected}"
+            )
+
+    def assert_intra_photo_conflict_ratio_formula(self, *, run_id: int) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, intra_photo_conflict_ratio
+            FROM identity_cluster
+            WHERE run_id = ?
+              AND cluster_stage = 'final'
+            ORDER BY id ASC
+            """,
+            (int(run_id),),
+        ).fetchall()
+        assert rows
+        for row in rows:
+            members = self.conn.execute(
+                """
+                SELECT fo.photo_asset_id
+                FROM identity_cluster_member AS m
+                JOIN face_observation AS fo ON fo.id = m.observation_id
+                WHERE m.cluster_id = ?
+                  AND m.decision_status = 'retained'
+                """,
+                (int(row["id"]),),
+            ).fetchall()
+            photo_ids = [int(member["photo_asset_id"]) for member in members]
+            total = len(photo_ids)
+            if total < 2:
+                expected = 0.0
+            else:
+                conflict_pairs = 0
+                total_pairs = total * (total - 1) // 2
+                for i in range(total):
+                    for j in range(i + 1, total):
+                        if photo_ids[i] == photo_ids[j]:
+                            conflict_pairs += 1
+                expected = float(conflict_pairs) / float(total_pairs)
+            actual = float(row["intra_photo_conflict_ratio"] or 0.0)
+            assert math.isclose(actual, expected, rel_tol=1e-6, abs_tol=1e-6), (
+                f"intra_photo_conflict_ratio 公式不一致: cluster={int(row['id'])}, actual={actual}, expected={expected}"
+            )
+
+    def assert_existence_gate_reason_consistent(self, *, run_id: int) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT c.id, c.cluster_state, c.discard_reason_code, r.resolution_state, r.resolution_reason
+            FROM identity_cluster AS c
+            JOIN identity_cluster_resolution AS r ON r.cluster_id = c.id
+            WHERE c.run_id = ?
+              AND c.cluster_stage = 'final'
+            ORDER BY c.id ASC
+            """,
+            (int(run_id),),
+        ).fetchall()
+        assert rows
+        for row in rows:
+            cluster_state = str(row["cluster_state"])
+            resolution_state = str(row["resolution_state"])
+            if cluster_state == "discarded":
+                assert resolution_state == "discarded"
+                assert str(row["discard_reason_code"] or "") == str(row["resolution_reason"] or "")
+            else:
+                assert resolution_state in {"unresolved", "review_pending"}
+                assert row["discard_reason_code"] is None
+
+    def assert_final_gate_metrics_frozen_before_attachment(self, *, run_id: int) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT id, retained_member_count, anchor_core_count, core_count, boundary_count, attachment_count
+            FROM identity_cluster
+            WHERE run_id = ?
+              AND cluster_stage = 'final'
+            ORDER BY id ASC
+            """,
+            (int(run_id),),
+        ).fetchall()
+        assert rows
+        for row in rows:
+            retained = int(row["retained_member_count"])
+            expected_retained = int(row["anchor_core_count"]) + int(row["core_count"]) + int(row["boundary_count"])
+            assert retained == expected_retained
+            assert int(row["attachment_count"]) >= 0
+
+    def assert_cluster_discard_reason_equals_resolution_reason(self, *, run_id: int) -> None:
+        self.assert_existence_gate_reason_consistent(run_id=run_id)
+
+    def assert_known_topology_contract(self, *, run_id: int) -> None:
+        final_clusters = self.list_clusters(run_id=run_id, cluster_stage="final")
+        assert final_clusters
+        members = self.list_cluster_members(run_id=run_id)
+        final_members = [item for item in members if str(item["cluster_stage"]) == "final"]
+        assert final_members
+        assert any(item["member_role"] == "anchor_core" for item in final_members if item["decision_status"] == "retained")
+
+        for cluster in final_clusters:
+            cluster_id = int(cluster["id"])
+            retained = [m for m in final_members if int(m["cluster_id"]) == cluster_id and m["decision_status"] == "retained"]
+            if not retained:
+                continue
+
+            representative = next((m for m in retained if int(m["is_representative"]) == 1), None)
+            assert representative is not None
+            obs_ids = [int(m["observation_id"]) for m in retained]
+            vectors = self._load_vectors(obs_ids)
+            sums = {
+                obs_id: sum(self._cosine_distance(vectors[obs_id], vectors[other]) for other in obs_ids)
+                for obs_id in obs_ids
+            }
+            expected_medoid = min(sums.items(), key=lambda item: (float(item[1]), int(item[0])))[0]
+            assert int(representative["observation_id"]) == int(expected_medoid)
+
+            profile = self._get_cluster_profile_for_cluster(cluster_id=cluster_id)
+            min_samples = int(profile["density_min_samples"])
+            for member in retained:
+                obs_id = int(member["observation_id"])
+                if len(obs_ids) <= 1:
+                    expected_radius = 0.0
+                else:
+                    distances = sorted(
+                        self._cosine_distance(vectors[obs_id], vectors[other])
+                        for other in obs_ids
+                        if other != obs_id
+                    )
+                    idx = min(max(0, min_samples - 1), len(distances) - 1)
+                    expected_radius = float(distances[idx])
+                actual_radius = float(member["density_radius"] or 0.0)
+                assert math.isclose(actual_radius, expected_radius, rel_tol=1e-6, abs_tol=1e-6)
+
+            core_distances = sorted(
+                float(m["distance_to_medoid"] or 0.0)
+                for m in retained
+                if m["member_role"] in {"anchor_core", "core", "boundary"}
+            )
+            if core_distances:
+                quantile = float(profile["anchor_core_radius_quantile"])
+                expected_anchor_radius = self._quantile(core_distances, quantile)
+                summary = json.loads(str(cluster["summary_json"])) if cluster["summary_json"] else {}
+                actual_anchor_radius = float(summary.get("anchor_core_radius", 0.0))
+                assert math.isclose(actual_anchor_radius, expected_anchor_radius, rel_tol=1e-6, abs_tol=1e-6)
+
+            for member in retained:
+                if member["member_role"] in {"anchor_core", "core", "boundary"}:
+                    expected_support = self.recompute_member_support_ratio(
+                        cluster_id=cluster_id,
+                        observation_id=int(member["observation_id"]),
+                    )
+                    actual_support = float(member["support_ratio"] or 0.0)
+                    assert math.isclose(actual_support, expected_support, rel_tol=1e-6, abs_tol=1e-6)
+
+        raw_clusters = self.list_clusters(run_id=run_id, cluster_stage="raw")
+        assert raw_clusters
+        for cluster in raw_clusters:
+            summary = json.loads(str(cluster["summary_json"])) if cluster["summary_json"] else {}
+            mutual_edges = summary.get("mutual_knn_edges") or []
+            for edge in mutual_edges:
+                if not isinstance(edge, list) or len(edge) != 2:
+                    continue
+                a = int(edge[0])
+                b = int(edge[1])
+                reverse = [b, a]
+                assert reverse in mutual_edges or a == b
+
+    def _load_vectors(self, observation_ids: list[int]) -> dict[int, np.ndarray]:
+        if not observation_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in observation_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT face_observation_id AS observation_id, vector_blob
+            FROM face_embedding
+            WHERE face_observation_id IN ({placeholders})
+              AND feature_type = 'face'
+              AND model_key = 'insightface'
+              AND normalized = 1
+            """,
+            tuple(int(obs_id) for obs_id in observation_ids),
+        ).fetchall()
+        return {
+            int(row["observation_id"]): np.frombuffer(row["vector_blob"], dtype=np.float32).copy()
+            for row in rows
+            if isinstance(row["vector_blob"], (bytes, bytearray, memoryview))
+        }
+
+    def _get_cluster_profile_for_cluster(self, *, cluster_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT p.*
+            FROM identity_cluster AS c
+            JOIN identity_cluster_run AS run_ref ON run_ref.id = c.run_id
+            JOIN identity_cluster_profile AS p ON p.id = run_ref.cluster_profile_id
+            WHERE c.id = ?
+            """,
+            (int(cluster_id),),
+        ).fetchone()
+        if row is None:
+            raise AssertionError(f"cluster profile 不存在: {int(cluster_id)}")
+        return dict(row)
+
+    def _quantile(self, values: list[float], q: float) -> float:
+        if not values:
+            return 0.0
+        q = min(1.0, max(0.0, float(q)))
+        if len(values) == 1:
+            return float(values[0])
+        pos = q * float(len(values) - 1)
+        low = int(math.floor(pos))
+        high = int(math.ceil(pos))
+        if low == high:
+            return float(values[low])
+        fraction = pos - float(low)
+        return float(values[low] + (values[high] - values[low]) * fraction)
+
     def _ensure_source(self) -> int:
         row = self.conn.execute("SELECT id FROM library_source ORDER BY id ASC LIMIT 1").fetchone()
         if row is not None:
@@ -262,6 +701,12 @@ class IdentityPhase1Workspace:
             root_fingerprint="fixture-fp",
             active=True,
         )
+
+    def _reset_observations(self) -> None:
+        self.conn.execute("DELETE FROM face_embedding")
+        self.conn.execute("DELETE FROM face_observation")
+        self.conn.execute("DELETE FROM photo_asset")
+        self.conn.execute("DELETE FROM identity_observation_pool_entry")
 
     def _insert_photo(self, source_id: int, image_path: Path, capture_second: int) -> int:
         asset_repo = AssetRepo(self.conn)
@@ -329,6 +774,13 @@ class IdentityPhase1Workspace:
             """,
             (int(observation_id), int(vector_array.size), vector_array.tobytes()),
         )
+
+    def _cosine_distance(self, a: np.ndarray, b: np.ndarray) -> float:
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if denom <= 0.0:
+            return 1.0
+        score = float(np.dot(a, b) / denom)
+        return float(max(0.0, 1.0 - score))
 
     def _make_image(self, name: str, *, pattern: str) -> Path:
         image_path = self.root / "seed-images" / name

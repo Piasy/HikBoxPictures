@@ -1647,7 +1647,7 @@ git commit -m "feat: add cluster profile and run lifecycle services (Task 3)"
 - Create: `tests/people_gallery/test_identity_cluster_algorithm_contract.py`
 - Create: `tests/people_gallery/test_identity_cluster_run_service.py`
 
-- [ ] **Step 1: 先写失败测试，锁定 raw -> cleaned -> final lineage、成员角色、关键指标口径与 existence gate 原因**
+- [x] **Step 1: 先写失败测试，锁定 raw -> cleaned -> final lineage、成员角色、关键指标口径与 existence gate 原因**
 
 ```python
 # tests/people_gallery/test_identity_cluster_run_service.py
@@ -1754,12 +1754,12 @@ def assert_known_topology_contract(self, *, run_id: int) -> None:
 - 同图冲突样本至少 1 对，且冲突过滤必须在 split graph 边过滤或 attachment 拒绝中生效（不能只影响 support_ratio）。
 - `seed_known_topology_case()`：提供固定小图拓扑与可重复距离结构，供 `mutual-kNN`、`density_radius`、`medoid`、`anchor_core_radius_quantile` 的精确断言使用。
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_algorithm_contract.py tests/people_gallery/test_identity_cluster_run_service.py -q`
 Expected: FAIL，`execute_run` 不存在，或缺少 `identity_cluster` / `identity_cluster_member` / `identity_cluster_resolution` 写入。
 
-- [ ] **Step 3: 实现密度聚类、split、existence gate、attachment 与 resolution 预判（prepare 前不写 `materialized`）**
+- [x] **Step 3: 实现密度聚类、split、existence gate、attachment 与 resolution 预判（prepare 前不写 `materialized`）**
 
 ```python
 # src/hikbox_pictures/services/identity_cluster_algorithm.py
@@ -1813,7 +1813,7 @@ def _existence_reason(metrics: dict[str, float | int], profile: dict[str, Any]) 
     return None
 ```
 
-- [ ] **Step 4: 在 run service 中串起 `create_run -> running -> algorithm -> persist lineage/member/resolution -> succeeded/failed`，并补 `cancelled` 分支入口**
+- [x] **Step 4: 在 run service 中串起 `create_run -> running -> algorithm -> persist lineage/member/resolution -> succeeded/failed`，并补 `cancelled` 分支入口**
 
 ```python
 # src/hikbox_pictures/services/identity_cluster_run_service.py
@@ -1960,7 +1960,7 @@ def assert_cluster_discard_reason_equals_resolution_reason(self, *, run_id: int)
     self.assert_existence_gate_reason_consistent(run_id=run_id)
 ```
 
-- [ ] **Step 5: 回跑算法与 run 持久化测试**
+- [x] **Step 5: 回跑算法与 run 持久化测试**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_algorithm_contract.py tests/people_gallery/test_identity_cluster_run_service.py tests/people_gallery/test_identity_cluster_run_lifecycle.py -q`
 Expected: PASS，能看到 `raw/cleaned/final` 节点、`split` lineage，以及 `unresolved/review_pending/discarded` 的 prepare 前 resolution 预判（不提前写 `materialized/prepared`），且不写 live person；同时对账 `support_ratio` 口径、`intra_photo_conflict_ratio` 公式、`discard_reason_code == resolution_reason`、`final gate metrics` 在 attachment 前冻结，并通过 known-topology 合同约束 `mutual-kNN/density_radius/medoid/anchor_core_radius`，防止用占位 summary 冒充算法落库。
