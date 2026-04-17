@@ -3,22 +3,12 @@ from __future__ import annotations
 import html
 import json
 import re
-import sys
-from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
-
-_FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
-_SPEC = spec_from_file_location("people_gallery_fixtures_workspace_identity_tuning_page", _FIXTURE_PATH)
-if _SPEC is None or _SPEC.loader is None:
-    raise RuntimeError(f"无法加载测试夹具文件: {_FIXTURE_PATH}")
-_MODULE = module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = _MODULE
-_SPEC.loader.exec_module(_MODULE)
-build_identity_seed_workspace = _MODULE.build_identity_seed_workspace
+from tests.people_gallery.fixtures_identity_v3_1 import build_identity_phase1_workspace
 
 
 def _extract_embedded_json(html_text: str) -> dict[str, object]:
@@ -35,412 +25,270 @@ def _extract_embedded_json(html_text: str) -> dict[str, object]:
     return parsed
 
 
-def _strip_embedded_json(html_text: str) -> str:
-    return re.sub(
-        r'<script id="identity-tuning-data" type="application/json">\s*.*?\s*</script>',
-        "",
-        html_text,
-        flags=re.DOTALL,
+def _execute_run(ws, *, select_as_review_target: bool) -> int:
+    snapshot = ws.new_observation_snapshot_service().build_snapshot(
+        observation_profile_id=ws.observation_profile_id,
+        candidate_knn_limit=24,
     )
+    run_payload = ws.new_cluster_run_service().execute_run(
+        observation_snapshot_id=int(snapshot["snapshot_id"]),
+        cluster_profile_id=ws.cluster_profile_id,
+        supersedes_run_id=None,
+        select_as_review_target=select_as_review_target,
+    )
+    return int(run_payload["run_id"])
 
 
-def _insert_legacy_bootstrap_materialized_person(ws) -> tuple[int, int, int]:
-    batch_id = int(
-        ws.conn.execute(
-            """
-            INSERT INTO auto_cluster_batch(model_key, algorithm_version, batch_type, threshold_profile_id, scan_session_id)
-            VALUES (?, ?, 'bootstrap', ?, NULL)
-            RETURNING id
-            """,
-            (
-                ws.model_key,
-                "identity.bootstrap.v1",
-                ws.profile_id,
-            ),
-        ).fetchone()["id"]
-    )
-    cluster_id = int(
-        ws.conn.execute(
-            """
-            INSERT INTO auto_cluster(
-                batch_id,
-                representative_observation_id,
-                cluster_status,
-                resolved_person_id,
-                diagnostic_json
-            )
-            VALUES (?, NULL, 'materialized', NULL, '{}')
-            RETURNING id
-            """,
-            (batch_id,),
-        ).fetchone()["id"]
-    )
-    person_id = int(
-        ws.conn.execute(
-            """
-            INSERT INTO person(
-                display_name,
-                status,
-                confirmed,
-                ignored,
-                notes,
-                cover_observation_id,
-                origin_cluster_id
-            )
-            VALUES ('未命名人物-旧批次', 'active', 0, 0, NULL, NULL, ?)
-            RETURNING id
-            """,
-            (cluster_id,),
-        ).fetchone()["id"]
-    )
-    ws.conn.execute(
-        """
-        UPDATE auto_cluster
-        SET resolved_person_id = ?
-        WHERE id = ?
-        """,
-        (person_id, cluster_id),
-    )
-    ws.conn.commit()
-    return batch_id, cluster_id, person_id
-
-
-def test_identity_tuning_page_shows_required_blocks_and_embedded_json(tmp_path: Path) -> None:
-    ws = build_identity_seed_workspace(tmp_path / "identity-tuning-page")
+def test_identity_tuning_page_defaults_to_review_target_and_supports_run_id(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "identity-tuning-run-selection")
     try:
-        ws.seed_edge_rule_challenge_case()
-        ws.new_bootstrap_service().run_bootstrap(profile_id=ws.profile_id)
+        ws.seed_known_topology_case()
+        review_target_run_id = _execute_run(ws, select_as_review_target=True)
+        explicit_run_id = _execute_run(ws, select_as_review_target=False)
 
         client = TestClient(create_app(workspace=ws.root))
-        response = client.get("/identity-tuning")
+        default_response = client.get("/identity-tuning")
+        explicit_response = client.get("/identity-tuning", params={"run_id": explicit_run_id})
 
-        assert response.status_code == 200
-        html_text = response.text
-        assert "阈值调参与 Bootstrap 验收" in html_text
-        assert "active profile" in html_text
-        assert "bootstrap batch" in html_text
-        assert "匿名人物" in html_text
-        assert "cover observation" in html_text
-        assert "seed 组成" in html_text
-        assert "pending cluster 诊断" in html_text
-        assert "distinct_photo_count" in html_text
-        assert "quality_distribution" in html_text
-        assert "external_margin" in html_text
-        assert "reject_reason" in html_text
-        assert "全图库高质量 observation" in html_text
-        assert html_text.index("pending cluster 诊断") < html_text.index("全图库高质量 observation")
+        assert default_response.status_code == 200
+        default_payload = _extract_embedded_json(default_response.text)
+        review_run = default_payload["review_run"]
+        assert isinstance(review_run, dict)
+        assert int(review_run["id"]) == review_target_run_id
 
-        payload = _extract_embedded_json(html_text)
-        assert "active_profile" in payload
-        assert "bootstrap_batch" in payload
-        assert "anonymous_people" in payload
-        assert "pending_clusters" in payload
-        assert "high_quality_observations" in payload
-
-        active_profile = payload["active_profile"]
-        assert isinstance(active_profile, dict)
-        assert int(active_profile["id"]) == ws.profile_id
-
-        bootstrap_batch = payload["bootstrap_batch"]
-        assert isinstance(bootstrap_batch, dict)
-        assert bootstrap_batch["batch_type"] == "bootstrap"
-        assert int(bootstrap_batch["threshold_profile_id"]) == ws.profile_id
-
-        anonymous_people = payload["anonymous_people"]
-        assert isinstance(anonymous_people, list)
-        assert anonymous_people
-        first_person = anonymous_people[0]
-        assert isinstance(first_person, dict)
-        assert int(first_person["cover_observation_id"]) > 0
-        seed_observations = first_person["seed_observations"]
-        assert isinstance(seed_observations, list)
-        assert seed_observations
-
-        pending_clusters = payload["pending_clusters"]
-        assert isinstance(pending_clusters, list)
-        assert pending_clusters
-        first_cluster = pending_clusters[0]
-        assert isinstance(first_cluster, dict)
-        diagnostics = first_cluster["diagnostics"]
-        assert isinstance(diagnostics, dict)
-        assert "distinct_photo_count" in diagnostics
-        assert "quality_distribution" in diagnostics
-        assert "external_margin" in diagnostics
-        assert "reject_reason" in diagnostics
+        assert explicit_response.status_code == 200
+        explicit_payload = _extract_embedded_json(explicit_response.text)
+        explicit_review_run = explicit_payload["review_run"]
+        assert isinstance(explicit_review_run, dict)
+        assert int(explicit_review_run["id"]) == explicit_run_id
     finally:
         ws.close()
 
 
-def test_identity_tuning_page_is_read_only_without_write_entries(tmp_path: Path) -> None:
-    ws = build_identity_seed_workspace(tmp_path / "identity-tuning-readonly")
+def test_identity_tuning_page_payload_shape_and_cluster_db_reconcile(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "identity-tuning-payload")
     try:
-        ws.seed_edge_rule_challenge_case()
-        ws.new_bootstrap_service().run_bootstrap(profile_id=ws.profile_id)
+        ws.seed_known_topology_case()
+        run_id = _execute_run(ws, select_as_review_target=True)
 
         client = TestClient(create_app(workspace=ws.root))
         response = client.get("/identity-tuning")
         assert response.status_code == 200
-        html_text = response.text
 
-        assert "<form" not in html_text.lower()
-        assert "method=\"post\"" not in html_text.lower()
-        assert "resolve-review" not in html_text
-        assert "data-action=\"review-" not in html_text
-        assert "/api/actions" not in html_text
-    finally:
-        ws.close()
+        payload = _extract_embedded_json(response.text)
+        for key in [
+            "review_run",
+            "observation_snapshot",
+            "observation_profile",
+            "cluster_profile",
+            "run_summary",
+            "clusters",
+        ]:
+            assert key in payload
 
+        review_run = payload["review_run"]
+        observation_snapshot = payload["observation_snapshot"]
+        observation_profile = payload["observation_profile"]
+        cluster_profile = payload["cluster_profile"]
+        run_summary = payload["run_summary"]
+        clusters = payload["clusters"]
 
-def test_identity_tuning_page_renders_preview_images_for_results(tmp_path: Path) -> None:
-    ws = build_identity_seed_workspace(tmp_path / "identity-tuning-preview-images")
-    try:
-        ws.seed_edge_rule_challenge_case()
-        ws.new_bootstrap_service().run_bootstrap(profile_id=ws.profile_id)
+        assert isinstance(review_run, dict)
+        assert isinstance(observation_snapshot, dict)
+        assert isinstance(observation_profile, dict)
+        assert isinstance(cluster_profile, dict)
+        assert isinstance(run_summary, dict)
+        assert isinstance(clusters, list)
+        assert clusters
 
-        client = TestClient(create_app(workspace=ws.root))
-        response = client.get("/identity-tuning")
+        assert int(review_run["id"]) == run_id
+        assert int(observation_snapshot["id"]) == int(review_run["observation_snapshot_id"])
+        assert int(observation_profile["id"]) == int(observation_snapshot["observation_profile_id"])
+        assert int(cluster_profile["id"]) == int(review_run["cluster_profile_id"])
 
-        assert response.status_code == 200
-        html_text = response.text
-        payload = _extract_embedded_json(html_text)
+        for key in [
+            "observation_total",
+            "pool_counts",
+            "final_cluster_counts",
+            "resolution_counts",
+            "dedup_drop_distribution",
+        ]:
+            assert key in run_summary
 
-        anonymous_people = payload["anonymous_people"]
-        assert isinstance(anonymous_people, list)
-        assert anonymous_people
-        first_person = anonymous_people[0]
-        assert isinstance(first_person, dict)
-        cover_crop_url = first_person["cover_crop_url"]
-        assert isinstance(cover_crop_url, str)
-        assert cover_crop_url
-        assert f'src="{cover_crop_url}"' in html_text
-
-        seed_observations = first_person["seed_observations"]
-        assert isinstance(seed_observations, list)
-        assert seed_observations
-        first_seed = seed_observations[0]
-        assert isinstance(first_seed, dict)
-        seed_crop_url = first_seed["crop_url"]
-        assert isinstance(seed_crop_url, str)
-        assert seed_crop_url
-        assert f'src="{seed_crop_url}"' in html_text
-
-        pending_clusters = payload["pending_clusters"]
-        assert isinstance(pending_clusters, list)
-        assert pending_clusters
-        first_cluster = pending_clusters[0]
-        assert isinstance(first_cluster, dict)
-        representative_crop_url = first_cluster["representative_crop_url"]
-        assert isinstance(representative_crop_url, str)
-        assert representative_crop_url
-        assert f'src="{representative_crop_url}"' in html_text
-
-        distinct_photo_previews = first_cluster["distinct_photo_previews"]
-        assert isinstance(distinct_photo_previews, list)
-        expected_photo_rows = ws.conn.execute(
-            """
-            SELECT fo.photo_asset_id,
-                   MIN(acm.face_observation_id) AS observation_id
-            FROM auto_cluster_member AS acm
-            JOIN face_observation AS fo
-              ON fo.id = acm.face_observation_id
-            WHERE acm.cluster_id = ?
-            GROUP BY fo.photo_asset_id
-            ORDER BY MIN(acm.face_observation_id) ASC, fo.photo_asset_id ASC
-            """,
-            (int(first_cluster["cluster_id"]),),
-        ).fetchall()
-        assert len(expected_photo_rows) == int(first_cluster["diagnostics"]["distinct_photo_count"])
-        assert len(distinct_photo_previews) == len(expected_photo_rows)
-        expected_photo_ids = [int(row["photo_asset_id"]) for row in expected_photo_rows]
-        actual_photo_ids = [int(item["photo_asset_id"]) for item in distinct_photo_previews]
-        assert actual_photo_ids == expected_photo_ids
-        expected_preview_urls = [f"/api/photos/{photo_id}/preview" for photo_id in expected_photo_ids]
-        actual_preview_urls = [str(item["preview_url"]) for item in distinct_photo_previews]
-        assert actual_preview_urls == expected_preview_urls
-        for preview_url in actual_preview_urls:
-            assert f'src="{preview_url}"' in html_text
-    finally:
-        ws.close()
-
-
-def test_identity_tuning_page_renders_library_wide_high_quality_observation_media(tmp_path: Path) -> None:
-    ws = build_identity_seed_workspace(tmp_path / "identity-tuning-library-high-quality-observations")
-    try:
-        ws.seed_edge_rule_challenge_case()
-        ws.new_bootstrap_service().run_bootstrap(profile_id=ws.profile_id)
-
-        client = TestClient(create_app(workspace=ws.root))
-        response = client.get("/identity-tuning")
-
-        assert response.status_code == 200
-        html_text = response.text
-        payload = _extract_embedded_json(html_text)
-
-        active_profile = payload["active_profile"]
-        assert isinstance(active_profile, dict)
-        high_quality_threshold = float(active_profile["high_quality_threshold"])
-
-        high_quality_observations = payload["high_quality_observations"]
-        assert isinstance(high_quality_observations, list)
-
-        expected_rows = ws.conn.execute(
-            """
-            SELECT fo.id AS observation_id,
-                   fo.photo_asset_id,
-                   fo.quality_score
-            FROM face_observation AS fo
-            WHERE fo.active = 1
-              AND fo.quality_score >= ?
-            ORDER BY fo.quality_score DESC, fo.id ASC
-            """,
-            (high_quality_threshold,),
-        ).fetchall()
-        assert expected_rows
-        assert len(high_quality_observations) == len(expected_rows)
-
-        expected_observation_ids = [int(row["observation_id"]) for row in expected_rows]
-        actual_observation_ids = [int(item["observation_id"]) for item in high_quality_observations]
-        assert actual_observation_ids == expected_observation_ids
-
-        for item, row in zip(high_quality_observations, expected_rows, strict=True):
-            crop_url = f"/api/observations/{int(row['observation_id'])}/crop"
-            preview_url = f"/api/photos/{int(row['photo_asset_id'])}/preview"
-            assert str(item["crop_url"]) == crop_url
-            assert str(item["preview_url"]) == preview_url
-            assert float(item["quality_score"]) == float(row["quality_score"])
-            assert f'src="{crop_url}"' in html_text
-            assert f'src="{preview_url}"' in html_text
-    finally:
-        ws.close()
-
-
-def test_identity_tuning_page_formats_quality_values_with_two_decimals(tmp_path: Path) -> None:
-    ws = build_identity_seed_workspace(tmp_path / "identity-tuning-quality-format")
-    try:
-        ws.seed_edge_rule_challenge_case()
-        ws.new_bootstrap_service().run_bootstrap(profile_id=ws.profile_id)
-        ws.conn.execute(
-            """
-            UPDATE identity_threshold_profile
-            SET high_quality_threshold = ?,
-                trusted_seed_quality_threshold = ?
-            WHERE id = ?
-            """,
-            (0.85555, 0.90555, ws.profile_id),
-        )
-        observation_row = ws.conn.execute(
-            """
-            SELECT id
-            FROM face_observation
-            WHERE active = 1
-            ORDER BY id ASC
-            LIMIT 1
-            """
+        final_cluster_count = ws.conn.execute(
+            "SELECT COUNT(*) AS c FROM identity_cluster WHERE run_id = ? AND cluster_stage = 'final'",
+            (run_id,),
         ).fetchone()
-        assert observation_row is not None
+        assert final_cluster_count is not None
+        assert int(run_summary["cluster_count"]) == int(final_cluster_count["c"])
+        assert len(clusters) == int(final_cluster_count["c"])
+
+        first_cluster = clusters[0]
+        assert isinstance(first_cluster, dict)
+        for key in ["lineage", "metrics", "seed_audit", "resolution", "members"]:
+            assert key in first_cluster
+
+        cluster_id = int(first_cluster["cluster_id"])
+        cluster_row = ws.conn.execute(
+            "SELECT * FROM identity_cluster WHERE id = ? AND run_id = ?",
+            (cluster_id, run_id),
+        ).fetchone()
+        assert cluster_row is not None
+
+        metrics = first_cluster["metrics"]
+        assert isinstance(metrics, dict)
+        assert int(metrics["member_count"]) == int(cluster_row["member_count"])
+        assert int(metrics["retained_member_count"]) == int(cluster_row["retained_member_count"])
+        assert int(metrics["distinct_photo_count"]) == int(cluster_row["distinct_photo_count"])
+
+        lineage = first_cluster["lineage"]
+        assert isinstance(lineage, list)
+        lineage_count = ws.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM identity_cluster_lineage
+            WHERE parent_cluster_id = ? OR child_cluster_id = ?
+            """,
+            (cluster_id, cluster_id),
+        ).fetchone()
+        assert lineage_count is not None
+        assert len(lineage) == int(lineage_count["c"])
+
+        resolution = first_cluster["resolution"]
+        seed_audit = first_cluster["seed_audit"]
+        members = first_cluster["members"]
+        assert isinstance(resolution, dict)
+        assert isinstance(seed_audit, dict)
+        assert isinstance(members, dict)
+        assert set(members.keys()) == {
+            "representative",
+            "retained",
+            "excluded",
+            "excluded_reason_distribution",
+        }
+
+        resolution_row = ws.conn.execute(
+            "SELECT * FROM identity_cluster_resolution WHERE cluster_id = ?",
+            (cluster_id,),
+        ).fetchone()
+        assert resolution_row is not None
+        assert str(resolution["resolution_state"]) == str(resolution_row["resolution_state"])
+        assert resolution["resolution_reason"] == resolution_row["resolution_reason"]
+        assert resolution["publish_state"] == resolution_row["publish_state"]
+        assert int(seed_audit["trusted_seed_count"]) == int(resolution_row["trusted_seed_count"])
+        assert int(seed_audit["trusted_seed_candidate_count"]) == int(resolution_row["trusted_seed_candidate_count"])
+        assert seed_audit["trusted_seed_reject_distribution"] == json.loads(
+            resolution_row["trusted_seed_reject_distribution_json"] or "{}"
+        )
+
+        member_rows = ws.conn.execute(
+            "SELECT * FROM identity_cluster_member WHERE cluster_id = ? ORDER BY id ASC",
+            (cluster_id,),
+        ).fetchall()
+        assert member_rows
+
+        representative_members = members["representative"]
+        retained_members = members["retained"]
+        excluded_members = members["excluded"]
+        excluded_reason_distribution = members["excluded_reason_distribution"]
+
+        assert isinstance(representative_members, list)
+        assert isinstance(retained_members, list)
+        assert isinstance(excluded_members, list)
+        assert isinstance(excluded_reason_distribution, dict)
+
+        assert len(representative_members) == sum(1 for row in member_rows if int(row["is_representative"]) == 1)
+        assert len(retained_members) == sum(1 for row in member_rows if str(row["decision_status"]) != "rejected")
+        assert len(excluded_members) == sum(1 for row in member_rows if str(row["decision_status"]) == "rejected")
+
+        payload_member_map: dict[int, dict[str, object]] = {}
+        for item in [*representative_members, *retained_members, *excluded_members]:
+            member_id = int(item["member_id"])
+            existing = payload_member_map.get(member_id)
+            if existing is not None:
+                assert existing.get("seed_rank") == item.get("seed_rank")
+                assert bool(existing.get("is_selected_trusted_seed")) == bool(item.get("is_selected_trusted_seed"))
+                continue
+            payload_member_map[member_id] = item
+
+        db_seed_rank_map = {
+            int(row["id"]): (int(row["seed_rank"]) if row["seed_rank"] is not None else None)
+            for row in member_rows
+        }
+        payload_seed_rank_map = {
+            member_id: (
+                int(member["seed_rank"])
+                if member.get("seed_rank") is not None
+                else None
+            )
+            for member_id, member in payload_member_map.items()
+        }
+        assert payload_seed_rank_map == db_seed_rank_map
+
+        for member in payload_member_map.values():
+            if bool(member.get("is_selected_trusted_seed")):
+                assert member.get("seed_rank") is not None
+                assert int(member["seed_rank"]) >= 1
+
+        expected_excluded_reason_distribution: dict[str, int] = {}
+        for row in member_rows:
+            if str(row["decision_status"]) != "rejected":
+                continue
+            reason = str(row["decision_reason_code"] or "unknown")
+            expected_excluded_reason_distribution[reason] = expected_excluded_reason_distribution.get(reason, 0) + 1
+        assert excluded_reason_distribution == expected_excluded_reason_distribution
+
+        snapshot_id = int(review_run["observation_snapshot_id"])
+        dedup_rows = ws.conn.execute(
+            """
+            SELECT excluded_reason, COUNT(*) AS c
+            FROM identity_observation_pool_entry
+            WHERE snapshot_id = ?
+              AND pool_kind = 'excluded'
+              AND dedup_group_key IS NOT NULL
+              AND excluded_reason IS NOT NULL
+            GROUP BY excluded_reason
+            """,
+            (snapshot_id,),
+        ).fetchall()
+        expected_dedup_drop_distribution = {str(row["excluded_reason"]): int(row["c"]) for row in dedup_rows}
+        assert run_summary["dedup_drop_distribution"] == expected_dedup_drop_distribution
+    finally:
+        ws.close()
+
+
+def test_identity_tuning_page_returns_409_when_no_review_target(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "identity-tuning-missing-review-target")
+    try:
+        ws.seed_known_topology_case()
+        run_id = _execute_run(ws, select_as_review_target=True)
         ws.conn.execute(
-            "UPDATE face_observation SET quality_score = ? WHERE id = ?",
-            (0.87654, int(observation_row["id"])),
+            "UPDATE identity_cluster_run SET is_review_target = 0, review_selected_at = NULL WHERE id = ?",
+            (run_id,),
         )
         ws.conn.commit()
 
         client = TestClient(create_app(workspace=ws.root))
         response = client.get("/identity-tuning")
 
-        assert response.status_code == 200
-        payload = _extract_embedded_json(response.text)
-        visible_html = _strip_embedded_json(response.text)
-        pending_clusters = payload["pending_clusters"]
-        assert isinstance(pending_clusters, list)
-        assert pending_clusters
-        first_cluster = pending_clusters[0]
-        assert isinstance(first_cluster, dict)
-        diagnostics = first_cluster["diagnostics"]
-        assert isinstance(diagnostics, dict)
-        quality_distribution = diagnostics["quality_distribution"]
-        assert isinstance(quality_distribution, dict)
-        assert "<dt>high_quality_threshold</dt><dd>0.86</dd>" in visible_html
-        assert "<dt>trusted_seed_quality_threshold</dt><dd>0.91</dd>" in visible_html
-        assert (
-            "quality_distribution</dt><dd>"
-            f"min {float(quality_distribution['min']):.2f} · "
-            f"avg {float(quality_distribution['avg']):.2f} · "
-            f"max {float(quality_distribution['max']):.2f}</dd>"
-        ) in visible_html
-        assert "quality 0.88" in visible_html
-        assert "0.85555" not in visible_html
-        assert "0.90555" not in visible_html
-        assert "0.87654" not in visible_html
-        assert "0.975" not in visible_html
+        assert response.status_code == 409
+        payload = response.json()
+        assert "detail" in payload
+        assert "完整性错误" in str(payload["detail"])
     finally:
         ws.close()
 
 
-def test_identity_tuning_page_batch_aggregate_matches_sql_baseline(tmp_path: Path) -> None:
-    ws = build_identity_seed_workspace(tmp_path / "identity-tuning-aggregate")
+def test_identity_tuning_page_returns_404_when_run_id_not_found(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "identity-tuning-run-not-found")
     try:
-        ws.seed_edge_rule_challenge_case()
-        ws.new_bootstrap_service().run_bootstrap(profile_id=ws.profile_id)
-
-        latest_batch_row = ws.conn.execute(
-            """
-            SELECT id
-            FROM auto_cluster_batch
-            WHERE batch_type = 'bootstrap'
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-        assert latest_batch_row is not None
-        latest_batch_id = int(latest_batch_row["id"])
-        baseline = ws.conn.execute(
-            """
-            SELECT COUNT(*) AS cluster_count,
-                   SUM(CASE WHEN cluster_status = 'materialized' THEN 1 ELSE 0 END) AS materialized_count,
-                   SUM(CASE WHEN cluster_status = 'review_pending' THEN 1 ELSE 0 END) AS review_pending_count,
-                   SUM(CASE WHEN cluster_status = 'discarded' THEN 1 ELSE 0 END) AS discarded_count
-            FROM auto_cluster
-            WHERE batch_id = ?
-            """,
-            (latest_batch_id,),
-        ).fetchone()
-        assert baseline is not None
-
+        ws.seed_known_topology_case()
+        _execute_run(ws, select_as_review_target=True)
         client = TestClient(create_app(workspace=ws.root))
-        response = client.get("/identity-tuning")
-        assert response.status_code == 200
-        payload = _extract_embedded_json(response.text)
-
-        bootstrap_batch = payload["bootstrap_batch"]
-        assert isinstance(bootstrap_batch, dict)
-        assert int(bootstrap_batch["id"]) == latest_batch_id
-        assert int(bootstrap_batch["cluster_count"]) == int(baseline["cluster_count"] or 0)
-        assert int(bootstrap_batch["materialized_count"]) == int(baseline["materialized_count"] or 0)
-        assert int(bootstrap_batch["review_pending_count"]) == int(baseline["review_pending_count"] or 0)
-        assert int(bootstrap_batch["discarded_count"]) == int(baseline["discarded_count"] or 0)
-
-        pending_clusters = payload["pending_clusters"]
-        assert isinstance(pending_clusters, list)
-        assert len(pending_clusters) == int(bootstrap_batch["review_pending_count"])
-    finally:
-        ws.close()
-
-
-def test_identity_tuning_page_only_lists_latest_batch_anonymous_people(tmp_path: Path) -> None:
-    ws = build_identity_seed_workspace(tmp_path / "identity-tuning-latest-anonymous")
-    try:
-        _, _, legacy_person_id = _insert_legacy_bootstrap_materialized_person(ws)
-        ws.seed_materialize_happy_case()
-        ws.new_bootstrap_service().run_bootstrap(profile_id=ws.profile_id)
-
-        client = TestClient(create_app(workspace=ws.root))
-        response = client.get("/identity-tuning")
-        assert response.status_code == 200
-        payload = _extract_embedded_json(response.text)
-
-        anonymous_people = payload["anonymous_people"]
-        assert isinstance(anonymous_people, list)
-        person_ids = {int(item["person_id"]) for item in anonymous_people}
-        assert legacy_person_id not in person_ids
+        response = client.get("/identity-tuning", params={"run_id": 999999})
+        assert response.status_code == 404
+        payload = response.json()
+        assert "detail" in payload
+        assert "run 不存在" in str(payload["detail"])
     finally:
         ws.close()

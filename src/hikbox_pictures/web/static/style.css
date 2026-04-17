@@ -290,6 +290,26 @@ body {
   background: #fbfdfa;
 }
 
+.identity-run-clusters {
+  padding-left: 0;
+}
+
+.identity-run-clusters .identity-list-item {
+  list-style: none;
+}
+
+.identity-member-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.identity-member-groups h4 {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
 .identity-preview-layout {
   display: grid;
   gap: 12px;
@@ -440,6 +460,17 @@ body {
   gap: 6px;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   margin: 8px 0 0;
+}
+
+.identity-json-block {
+  margin: 8px 0 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fbfa;
+  overflow-x: auto;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 @media (max-width: 720px) {

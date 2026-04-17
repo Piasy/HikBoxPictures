@@ -1,22 +1,11 @@
 from __future__ import annotations
 
 import importlib.resources as resources
-import sys
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from hikbox_pictures.api.app import create_app
-
-_FIXTURE_PATH = Path(__file__).with_name("fixtures_workspace.py")
-_SPEC = spec_from_file_location("people_gallery_fixtures_workspace", _FIXTURE_PATH)
-if _SPEC is None or _SPEC.loader is None:
-    raise RuntimeError(f"无法加载测试夹具文件: {_FIXTURE_PATH}")
-_MODULE = module_from_spec(_SPEC)
-sys.modules[_SPEC.name] = _MODULE
-_SPEC.loader.exec_module(_MODULE)
-build_seed_workspace = _MODULE.build_seed_workspace
+from tests.people_gallery.fixtures_workspace import build_seed_workspace
 
 
 def test_web_navigation_routes_and_static_assets(tmp_path) -> None:
@@ -30,13 +19,16 @@ def test_web_navigation_routes_and_static_assets(tmp_path) -> None:
             "/reviews": "待审核",
             "/sources": "源目录与扫描",
             "/exports": "导出模板",
-            "/identity-tuning": "阈值调参与 Bootstrap 验收",
             "/logs": "运行日志",
         }
         for route, expected_text in route_checks.items():
             response = client.get(route)
             assert response.status_code == 200
             assert expected_text in response.text
+
+        identity_tuning = client.get("/identity-tuning")
+        assert identity_tuning.status_code == 409
+        assert "完整性错误" in identity_tuning.text
 
         css = client.get("/static/style.css")
         js = client.get("/static/app.js")

@@ -6,6 +6,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
 
 from hikbox_pictures.db.connection import connect_db
+from hikbox_pictures.services.identity_review_query_service import (
+    IdentityReviewIntegrityError,
+    IdentityReviewNotFoundError,
+    IdentityReviewQueryService,
+)
 from hikbox_pictures.services.web_query_service import WebQueryService
 
 router = APIRouter()
@@ -143,16 +148,21 @@ def logs_page(request: Request) -> HTMLResponse:
 
 
 @router.get("/identity-tuning", response_class=HTMLResponse)
-def identity_tuning_page(request: Request) -> HTMLResponse:
+def identity_tuning_page(request: Request, run_id: int | None = None) -> HTMLResponse:
     conn = connect_db(Path(request.app.state.db_path))
     try:
-        service = WebQueryService(conn)
-        page_data = service.get_identity_tuning_page()
+        service = IdentityReviewQueryService(conn)
+        try:
+            page_data = service.get_identity_tuning_payload(run_id=run_id)
+        except IdentityReviewIntegrityError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except IdentityReviewNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
         return _get_templates(request).TemplateResponse(
             request=request,
             name="identity_tuning.html",
             context={
-                "page_title": "阈值调参与 Bootstrap 验收",
+                "page_title": "Identity Run 证据页",
                 "page_key": "identity_tuning",
                 "identity_tuning": page_data,
             },

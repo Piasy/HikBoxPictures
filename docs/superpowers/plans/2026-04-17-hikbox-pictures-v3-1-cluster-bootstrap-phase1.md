@@ -2830,7 +2830,7 @@ git commit -m "feat: add explicit snapshot and cluster run scripts (Task 6)"
 - Modify: `tests/people_gallery/test_web_identity_tuning_page.py`
 - Modify: `tests/people_gallery/test_web_navigation.py`
 
-- [ ] **Step 1: 先写失败测试，锁定默认 review target、显式 `run_id` 与完整 review 证据面**
+- [x] **Step 1: 先写失败测试，锁定默认 review target、显式 `run_id` 与完整 review 证据面**
 
 ```python
 # tests/people_gallery/test_web_identity_tuning_page.py
@@ -2938,12 +2938,12 @@ def test_identity_tuning_page_returns_integrity_error_when_review_target_missing
         ws.close()
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_web_identity_tuning_page.py tests/people_gallery/test_web_navigation.py -q`
 Expected: FAIL，页面 payload 仍然是旧 `bootstrap_batch` / `anonymous_people` 结构，且不支持 `run_id`。
 
-- [ ] **Step 3: 新增 query service，并让 route 直接围绕 run 组织 run/cluster/member 全量证据**
+- [x] **Step 3: 新增 query service，并让 route 直接围绕 run 组织 run/cluster/member 全量证据**
 
 ```python
 # src/hikbox_pictures/services/identity_review_query_service.py
@@ -2999,7 +2999,7 @@ def identity_tuning_page(request: Request, run_id: int | None = None) -> HTMLRes
         conn.close()
 ```
 
-- [ ] **Step 4: 回跑页面测试，确认页面不再依赖 `auto_cluster*`/`origin_cluster_id` 且证据字段完整**
+- [x] **Step 4: 回跑页面测试，确认页面不再依赖 `auto_cluster*`/`origin_cluster_id` 且证据字段完整**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_web_identity_tuning_page.py tests/people_gallery/test_web_navigation.py -q`
 Expected: PASS，页面 JSON 顶层包含 `review_run`、`observation_snapshot`、`observation_profile`、`cluster_profile`、`run_summary`、`clusters`；cluster 级包含 lineage/metrics/seed_audit/resolution(prototype+ANN 状态)/members(代表+retained+excluded+原因分布)，且 metrics 至少覆盖 `compactness_p90`、`separation_gap`、`boundary_ratio`、`support_ratio_p10`、`support_ratio_p50`、`intra_photo_conflict_ratio`、`nearest_cluster_distance`；并对 `resolution_reason`、`publish_state`、`trusted_seed_reject_distribution`、`seed_rank`、`dedup_drop_distribution` 做 DB 对账断言；若缺少 `is_review_target=1`，接口返回数据完整性错误（不做隐式回退）。

@@ -2,156 +2,94 @@
 {% block content %}
 <section class="identity-tuning-page">
   <header class="panel identity-tuning-hero">
-    <p class="identity-tuning-kicker">phase1 只读调参验收页</p>
-    <h2>阈值调参与 Bootstrap 验收</h2>
-    <p class="summary">本页只展示 active profile、bootstrap batch、匿名人物、pending cluster 诊断与全图库高质量 observation，不提供写入入口。</p>
+    <p class="identity-tuning-kicker">phase1 run 级证据页</p>
+    <h2>Identity Run 证据页</h2>
+    <p class="summary">默认展示当前 review target run，可通过 <code>?run_id=</code> 查看指定 run 的 lineage、metrics、seed audit、resolution 与 members 证据。</p>
   </header>
 
   <section class="panel identity-tuning-section">
-    <h3>active profile</h3>
-    {% if identity_tuning.active_profile %}
+    <h3>review run</h3>
     <dl class="identity-kv-grid">
-      <div><dt>ID</dt><dd>{{ identity_tuning.active_profile.id }}</dd></div>
-      <div><dt>profile_name</dt><dd>{{ identity_tuning.active_profile.profile_name }}</dd></div>
-      <div><dt>profile_version</dt><dd>{{ identity_tuning.active_profile.profile_version }}</dd></div>
-      <div><dt>embedding_model_key</dt><dd>{{ identity_tuning.active_profile.embedding_model_key }}</dd></div>
-      <div><dt>high_quality_threshold</dt><dd>{{ "%.2f"|format(identity_tuning.active_profile.high_quality_threshold) }}</dd></div>
-      <div><dt>trusted_seed_quality_threshold</dt><dd>{{ "%.2f"|format(identity_tuning.active_profile.trusted_seed_quality_threshold) }}</dd></div>
+      <div><dt>id</dt><dd>{{ identity_tuning.review_run.id }}</dd></div>
+      <div><dt>run_status</dt><dd>{{ identity_tuning.review_run.run_status }}</dd></div>
+      <div><dt>observation_snapshot_id</dt><dd>{{ identity_tuning.review_run.observation_snapshot_id }}</dd></div>
+      <div><dt>cluster_profile_id</dt><dd>{{ identity_tuning.review_run.cluster_profile_id }}</dd></div>
+      <div><dt>is_review_target</dt><dd>{{ identity_tuning.review_run.is_review_target }}</dd></div>
+      <div><dt>review_selected_at</dt><dd>{{ identity_tuning.review_run.review_selected_at or "-" }}</dd></div>
     </dl>
-    {% else %}
-    <p class="summary">当前 workspace 没有 active profile。</p>
-    {% endif %}
   </section>
 
   <section class="panel identity-tuning-section">
-    <h3>bootstrap batch</h3>
-    {% if identity_tuning.bootstrap_batch %}
+    <h3>observation / profile</h3>
     <dl class="identity-kv-grid">
-      <div><dt>ID</dt><dd>{{ identity_tuning.bootstrap_batch.id }}</dd></div>
-      <div><dt>batch_type</dt><dd>{{ identity_tuning.bootstrap_batch.batch_type }}</dd></div>
-      <div><dt>algorithm_version</dt><dd>{{ identity_tuning.bootstrap_batch.algorithm_version }}</dd></div>
-      <div><dt>threshold_profile_id</dt><dd>{{ identity_tuning.bootstrap_batch.threshold_profile_id }}</dd></div>
-      <div><dt>cluster_count</dt><dd>{{ identity_tuning.bootstrap_batch.cluster_count }}</dd></div>
-      <div><dt>review_pending_count</dt><dd>{{ identity_tuning.bootstrap_batch.review_pending_count }}</dd></div>
+      <div><dt>observation_snapshot.id</dt><dd>{{ identity_tuning.observation_snapshot.id }}</dd></div>
+      <div><dt>observation_snapshot.status</dt><dd>{{ identity_tuning.observation_snapshot.status }}</dd></div>
+      <div><dt>observation_profile.id</dt><dd>{{ identity_tuning.observation_profile.id }}</dd></div>
+      <div><dt>observation_profile.profile_name</dt><dd>{{ identity_tuning.observation_profile.profile_name }}</dd></div>
+      <div><dt>cluster_profile.id</dt><dd>{{ identity_tuning.cluster_profile.id }}</dd></div>
+      <div><dt>cluster_profile.profile_name</dt><dd>{{ identity_tuning.cluster_profile.profile_name }}</dd></div>
     </dl>
-    {% else %}
-    <p class="summary">当前没有 bootstrap batch 记录。</p>
-    {% endif %}
   </section>
 
   <section class="panel identity-tuning-section">
-    <h3>匿名人物（含 cover observation 与 seed 组成）</h3>
-    {% if identity_tuning.anonymous_people %}
-    <ul class="identity-list">
-      {% for person in identity_tuning.anonymous_people %}
+    <h3>run summary</h3>
+    <pre class="identity-json-block">{{ identity_tuning.run_summary | tojson(indent=2) }}</pre>
+  </section>
+
+  <section class="panel identity-tuning-section">
+    <h3>clusters</h3>
+    {% if identity_tuning.clusters %}
+    <ul class="identity-list identity-run-clusters">
+      {% for cluster in identity_tuning.clusters %}
       <li class="identity-list-item">
-        <div class="identity-preview-layout">
-          <div class="identity-preview-panel">
-            {% if person.cover_crop_url %}
-            <img class="identity-preview-image" src="{{ person.cover_crop_url }}" alt="{{ person.display_name }} cover observation" loading="lazy" />
-            {% else %}
-            <div class="identity-preview-placeholder">暂无 cover</div>
-            {% endif %}
-            <p class="identity-preview-caption">cover observation: {{ person.cover_observation_id if person.cover_observation_id is not none else "无" }}</p>
-          </div>
-          <div class="identity-preview-content">
-            <div class="identity-row-head">
-              <strong>{{ person.display_name }}</strong>
-              <span>ID {{ person.person_id }} · origin cluster {{ person.origin_cluster_id }}</span>
-            </div>
-            {% if person.seed_observations %}
-            <p class="summary">seed 组成：{{ person.seed_observations | map(attribute='observation_id') | join(', ') }}</p>
-            <div class="identity-seed-grid">
-              {% for seed in person.seed_observations %}
-              <figure class="identity-seed-card">
-                <img class="identity-seed-image" src="{{ seed.crop_url }}" alt="{{ person.display_name }} seed {{ seed.observation_id }}" loading="lazy" />
-                <figcaption>seed #{{ seed.trusted_sample_id }} · observation {{ seed.observation_id }}</figcaption>
-              </figure>
-              {% endfor %}
-            </div>
-            {% else %}
-            <p class="summary">seed 组成：无</p>
-            {% endif %}
-          </div>
+        <div class="identity-row-head">
+          <strong>cluster #{{ cluster.cluster_id }}</strong>
+          <span>{{ cluster.cluster_stage }} / {{ cluster.cluster_state }}</span>
         </div>
+
+        <dl class="identity-kv-inline">
+          <div><dt>member_count</dt><dd>{{ cluster.metrics.member_count }}</dd></div>
+          <div><dt>retained_member_count</dt><dd>{{ cluster.metrics.retained_member_count }}</dd></div>
+          <div><dt>distinct_photo_count</dt><dd>{{ cluster.metrics.distinct_photo_count }}</dd></div>
+          <div><dt>resolution_state</dt><dd>{{ cluster.resolution.resolution_state }}</dd></div>
+          <div><dt>resolution_reason</dt><dd>{{ cluster.resolution.resolution_reason or "-" }}</dd></div>
+          <div><dt>trusted_seed_count</dt><dd>{{ cluster.seed_audit.trusted_seed_count }}</dd></div>
+          <div><dt>trusted_seed_candidate_count</dt><dd>{{ cluster.seed_audit.trusted_seed_candidate_count }}</dd></div>
+        </dl>
+
+        <details>
+          <summary>lineage（{{ cluster.lineage|length }}）</summary>
+          <pre class="identity-json-block">{{ cluster.lineage | tojson(indent=2) }}</pre>
+        </details>
+
+        <details>
+          <summary>
+            members（代表 {{ cluster.members.representative|length }} / 保留 {{ cluster.members.retained|length }} / 排除 {{ cluster.members.excluded|length }}）
+          </summary>
+          <div class="identity-member-groups">
+            <div>
+              <h4>representative</h4>
+              <pre class="identity-json-block">{{ cluster.members.representative | tojson(indent=2) }}</pre>
+            </div>
+            <div>
+              <h4>retained</h4>
+              <pre class="identity-json-block">{{ cluster.members.retained | tojson(indent=2) }}</pre>
+            </div>
+            <div>
+              <h4>excluded</h4>
+              <pre class="identity-json-block">{{ cluster.members.excluded | tojson(indent=2) }}</pre>
+            </div>
+            <div>
+              <h4>excluded_reason_distribution</h4>
+              <pre class="identity-json-block">{{ cluster.members.excluded_reason_distribution | tojson(indent=2) }}</pre>
+            </div>
+          </div>
+        </details>
       </li>
       {% endfor %}
     </ul>
     {% else %}
-    <p class="summary">当前没有匿名人物。</p>
-    {% endif %}
-  </section>
-
-  <section class="panel identity-tuning-section">
-    <h3>pending cluster 诊断（含 distinct_photo_count / quality_distribution / external_margin / reject_reason）</h3>
-    {% if identity_tuning.pending_clusters %}
-    <ul class="identity-list">
-      {% for cluster in identity_tuning.pending_clusters %}
-      <li class="identity-list-item">
-        <div class="identity-preview-layout">
-          <div class="identity-preview-panel">
-            {% if cluster.representative_crop_url %}
-            <img class="identity-preview-image" src="{{ cluster.representative_crop_url }}" alt="cluster {{ cluster.cluster_id }} representative observation" loading="lazy" />
-            {% else %}
-            <div class="identity-preview-placeholder">暂无代表图</div>
-            {% endif %}
-            <p class="identity-preview-caption">representative observation: {{ cluster.representative_observation_id if cluster.representative_observation_id is not none else "无" }}</p>
-          </div>
-          <div class="identity-preview-content">
-            <div class="identity-row-head">
-              <strong>cluster #{{ cluster.cluster_id }}</strong>
-              <span>member {{ cluster.member_count }} · seed {{ cluster.seed_candidate_count }}</span>
-            </div>
-            <dl class="identity-kv-inline">
-              <div><dt>distinct_photo_count</dt><dd>{{ cluster.diagnostics.distinct_photo_count }}</dd></div>
-              <div><dt>quality_distribution</dt><dd>min {{ "%.2f"|format(cluster.diagnostics.quality_distribution.get("min", 0)) }} · avg {{ "%.2f"|format(cluster.diagnostics.quality_distribution.get("avg", 0)) }} · max {{ "%.2f"|format(cluster.diagnostics.quality_distribution.get("max", 0)) }}</dd></div>
-              <div><dt>external_margin</dt><dd>{{ cluster.diagnostics.external_margin }}</dd></div>
-              <div><dt>reject_reason</dt><dd>{{ cluster.diagnostics.reject_reason }}</dd></div>
-            </dl>
-            {% if cluster.distinct_photo_previews %}
-            <p class="summary">distinct photo 预览</p>
-            <div class="identity-photo-preview-grid">
-              {% for preview in cluster.distinct_photo_previews %}
-              <figure class="identity-photo-preview-card">
-                <img class="identity-photo-preview-image" src="{{ preview.preview_url }}" alt="cluster {{ cluster.cluster_id }} photo {{ preview.photo_asset_id }} preview" loading="lazy" />
-                <figcaption>photo {{ preview.photo_asset_id }} · observation {{ preview.observation_id }}</figcaption>
-              </figure>
-              {% endfor %}
-            </div>
-            {% endif %}
-          </div>
-        </div>
-      </li>
-      {% endfor %}
-    </ul>
-    {% else %}
-    <p class="summary">当前没有 pending cluster。</p>
-    {% endif %}
-  </section>
-
-  <section class="panel identity-tuning-section">
-    <h3>全图库高质量 observation（quality_score &gt;= high_quality_threshold）</h3>
-    {% if identity_tuning.active_profile %}
-      {% if identity_tuning.high_quality_observations %}
-      <p class="summary">当前共有 {{ identity_tuning.high_quality_observations | length }} 条 observation 满足 quality_score &gt;= {{ "%.2f"|format(identity_tuning.high_quality_threshold) }}。</p>
-      <div class="identity-observation-grid">
-        {% for observation in identity_tuning.high_quality_observations %}
-        <figure class="identity-observation-card">
-          <div class="identity-observation-media-grid">
-            <img class="identity-observation-crop-image" src="{{ observation.crop_url }}" alt="observation {{ observation.observation_id }} crop" loading="lazy" />
-            <img class="identity-observation-preview-image" src="{{ observation.preview_url }}" alt="observation {{ observation.observation_id }} preview" loading="lazy" />
-          </div>
-          <figcaption>
-            observation {{ observation.observation_id }} · photo {{ observation.photo_asset_id }} · quality {{ "%.2f"|format(observation.quality_score) }}
-          </figcaption>
-        </figure>
-        {% endfor %}
-      </div>
-      {% else %}
-      <p class="summary">当前没有 observation 达到 quality_score &gt;= {{ "%.2f"|format(identity_tuning.high_quality_threshold) }}。</p>
-      {% endif %}
-    {% else %}
-    <p class="summary">当前 workspace 没有 active profile，无法按 high_quality_threshold 展示 observation。</p>
+    <p class="summary">当前 run 没有 final cluster。</p>
     {% endif %}
   </section>
 </section>
