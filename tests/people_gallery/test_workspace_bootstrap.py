@@ -50,7 +50,17 @@ def test_workspace_layout_and_tables(tmp_path):
         "auto_cluster",
         "auto_cluster_member",
         "identity_threshold_profile",
+        "identity_observation_profile",
+        "identity_observation_snapshot",
+        "identity_observation_pool_entry",
+        "identity_cluster_profile",
+        "identity_cluster_run",
+        "identity_cluster",
+        "identity_cluster_lineage",
+        "identity_cluster_member",
+        "identity_cluster_resolution",
         "person",
+        "person_cluster_origin",
         "person_face_assignment",
         "person_face_exclusion",
         "person_trusted_sample",
@@ -64,6 +74,10 @@ def test_workspace_layout_and_tables(tmp_path):
     }
     assert required <= table_names
     assert "idx_photo_asset_source_status" in index_names
+    schema_0005 = conn.execute(
+        "SELECT COUNT(*) FROM schema_migration WHERE version = 5"
+    ).fetchone()
+    assert int(schema_0005[0]) == 1
 
 
 def test_workspace_and_external_root_can_be_same_path(tmp_path):

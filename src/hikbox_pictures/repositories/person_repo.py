@@ -11,6 +11,115 @@ except ModuleNotFoundError:
 class PersonRepo:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
+        self._table_exists_cache: dict[str, bool] = {}
+        self._person_columns_cache: set[str] | None = None
+
+    def _has_table(self, table: str) -> bool:
+        cached = self._table_exists_cache.get(table)
+        if cached is not None:
+            return cached
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = ?
+            LIMIT 1
+            """,
+            (str(table),),
+        ).fetchone()
+        exists = row is not None
+        self._table_exists_cache[table] = exists
+        return exists
+
+    def _person_columns(self) -> set[str]:
+        if self._person_columns_cache is None:
+            rows = self.conn.execute("PRAGMA table_info(person)").fetchall()
+            self._person_columns_cache = {str(row["name"]) for row in rows}
+        return self._person_columns_cache
+
+    def _has_person_column(self, column: str) -> bool:
+        return str(column) in self._person_columns()
+
+    def _person_origin_cluster_expr(self, person_alias: str) -> str:
+        alias = str(person_alias)
+        if self._has_person_column("origin_cluster_id"):
+            return f"{alias}.origin_cluster_id"
+        if self._has_table("person_cluster_origin"):
+            return (
+                "COALESCE(\n"
+                "    (\n"
+                "        SELECT pco.origin_cluster_id\n"
+                "        FROM person_cluster_origin AS pco\n"
+                f"        WHERE pco.person_id = {alias}.id\n"
+                "          AND pco.active = 1\n"
+                "        ORDER BY pco.id DESC\n"
+                "        LIMIT 1\n"
+                "    ),\n"
+                "    (\n"
+                "        SELECT pts.source_auto_cluster_id\n"
+                "        FROM person_trusted_sample AS pts\n"
+                f"        WHERE pts.person_id = {alias}.id\n"
+                "          AND pts.active = 1\n"
+                "          AND pts.source_auto_cluster_id IS NOT NULL\n"
+                "        ORDER BY pts.id DESC\n"
+                "        LIMIT 1\n"
+                "    )\n"
+                ")"
+            )
+        return "NULL"
+
+    def _resolve_identity_cluster_run_id(self, *, origin_cluster_id: int) -> int | None:
+        if not self._has_table("identity_cluster"):
+            return None
+        cluster_row = self.conn.execute(
+            """
+            SELECT run_id
+            FROM identity_cluster
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (int(origin_cluster_id),),
+        ).fetchone()
+        if cluster_row is None:
+            return None
+        run_id = cluster_row["run_id"]
+        if run_id is None:
+            return None
+        return int(run_id)
+
+    def _insert_person_cluster_origin_if_possible(
+        self,
+        *,
+        person_id: int,
+        origin_cluster_id: int | None,
+    ) -> None:
+        if origin_cluster_id is None:
+            return
+        if not self._has_table("person_cluster_origin"):
+            return
+        source_run_id = self._resolve_identity_cluster_run_id(
+            origin_cluster_id=int(origin_cluster_id),
+        )
+        if source_run_id is None:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO person_cluster_origin(
+                person_id,
+                origin_cluster_id,
+                source_run_id,
+                origin_kind,
+                active
+            )
+            VALUES (?, ?, ?, 'bootstrap_materialize', 1)
+            """,
+            (
+                int(person_id),
+                int(origin_cluster_id),
+                int(source_run_id),
+            ),
+        )
 
     def create_person(
         self,
@@ -22,6 +131,32 @@ class PersonRepo:
         cover_observation_id: int | None = None,
         origin_cluster_id: int | None = None,
     ) -> int:
+        if self._has_person_column("origin_cluster_id"):
+            cursor = self.conn.execute(
+                """
+                INSERT INTO person(
+                    display_name,
+                    status,
+                    confirmed,
+                    ignored,
+                    notes,
+                    cover_observation_id,
+                    origin_cluster_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    display_name,
+                    status,
+                    1 if confirmed else 0,
+                    1 if ignored else 0,
+                    notes,
+                    int(cover_observation_id) if cover_observation_id is not None else None,
+                    int(origin_cluster_id) if origin_cluster_id is not None else None,
+                ),
+            )
+            return int(cursor.lastrowid)
+
         cursor = self.conn.execute(
             """
             INSERT INTO person(
@@ -30,10 +165,9 @@ class PersonRepo:
                 confirmed,
                 ignored,
                 notes,
-                cover_observation_id,
-                origin_cluster_id
+                cover_observation_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 display_name,
@@ -42,28 +176,54 @@ class PersonRepo:
                 1 if ignored else 0,
                 notes,
                 int(cover_observation_id) if cover_observation_id is not None else None,
-                int(origin_cluster_id) if origin_cluster_id is not None else None,
             ),
         )
-        return int(cursor.lastrowid)
+        person_id = int(cursor.lastrowid)
+        self._insert_person_cluster_origin_if_possible(
+            person_id=person_id,
+            origin_cluster_id=origin_cluster_id,
+        )
+        return person_id
 
     def get_person(self, person_id: int) -> dict[str, Any] | None:
+        origin_expr = self._person_origin_cluster_expr("p")
         row = self.conn.execute(
-            """
-            SELECT id, display_name, cover_observation_id, origin_cluster_id, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
-            FROM person
-            WHERE id = ?
+            f"""
+            SELECT p.id,
+                   p.display_name,
+                   p.cover_observation_id,
+                   {origin_expr} AS origin_cluster_id,
+                   p.status,
+                   p.confirmed,
+                   p.ignored,
+                   p.notes,
+                   p.merged_into_person_id,
+                   p.created_at,
+                   p.updated_at
+            FROM person AS p
+            WHERE p.id = ?
             """,
             (int(person_id),),
         ).fetchone()
         return dict(row) if row is not None else None
 
     def list_people(self) -> list[dict[str, Any]]:
+        origin_expr = self._person_origin_cluster_expr("p")
         rows = self.conn.execute(
-            """
-            SELECT id, display_name, cover_observation_id, origin_cluster_id, status, confirmed, ignored, notes, merged_into_person_id, created_at, updated_at
-            FROM person
-            ORDER BY id ASC
+            f"""
+            SELECT p.id,
+                   p.display_name,
+                   p.cover_observation_id,
+                   {origin_expr} AS origin_cluster_id,
+                   p.status,
+                   p.confirmed,
+                   p.ignored,
+                   p.notes,
+                   p.merged_into_person_id,
+                   p.created_at,
+                   p.updated_at
+            FROM person AS p
+            ORDER BY p.id ASC
             """
         ).fetchall()
         return [dict(row) for row in rows]

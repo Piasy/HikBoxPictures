@@ -3,13 +3,13 @@
 ## 文档定位
 
 - 本文记录当前仓库 `src/hikbox_pictures/db/migrations/` 已落地 migration 链对应的最新数据库 schema 快照。
-- 当前最新 migration 为 `0004_identity_rebuild_v3_schema.sql`。
+- 当前最新 migration 为 `0005_identity_cluster_bootstrap_v3_1.sql`。
 - 数据库类型为 SQLite。
-- 本文只描述已经落地的表、字段、索引和约束，不包含设计稿或讨论中的未来变更。
+- 本文按领域描述已经落地的表结构，重点覆盖核心字段与关键索引/约束；完整字段定义以 migration SQL 为准，不包含设计稿或讨论中的未来变更。
 
 ## Schema 概览
 
-- 当前共有 22 张表。
+- 当前共有 32 张表。
 - 布尔语义统一使用 `INTEGER`，取值为 `0` 或 `1`。
 - 大部分时间字段使用 `TEXT` 存储，并以 `CURRENT_TIMESTAMP` 作为默认值。
 - `cursor_json`、`payload_json`、`detail_json` 等字段在库中以 JSON 字符串形式存储。
@@ -18,8 +18,17 @@
 | --- | --- |
 | 来源与扫描 | `library_source`、`scan_session`、`scan_session_source`、`scan_checkpoint`、`photo_asset` |
 | 人脸观测与聚类 | `face_observation`、`face_embedding`、`auto_cluster_batch`、`auto_cluster`、`auto_cluster_member` |
-| 人物与复核 | `identity_threshold_profile`、`person`、`person_face_assignment`、`person_face_exclusion`、`person_trusted_sample`、`person_prototype`、`review_item` |
+| 人物与复核 | `identity_threshold_profile`、`identity_observation_profile`、`identity_observation_snapshot`、`identity_observation_pool_entry`、`identity_cluster_profile`、`identity_cluster_run`、`identity_cluster`、`identity_cluster_lineage`、`identity_cluster_member`、`identity_cluster_resolution`、`person`、`person_cluster_origin`、`person_face_assignment`、`person_face_exclusion`、`person_trusted_sample`、`person_prototype`、`review_item` |
 | 导出与运维 | `export_template`、`export_template_person`、`export_run`、`export_delivery`、`ops_event` |
+
+## 0005 迁移要点
+
+- 新增 observation/profile/run 主链表：`identity_observation_profile`、`identity_observation_snapshot`、`identity_observation_pool_entry`、`identity_cluster_profile`、`identity_cluster_run`、`identity_cluster`、`identity_cluster_lineage`、`identity_cluster_member`、`identity_cluster_resolution`。
+- 新增人物来源真相表：`person_cluster_origin`，用于承接原 `person.origin_cluster_id` 的历史来源记录。
+- `person` 表已移除 `origin_cluster_id` 列。
+- `person_face_assignment` 与 `person_trusted_sample` 新增 `source_run_id`、`source_cluster_id`，用于追踪来源 run/cluster。
+- `identity_cluster_run` 保留唯一索引，保证全库最多一个 `is_review_target = 1` 与一个 `is_materialization_owner = 1`。
+- `identity_threshold_profile` 会在迁移时回填一组 observation/cluster profile；若无 legacy profile，会自动生成 fallback profile。
 
 ## 当前表结构
 
@@ -270,6 +279,178 @@
 
 - `uq_identity_threshold_profile_active`：`active = 1` 的记录在全库内最多一条。
 
+### `identity_observation_profile`
+
+用途：observation 预处理参数配置。
+
+核心字段：
+
+- `profile_name` / `profile_version`：profile 标识。
+- `embedding_*`：绑定向量模型、距离度量和 schema。
+- `quality_*` 与 `core_quality_threshold` / `attachment_quality_threshold`：质量分参数与分池阈值。
+- `exact_duplicate_distance_threshold`、`burst_window_seconds`、`burst_duplicate_distance_threshold`：去重策略参数。
+- `active` / `activated_at`：激活状态。
+
+关键索引与约束：
+
+- `uq_identity_observation_profile_active`：`active = 1` 的记录在全库内最多一条。
+
+### `identity_observation_snapshot`
+
+用途：observation 预处理快照元数据。
+
+核心字段：
+
+- `observation_profile_id`：外键到 `identity_observation_profile.id`。
+- `dataset_hash`：候选 observation 集哈希。
+- `candidate_policy_hash`：候选策略哈希。
+- `max_knn_supported`：该快照支持的最大 KNN 上限。
+- `algorithm_version`：快照算法版本。
+- `status`：`created` / `running` / `succeeded` / `failed` / `cancelled`。
+
+关键索引与约束：
+
+- `idx_identity_observation_snapshot_profile_dataset`：按 profile + hash 查找可复用 snapshot。
+
+### `identity_observation_pool_entry`
+
+用途：snapshot 内 observation 分池结果与去重诊断。
+
+核心字段：
+
+- `snapshot_id`、`observation_id`：关联 snapshot 与 observation。
+- `pool_kind`：`core_discovery` / `attachment` / `excluded`。
+- `quality_score_snapshot`：写入时质量分快照。
+- `dedup_group_key`、`representative_observation_id`、`excluded_reason`：去重与排除语义。
+- `diagnostic_json`：补充诊断信息。
+
+关键索引与约束：
+
+- `UNIQUE (snapshot_id, observation_id)`：同一 snapshot 内 observation 只保留一条记录。
+- `idx_identity_observation_pool_entry_snapshot_kind`：按 snapshot + 池类型/排除原因检索。
+
+### `identity_cluster_profile`
+
+用途：cluster run 算法与 gate 参数配置。
+
+核心字段：
+
+- `discovery_knn_k`、`density_min_samples`：密度聚类核心参数。
+- `anchor_core_*` / `core_*` / `boundary_*`：成员角色判定参数。
+- `existence_*`：cluster 存在性 gate。
+- `materialize_*`：materialize gate。
+- `trusted_seed_*`：trusted seed 选择参数。
+- `active` / `activated_at`：激活状态。
+
+关键索引与约束：
+
+- `uq_identity_cluster_profile_active`：`active = 1` 的记录在全库内最多一条。
+
+### `identity_cluster_run`
+
+用途：cluster rerun 生命周期主表。
+
+核心字段：
+
+- `observation_snapshot_id`、`cluster_profile_id`：run 输入。
+- `algorithm_version`：run 算法版本。
+- `run_status`：`created` / `running` / `succeeded` / `failed` / `cancelled`。
+- `summary_json` / `failure_json`：run 结果摘要与失败信息。
+- `is_review_target` / `review_selected_at`：当前 review 目标 run。
+- `is_materialization_owner` / `activated_at`：当前 live owner。
+- `prepared_artifact_root` / `prepared_ann_manifest_json`：prepare 阶段产物信息。
+
+关键索引与约束：
+
+- `ux_identity_cluster_run_single_review_target`：全库最多一个 `is_review_target = 1`。
+- `ux_identity_cluster_run_single_materialization_owner`：全库最多一个 `is_materialization_owner = 1`。
+- `idx_identity_cluster_run_status`：按 run 状态检索。
+
+### `identity_cluster`
+
+用途：run 内 `raw/cleaned/final` cluster 节点及指标。
+
+核心字段：
+
+- `run_id`：所属 run。
+- `cluster_stage`：`raw` / `cleaned` / `final`。
+- `cluster_state`：`active` / `discarded`。
+- `member_count`、`retained_member_count`、`anchor_core_count`、`core_count` 等成员计数。
+- `compactness_p50/p90`、`support_ratio_p10/p50`、`intra_photo_conflict_ratio`、`nearest_cluster_distance`、`separation_gap`、`boundary_ratio`：cluster 指标。
+- `discard_reason_code`、`summary_json`：处置原因与摘要。
+
+关键索引与约束：
+
+- `idx_identity_cluster_run_stage`：按 run + stage + state 检索。
+
+### `identity_cluster_lineage`
+
+用途：cluster 拓扑演化关系（split/merge 等）记录。
+
+核心字段：
+
+- `parent_cluster_id`、`child_cluster_id`：父子 cluster 关系。
+- `relation_kind`：关系类型。
+- `reason_code`、`detail_json`：关系原因与诊断。
+
+关键索引与约束：
+
+- `UNIQUE (parent_cluster_id, child_cluster_id, relation_kind)`：同一关系去重。
+
+### `identity_cluster_member`
+
+用途：cluster 成员证据落库。
+
+核心字段：
+
+- `cluster_id`、`observation_id`：成员关联。
+- `source_pool_kind`：来源池（`core_discovery` / `attachment` / `excluded`）。
+- `member_role`：`anchor_core` / `core` / `boundary` / `attachment` / `excluded`。
+- `decision_status`：`retained` / `rejected` / `deferred`。
+- `support_ratio`、`attachment_support_ratio`、`distance_to_medoid`、`density_radius`、`nearest_competing_cluster_distance`、`separation_gap`：成员级指标。
+- `decision_reason_code`、`is_trusted_seed_candidate`、`is_selected_trusted_seed`、`seed_rank`、`is_representative`、`diagnostic_json`：成员决策证据。
+
+关键索引与约束：
+
+- `UNIQUE (cluster_id, observation_id)`：同一 cluster 内 observation 只保留一条成员记录。
+- `idx_identity_cluster_member_cluster_role`：按 cluster + 角色 + 决策状态检索。
+
+### `identity_cluster_resolution`
+
+用途：final cluster 的 resolution 与 publish 状态。
+
+核心字段：
+
+- `cluster_id`：一对一关联 `identity_cluster`。
+- `resolution_state`：`materialized` / `review_pending` / `discarded` / `unresolved`。
+- `resolution_reason`：resolution 原因。
+- `publish_state`：`not_applicable` / `prepared` / `published` / `publish_failed`。
+- `publish_failure_reason`：发布失败原因。
+- `person_id`：发布后关联人物。
+- `source_run_id`：来源 run。
+- `trusted_seed_count` / `trusted_seed_candidate_count` / `trusted_seed_reject_distribution_json`：seed 审计。
+- `prepared_bundle_manifest_json`、`prototype_status`、`ann_status`：prepare/publish 产物与状态。
+
+关键索引与约束：
+
+- `UNIQUE (cluster_id)`：每个 cluster 仅一条 resolution 记录。
+
+### `person_cluster_origin`
+
+用途：人物来源真相表，承接历史 `origin_cluster_id` 并绑定来源 run。
+
+核心字段：
+
+- `person_id`：人物 ID。
+- `origin_cluster_id`：来源 cluster ID（`identity_cluster.id`）。
+- `source_run_id`：来源 run ID（`identity_cluster_run.id`）。
+- `origin_kind`：`bootstrap_materialize` / `review_materialize` / `merge_adopt`。
+- `active`：当前是否为生效来源。
+
+关键索引与约束：
+
+- `idx_person_cluster_origin_person_active`：按人物 + 生效状态 + run 检索来源。
+
 ### `person`
 
 用途：人物实体主表。
@@ -279,7 +460,6 @@
 | `id` | `INTEGER` | 主键，自增 | 人物主键。 |
 | `display_name` | `TEXT` | 非空 | 人物显示名。 |
 | `cover_observation_id` | `INTEGER` | 可空，外键到 `face_observation.id` | 人物封面所用的人脸观测。 |
-| `origin_cluster_id` | `INTEGER` | 可空，外键到 `auto_cluster.id` | 人物最初来源 cluster。 |
 | `status` | `TEXT` | 非空，默认 `active`，枚举 `active` / `merged` / `ignored` | 人物状态。 |
 | `notes` | `TEXT` | 可空 | 人物备注。 |
 | `confirmed` | `INTEGER` | 非空，默认 `0`，`0/1` | 人物是否被人工确认。 |
@@ -302,6 +482,8 @@
 | `threshold_profile_id` | `INTEGER` | 可空，外键到 `identity_threshold_profile.id` | 归属时使用的阈值配置。 |
 | `locked` | `INTEGER` | 非空，默认 `0`，`0/1` | 归属是否锁定，不允许自动覆盖。 |
 | `confirmed_at` | `TEXT` | 可空 | 人工确认时间。 |
+| `source_run_id` | `INTEGER` | 可空，外键到 `identity_cluster_run.id` | 归属来源 run。 |
+| `source_cluster_id` | `INTEGER` | 可空，外键到 `identity_cluster.id` | 归属来源 cluster。 |
 | `active` | `INTEGER` | 非空，默认 `1`，`0/1` | 该归属是否为当前有效归属。 |
 | `created_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 创建时间。 |
 | `updated_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 最近更新时间。 |
@@ -325,6 +507,8 @@
 | `threshold_profile_id` | `INTEGER` | 非空，外键到 `identity_threshold_profile.id` | 样本判定使用的阈值配置。 |
 | `source_review_id` | `INTEGER` | 可空，外键到 `review_item.id` | 来源复核项。 |
 | `source_auto_cluster_id` | `INTEGER` | 可空，外键到 `auto_cluster.id` | 来源 cluster。 |
+| `source_run_id` | `INTEGER` | 可空，外键到 `identity_cluster_run.id` | 样本来源 run。 |
+| `source_cluster_id` | `INTEGER` | 可空，外键到 `identity_cluster.id` | 样本来源 cluster。 |
 | `active` | `INTEGER` | 非空，默认 `1`，`0/1` | 样本是否仍有效。 |
 | `created_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 创建时间。 |
 | `updated_at` | `TEXT` | 非空，默认 `CURRENT_TIMESTAMP` | 最近更新时间。 |
@@ -553,6 +737,14 @@
   - `assignment_source` 收敛为 `bootstrap` / `auto` / `manual` / `merge`
   - 迁移时历史 `split` 写入为 `manual`
 - 重建 `person_face_exclusion` 并重新绑定 `assignment_id -> person_face_assignment(id)` 外键。
+
+### `0005_identity_cluster_bootstrap_v3_1.sql`
+
+- 新增 observation/cluster phase1 主链：`identity_observation_profile`、`identity_observation_snapshot`、`identity_observation_pool_entry`、`identity_cluster_profile`、`identity_cluster_run`、`identity_cluster`、`identity_cluster_lineage`、`identity_cluster_member`、`identity_cluster_resolution`。
+- 新增 `person_cluster_origin`，承接历史 `person.origin_cluster_id` 来源并关联 `source_run_id`。
+- `person` 表移除 `origin_cluster_id` 列。
+- `person_face_assignment` 与 `person_trusted_sample` 增加 `source_run_id`、`source_cluster_id` 字段。
+- 回填 legacy migration succeeded run 的 `summary`、`cluster`、`member`、`resolution` 数据。
 
 ## 维护要求
 

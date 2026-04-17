@@ -29,6 +29,63 @@ class WebQueryService:
         self.export_repo = ExportRepo(conn)
         self.export_match_service = ExportMatchService(conn)
         self.ops_event_repo = OpsEventRepo(conn)
+        self._table_exists_cache: dict[str, bool] = {}
+        self._person_columns_cache: set[str] | None = None
+
+    def _has_table(self, table: str) -> bool:
+        cached = self._table_exists_cache.get(table)
+        if cached is not None:
+            return cached
+        row = self.conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name = ?
+            LIMIT 1
+            """,
+            (str(table),),
+        ).fetchone()
+        exists = row is not None
+        self._table_exists_cache[table] = exists
+        return exists
+
+    def _person_columns(self) -> set[str]:
+        if self._person_columns_cache is None:
+            rows = self.conn.execute("PRAGMA table_info(person)").fetchall()
+            self._person_columns_cache = {str(row["name"]) for row in rows}
+        return self._person_columns_cache
+
+    def _has_person_column(self, column: str) -> bool:
+        return str(column) in self._person_columns()
+
+    def _person_origin_cluster_expr(self, person_alias: str) -> str:
+        alias = str(person_alias)
+        if self._has_person_column("origin_cluster_id"):
+            return f"{alias}.origin_cluster_id"
+        if self._has_table("person_cluster_origin"):
+            return (
+                "COALESCE(\n"
+                "    (\n"
+                "        SELECT pco.origin_cluster_id\n"
+                "        FROM person_cluster_origin AS pco\n"
+                f"        WHERE pco.person_id = {alias}.id\n"
+                "          AND pco.active = 1\n"
+                "        ORDER BY pco.id DESC\n"
+                "        LIMIT 1\n"
+                "    ),\n"
+                "    (\n"
+                "        SELECT pts.source_auto_cluster_id\n"
+                "        FROM person_trusted_sample AS pts\n"
+                f"        WHERE pts.person_id = {alias}.id\n"
+                "          AND pts.active = 1\n"
+                "          AND pts.source_auto_cluster_id IS NOT NULL\n"
+                "        ORDER BY pts.id DESC\n"
+                "        LIMIT 1\n"
+                "    )\n"
+                ")"
+            )
+        return "NULL"
 
     def get_scan_status(self) -> dict[str, Any]:
         session = self.scan_repo.latest_session()
@@ -1093,20 +1150,30 @@ class WebQueryService:
             "discarded_count": int(cluster_aggregate_row["discarded_count"] or 0),
         }
 
+        origin_cluster_expr = self._person_origin_cluster_expr("p")
         anonymous_rows = self.conn.execute(
-            """
-            SELECT p.id,
-                   p.display_name,
-                   p.origin_cluster_id,
-                   p.cover_observation_id,
-                   p.created_at,
-                   p.updated_at
-            FROM person AS p
+            f"""
+            WITH person_origin AS (
+                SELECT p.id,
+                       p.display_name,
+                       {origin_cluster_expr} AS origin_cluster_id,
+                       p.cover_observation_id,
+                       p.created_at,
+                       p.updated_at
+                FROM person AS p
+            )
+            SELECT po.id,
+                   po.display_name,
+                   po.origin_cluster_id,
+                   po.cover_observation_id,
+                   po.created_at,
+                   po.updated_at
+            FROM person_origin AS po
             JOIN auto_cluster AS ac
-              ON ac.id = p.origin_cluster_id
+              ON ac.id = po.origin_cluster_id
             WHERE ac.batch_id = ?
               AND ac.cluster_status = 'materialized'
-            ORDER BY p.id ASC
+            ORDER BY po.id ASC
             """,
             (latest_batch_id,),
         ).fetchall()

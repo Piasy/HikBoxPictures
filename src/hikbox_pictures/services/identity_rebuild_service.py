@@ -244,11 +244,19 @@ class IdentityRebuildService:
         fk_break_updates: dict[str, int] = {}
         managed_transaction = not self.conn.in_transaction
         try:
-            fk_break_updates["person.origin_cluster_id"] = int(
-                self.conn.execute(
-                    "UPDATE person SET origin_cluster_id = NULL WHERE origin_cluster_id IS NOT NULL"
-                ).rowcount
-            )
+            person_columns = {
+                str(row["name"])
+                for row in self.conn.execute("PRAGMA table_info(person)").fetchall()
+            }
+            if "origin_cluster_id" in person_columns:
+                fk_break_updates["person.origin_cluster_id"] = int(
+                    self.conn.execute(
+                        "UPDATE person SET origin_cluster_id = NULL WHERE origin_cluster_id IS NOT NULL"
+                    ).rowcount
+                )
+            else:
+                # v3.1 后该列已移除，保留统计键避免影响历史摘要消费方。
+                fk_break_updates["person.origin_cluster_id"] = 0
             fk_break_updates["person.merged_into_person_id"] = int(
                 self.conn.execute(
                     "UPDATE person SET merged_into_person_id = NULL WHERE merged_into_person_id IS NOT NULL"
