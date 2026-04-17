@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import json
 import math
@@ -51,6 +51,8 @@ class IdentityPhase1Workspace:
     observation_profile_id: int
     cluster_profile_id: int
     backfill_call_count: int = 0
+    stub_run_ann_prepare_failure_run_ids: set[int] = field(default_factory=set)
+    stub_publish_stage_failure_reasons: dict[int, str] = field(default_factory=dict)
 
     def close(self) -> None:
         self.conn.close()
@@ -66,6 +68,56 @@ class IdentityPhase1Workspace:
         return IdentityClusterRunService(
             self.conn,
             cluster_run_repo=IdentityClusterRunRepo(self.conn),
+        )
+
+    def new_cluster_prepare_service(self):  # type: ignore[no-untyped-def]
+        from hikbox_pictures.ann import AnnIndexStore
+        from hikbox_pictures.repositories.identity_publish_repo import IdentityPublishRepo
+        from hikbox_pictures.repositories.person_repo import PersonRepo
+        from hikbox_pictures.services.identity_cluster_prepare_service import IdentityClusterPrepareService
+        from hikbox_pictures.services.prototype_service import PrototypeService
+
+        person_repo = PersonRepo(self.conn)
+        ann_store = AnnIndexStore(self.paths.artifacts_dir / "ann" / "prototype_index.npz")
+        prototype_service = PrototypeService(self.conn, person_repo=person_repo, ann_index_store=ann_store)
+        publish_repo = IdentityPublishRepo(
+            self.conn,
+            artifact_root=self.paths.artifacts_dir / "identity_prepare",
+            live_ann_artifact_path=self.paths.artifacts_dir / "ann" / "prototype_index.npz",
+            run_ann_prepare_failure_run_ids=self.stub_run_ann_prepare_failure_run_ids,
+            publish_stage_failure_reasons=self.stub_publish_stage_failure_reasons,
+        )
+        return IdentityClusterPrepareService(
+            self.conn,
+            publish_repo=publish_repo,
+            person_repo=person_repo,
+            prototype_service=prototype_service,
+            ann_index_store=ann_store,
+        )
+
+    def new_run_activation_service(self):  # type: ignore[no-untyped-def]
+        from hikbox_pictures.ann import AnnIndexStore
+        from hikbox_pictures.repositories.identity_publish_repo import IdentityPublishRepo
+        from hikbox_pictures.repositories.person_repo import PersonRepo
+        from hikbox_pictures.services.identity_run_activation_service import IdentityRunActivationService
+        from hikbox_pictures.services.prototype_service import PrototypeService
+
+        person_repo = PersonRepo(self.conn)
+        ann_store = AnnIndexStore(self.paths.artifacts_dir / "ann" / "prototype_index.npz")
+        prototype_service = PrototypeService(self.conn, person_repo=person_repo, ann_index_store=ann_store)
+        publish_repo = IdentityPublishRepo(
+            self.conn,
+            artifact_root=self.paths.artifacts_dir / "identity_prepare",
+            live_ann_artifact_path=self.paths.artifacts_dir / "ann" / "prototype_index.npz",
+            run_ann_prepare_failure_run_ids=self.stub_run_ann_prepare_failure_run_ids,
+            publish_stage_failure_reasons=self.stub_publish_stage_failure_reasons,
+        )
+        return IdentityRunActivationService(
+            self.conn,
+            publish_repo=publish_repo,
+            person_repo=person_repo,
+            prototype_service=prototype_service,
+            ann_index_store=ann_store,
         )
 
     def get_cluster_run(self, run_id: int) -> dict[str, Any]:
@@ -392,6 +444,114 @@ class IdentityPhase1Workspace:
             )
             self._insert_embedding(obs_id, np.asarray(vector, dtype=np.float32))
         self.conn.commit()
+
+    def seed_materialize_candidate_case(self) -> None:
+        self.seed_split_and_attachment_case()
+        self.conn.execute(
+            """
+            UPDATE identity_cluster_profile
+            SET materialize_min_anchor_core_count = 1,
+                materialize_min_distinct_photo_count = 2,
+                materialize_max_compactness_p90 = 0.80,
+                materialize_min_separation_gap = 0.0,
+                materialize_max_boundary_ratio = 0.80,
+                trusted_seed_min_quality = 0.45,
+                trusted_seed_min_count = 2,
+                trusted_seed_max_count = 5,
+                trusted_seed_allow_boundary = 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (int(self.cluster_profile_id),),
+        )
+        self.conn.commit()
+
+    def seed_materialize_gate_negative_case(self, *, scenario: str) -> None:
+        self.seed_materialize_candidate_case()
+        if str(scenario) == "anchor_core_below_materialize_min":
+            self.conn.execute(
+                """
+                UPDATE identity_cluster_profile
+                SET materialize_min_anchor_core_count = 5,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (int(self.cluster_profile_id),),
+            )
+            self.conn.commit()
+            return
+        raise ValueError(f"未知 materialize gate 场景: {scenario}")
+
+    def get_run_ann_manifest(self, run_id: int) -> dict[str, Any]:
+        row = self.conn.execute(
+            """
+            SELECT prepared_ann_manifest_json
+            FROM identity_cluster_run
+            WHERE id = ?
+            """,
+            (int(run_id),),
+        ).fetchone()
+        if row is None:
+            raise AssertionError(f"run 不存在: {int(run_id)}")
+        payload = json.loads(str(row["prepared_ann_manifest_json"] or "{}"))
+        if not isinstance(payload, dict):
+            return {}
+        return payload
+
+    def stub_run_ann_prepare_failure(self, *, run_id: int) -> None:
+        self.stub_run_ann_prepare_failure_run_ids.add(int(run_id))
+
+    def stub_publish_stage_failure(self, *, run_id: int, reason: str) -> None:
+        self.stub_publish_stage_failure_reasons[int(run_id)] = str(reason)
+
+    def corrupt_prepared_ann_artifact(self, *, run_id: int) -> None:
+        manifest = self.get_run_ann_manifest(int(run_id))
+        artifact_path = Path(str(manifest.get("artifact_path") or "")).expanduser()
+        if not artifact_path.is_absolute():
+            artifact_path = (self.root / artifact_path).resolve()
+        if not artifact_path.exists():
+            raise AssertionError(f"prepared ann artifact 不存在: {artifact_path}")
+        payload = artifact_path.read_bytes()
+        artifact_path.write_bytes(payload + b"corrupt")
+
+    def get_live_ann_owner_run_id(self) -> int | None:
+        from hikbox_pictures.ann import AnnIndexStore
+
+        ann_store = AnnIndexStore(self.paths.artifacts_dir / "ann" / "prototype_index.npz")
+        return ann_store.get_live_owner_run_id()
+
+    def get_live_ann_person_ids(self) -> list[int]:
+        artifact_path = self.paths.artifacts_dir / "ann" / "prototype_index.npz"
+        if not artifact_path.exists():
+            return []
+        with np.load(artifact_path, allow_pickle=False) as payload:
+            if "person_ids" not in payload.files:
+                return []
+            person_ids = payload["person_ids"].astype(np.int64, copy=False)
+        return [int(value) for value in person_ids.tolist()]
+
+    def get_live_ann_checksum(self) -> str:
+        from hikbox_pictures.ann import AnnIndexStore
+
+        ann_store = AnnIndexStore(self.paths.artifacts_dir / "ann" / "prototype_index.npz")
+        return ann_store.calculate_artifact_checksum()
+
+    def get_live_prototype_owner_run_id(self) -> int | None:
+        rows = self.conn.execute(
+            """
+            SELECT DISTINCT pco.source_run_id
+            FROM person_prototype AS pp
+            JOIN person_cluster_origin AS pco ON pco.person_id = pp.person_id
+            WHERE pp.active = 1
+              AND pco.active = 1
+            ORDER BY pco.source_run_id ASC
+            """
+        ).fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise AssertionError("存在多个 live prototype owner run")
+        return int(rows[0]["source_run_id"])
 
     def recompute_member_support_ratio(self, *, cluster_id: int, observation_id: int) -> float:
         profile = self._get_cluster_profile_for_cluster(cluster_id=cluster_id)
@@ -808,6 +968,104 @@ def build_identity_phase1_workspace(root: Path) -> IdentityPhase1Workspace:
     paths = init_workspace_layout(root, root / ".hikbox")
     conn = connect_db(paths.db_path)
     apply_migrations(conn)
+
+    threshold_count_row = conn.execute(
+        "SELECT COUNT(*) AS c FROM identity_threshold_profile"
+    ).fetchone()
+    if threshold_count_row is None or int(threshold_count_row["c"]) <= 0:
+        conn.execute(
+            """
+            INSERT INTO identity_threshold_profile(
+                profile_name,
+                profile_version,
+                quality_formula_version,
+                embedding_feature_type,
+                embedding_model_key,
+                embedding_distance_metric,
+                embedding_schema_version,
+                quality_area_weight,
+                quality_sharpness_weight,
+                quality_pose_weight,
+                area_log_p10,
+                area_log_p90,
+                sharpness_log_p10,
+                sharpness_log_p90,
+                pose_score_p10,
+                pose_score_p90,
+                low_quality_threshold,
+                high_quality_threshold,
+                trusted_seed_quality_threshold,
+                bootstrap_edge_accept_threshold,
+                bootstrap_edge_candidate_threshold,
+                bootstrap_margin_threshold,
+                bootstrap_min_cluster_size,
+                bootstrap_min_distinct_photo_count,
+                bootstrap_min_high_quality_count,
+                bootstrap_seed_min_count,
+                bootstrap_seed_max_count,
+                assignment_auto_min_quality,
+                assignment_auto_distance_threshold,
+                assignment_auto_margin_threshold,
+                assignment_review_distance_threshold,
+                assignment_require_photo_conflict_free,
+                trusted_min_quality,
+                trusted_centroid_distance_threshold,
+                trusted_margin_threshold,
+                trusted_block_exact_duplicate,
+                trusted_block_burst_duplicate,
+                burst_time_window_seconds,
+                possible_merge_distance_threshold,
+                possible_merge_margin_threshold,
+                active,
+                activated_at
+            )
+            VALUES (
+                'fixture-threshold',
+                'v3_1.fixture',
+                'quality.v2',
+                'face',
+                'insightface',
+                'cosine',
+                'embedding.v1',
+                0.40,
+                0.30,
+                0.30,
+                -6.0,
+                2.0,
+                -6.0,
+                2.0,
+                0.0,
+                1.0,
+                0.45,
+                0.75,
+                0.60,
+                0.20,
+                0.28,
+                0.05,
+                2,
+                2,
+                1,
+                2,
+                5,
+                0.55,
+                0.35,
+                0.08,
+                0.45,
+                1,
+                0.60,
+                0.35,
+                0.08,
+                1,
+                1,
+                60,
+                0.30,
+                0.05,
+                1,
+                CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.commit()
 
     observation_row = conn.execute(
         """

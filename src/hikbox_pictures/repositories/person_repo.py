@@ -375,6 +375,8 @@ class PersonRepo:
         face_observation_id: int,
         threshold_profile_id: int,
         diagnostic_json: str,
+        source_run_id: int | None = None,
+        source_cluster_id: int | None = None,
     ) -> int:
         cursor = self.conn.execute(
             """
@@ -384,16 +386,20 @@ class PersonRepo:
                 assignment_source,
                 diagnostic_json,
                 threshold_profile_id,
+                source_run_id,
+                source_cluster_id,
                 locked,
                 active
             )
-            VALUES (?, ?, 'bootstrap', ?, ?, 0, 1)
+            VALUES (?, ?, 'bootstrap', ?, ?, ?, ?, 0, 1)
             """,
             (
                 int(person_id),
                 int(face_observation_id),
                 str(diagnostic_json),
                 int(threshold_profile_id),
+                int(source_run_id) if source_run_id is not None else None,
+                int(source_cluster_id) if source_cluster_id is not None else None,
             ),
         )
         return int(cursor.lastrowid)
@@ -408,6 +414,8 @@ class PersonRepo:
         quality_score_snapshot: float,
         threshold_profile_id: int,
         source_auto_cluster_id: int | None,
+        source_run_id: int | None = None,
+        source_cluster_id: int | None = None,
     ) -> int:
         cursor = self.conn.execute(
             """
@@ -419,10 +427,12 @@ class PersonRepo:
                 quality_score_snapshot,
                 threshold_profile_id,
                 source_auto_cluster_id,
+                source_run_id,
+                source_cluster_id,
                 active,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
             """,
             (
                 int(person_id),
@@ -432,9 +442,306 @@ class PersonRepo:
                 float(quality_score_snapshot),
                 int(threshold_profile_id),
                 int(source_auto_cluster_id) if source_auto_cluster_id is not None else None,
+                int(source_run_id) if source_run_id is not None else None,
+                int(source_cluster_id) if source_cluster_id is not None else None,
             ),
         )
         return int(cursor.lastrowid)
+
+    def create_person_cluster_origin(
+        self,
+        *,
+        person_id: int,
+        origin_cluster_id: int,
+        source_run_id: int,
+        origin_kind: str = "bootstrap_materialize",
+    ) -> int:
+        cursor = self.conn.execute(
+            """
+            INSERT INTO person_cluster_origin(
+                person_id,
+                origin_cluster_id,
+                source_run_id,
+                origin_kind,
+                active
+            )
+            VALUES (?, ?, ?, ?, 1)
+            """,
+            (
+                int(person_id),
+                int(origin_cluster_id),
+                int(source_run_id),
+                str(origin_kind),
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def apply_person_publish_plan(
+        self,
+        *,
+        person_id: int,
+        publish_plan: dict[str, Any],
+        source_run_id: int,
+        source_cluster_id: int,
+    ) -> None:
+        cover_observation_id = publish_plan.get("cover_observation_id")
+        threshold_profile_id = int(publish_plan.get("threshold_profile_id") or 0)
+        if threshold_profile_id <= 0:
+            raise ValueError("publish_plan 缺少 threshold_profile_id")
+        assignments = publish_plan.get("assignments") or []
+        trusted_seeds = publish_plan.get("trusted_seeds") or []
+        self.create_person_cluster_origin(
+            person_id=int(person_id),
+            origin_cluster_id=int(source_cluster_id),
+            source_run_id=int(source_run_id),
+            origin_kind="bootstrap_materialize",
+        )
+        self.set_cover_observation(
+            person_id=int(person_id),
+            cover_observation_id=(int(cover_observation_id) if cover_observation_id is not None else None),
+        )
+        for assignment in assignments:
+            self.create_bootstrap_assignment(
+                person_id=int(person_id),
+                face_observation_id=int(assignment["face_observation_id"]),
+                threshold_profile_id=threshold_profile_id,
+                diagnostic_json='{"decision_kind":"run_activation_publish"}',
+                source_run_id=int(source_run_id),
+                source_cluster_id=int(source_cluster_id),
+            )
+        for seed in trusted_seeds:
+            self.create_trusted_sample(
+                person_id=int(person_id),
+                face_observation_id=int(seed["face_observation_id"]),
+                trust_source=str(seed.get("trust_source") or "bootstrap_seed"),
+                trust_score=float(seed.get("trust_score") or 1.0),
+                quality_score_snapshot=float(seed.get("quality_score_snapshot") or 0.0),
+                threshold_profile_id=threshold_profile_id,
+                source_auto_cluster_id=None,
+                source_run_id=int(source_run_id),
+                source_cluster_id=int(source_cluster_id),
+            )
+
+    def retire_bootstrap_people(self, *, source_run_id: int) -> dict[str, Any]:
+        run_id = int(source_run_id)
+        assignment_ids = self._select_ids(
+            """
+            SELECT id
+            FROM person_face_assignment
+            WHERE source_run_id = ?
+              AND active = 1
+            """,
+            (run_id,),
+        )
+        trusted_ids = self._select_ids(
+            """
+            SELECT id
+            FROM person_trusted_sample
+            WHERE source_run_id = ?
+              AND active = 1
+            """,
+            (run_id,),
+        )
+        origin_ids = self._select_ids(
+            """
+            SELECT id
+            FROM person_cluster_origin
+            WHERE source_run_id = ?
+              AND active = 1
+            """,
+            (run_id,),
+        )
+        person_ids = self._select_ids(
+            """
+            SELECT DISTINCT person_id AS id
+            FROM person_cluster_origin
+            WHERE source_run_id = ?
+            """,
+            (run_id,),
+        )
+        prototype_ids = self._select_ids_for_persons(
+            """
+            SELECT id
+            FROM person_prototype
+            WHERE person_id IN ({placeholders})
+              AND active = 1
+            """,
+            person_ids=person_ids,
+        )
+        person_state_rows = self.conn.execute(
+            """
+            SELECT id, status, ignored
+            FROM person
+            WHERE id IN (
+                SELECT DISTINCT person_id
+                FROM person_cluster_origin
+                WHERE source_run_id = ?
+            )
+              AND status = 'active'
+              AND ignored = 0
+            ORDER BY id ASC
+            """,
+            (run_id,),
+        ).fetchall()
+        person_state = [
+            {
+                "person_id": int(row["id"]),
+                "status": str(row["status"]),
+                "ignored": int(row["ignored"]),
+            }
+            for row in person_state_rows
+        ]
+
+        self._set_active_by_ids(table="person_face_assignment", ids=assignment_ids, active=0)
+        self._set_active_by_ids(table="person_trusted_sample", ids=trusted_ids, active=0)
+        self._set_active_by_ids(table="person_cluster_origin", ids=origin_ids, active=0)
+        self._set_active_by_ids(table="person_prototype", ids=prototype_ids, active=0)
+        if person_state:
+            self.conn.execute(
+                """
+                UPDATE person
+                SET status = 'ignored',
+                    ignored = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN ({placeholders})
+                """.format(placeholders=", ".join("?" for _ in person_state)),
+                tuple(int(item["person_id"]) for item in person_state),
+            )
+
+        return {
+            "source_run_id": run_id,
+            "assignment_ids": assignment_ids,
+            "trusted_sample_ids": trusted_ids,
+            "origin_ids": origin_ids,
+            "prototype_ids": prototype_ids,
+            "person_state": person_state,
+        }
+
+    def restore_bootstrap_people(
+        self,
+        *,
+        source_run_id: int,
+        live_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        if live_snapshot is None:
+            self.conn.execute(
+                """
+                UPDATE person_cluster_origin
+                SET active = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE source_run_id = ?
+                """,
+                (int(source_run_id),),
+            )
+            self.conn.execute(
+                """
+                UPDATE person_face_assignment
+                SET active = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE source_run_id = ?
+                """,
+                (int(source_run_id),),
+            )
+            self.conn.execute(
+                """
+                UPDATE person_trusted_sample
+                SET active = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE source_run_id = ?
+                """,
+                (int(source_run_id),),
+            )
+            self.conn.execute(
+                """
+                UPDATE person_prototype
+                SET active = 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id IN (
+                    SELECT MAX(pp.id)
+                    FROM person_prototype AS pp
+                    WHERE pp.person_id IN (
+                        SELECT pco.person_id
+                        FROM person_cluster_origin AS pco
+                        WHERE pco.source_run_id = ?
+                    )
+                      AND pp.prototype_type = 'centroid'
+                    GROUP BY pp.person_id
+                )
+                """,
+                (int(source_run_id),),
+            )
+            return
+
+        self._set_active_by_ids(
+            table="person_cluster_origin",
+            ids=[int(value) for value in live_snapshot.get("origin_ids") or []],
+            active=1,
+        )
+        self._set_active_by_ids(
+            table="person_face_assignment",
+            ids=[int(value) for value in live_snapshot.get("assignment_ids") or []],
+            active=1,
+        )
+        self._set_active_by_ids(
+            table="person_trusted_sample",
+            ids=[int(value) for value in live_snapshot.get("trusted_sample_ids") or []],
+            active=1,
+        )
+        self._set_active_by_ids(
+            table="person_prototype",
+            ids=[int(value) for value in live_snapshot.get("prototype_ids") or []],
+            active=1,
+        )
+        for row in live_snapshot.get("person_state") or []:
+            if not isinstance(row, dict):
+                continue
+            self.conn.execute(
+                """
+                UPDATE person
+                SET status = ?,
+                    ignored = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    str(row.get("status") or "active"),
+                    int(row.get("ignored") or 0),
+                    int(row.get("person_id")),
+                ),
+            )
+
+    def _select_ids(self, sql: str, params: tuple[Any, ...]) -> list[int]:
+        rows = self.conn.execute(sql, params).fetchall()
+        return [int(row["id"]) for row in rows if row["id"] is not None]
+
+    def _select_ids_for_persons(self, sql_template: str, *, person_ids: list[int]) -> list[int]:
+        if not person_ids:
+            return []
+        sql = sql_template.format(placeholders=", ".join("?" for _ in person_ids))
+        rows = self.conn.execute(sql, tuple(int(person_id) for person_id in person_ids)).fetchall()
+        return [int(row["id"]) for row in rows if row["id"] is not None]
+
+    def _set_active_by_ids(self, *, table: str, ids: list[int], active: int) -> None:
+        if not ids:
+            return
+        allowed = {
+            "person_face_assignment",
+            "person_trusted_sample",
+            "person_cluster_origin",
+            "person_prototype",
+        }
+        if str(table) not in allowed:
+            raise ValueError(f"非法 active 更新表名: {table}")
+        placeholders = ", ".join("?" for _ in ids)
+        self.conn.execute(
+            f"""
+            UPDATE {table}
+            SET active = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            (int(active), *(int(value) for value in ids)),
+        )
 
     def mark_merged(self, source_person_id: int, target_person_id: int) -> int:
         cursor = self.conn.execute(

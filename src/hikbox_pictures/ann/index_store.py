@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
+import json
 import os
 from pathlib import Path
+import shutil
 from typing import Any, Mapping, Sequence
 import warnings
 
@@ -160,6 +164,80 @@ class AnnIndexStore:
         self._vectors = vectors
         self._build_index()
 
+    def verify_prepared_artifact(self, *, artifact_path: Path, expected_checksum: str) -> None:
+        path = Path(artifact_path)
+        checksum = str(expected_checksum).strip()
+        if not path.exists():
+            raise ValueError(f"prepared ann artifact 不存在: {path}")
+        if not checksum:
+            raise ValueError("prepared ann artifact checksum 为空")
+        actual = self.calculate_artifact_checksum(path)
+        if actual != checksum:
+            raise ValueError(f"prepared ann artifact checksum 不匹配: expected={checksum}, actual={actual}")
+
+    def activate_verified_artifact(self, *, artifact_path: Path, expected_checksum: str, source_run_id: int) -> None:
+        source = Path(artifact_path)
+        self.verify_prepared_artifact(
+            artifact_path=source,
+            expected_checksum=str(expected_checksum),
+        )
+        destination = self.artifact_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source_equals_destination = source.resolve() == destination.resolve()
+        swap_tmp = destination.with_name(f"{destination.name}.swap.tmp")
+        backup_tmp = destination.with_name(f"{destination.name}.backup.tmp")
+        had_existing_destination = destination.exists()
+        try:
+            if not source_equals_destination:
+                if had_existing_destination:
+                    shutil.copy2(destination, backup_tmp)
+                shutil.copy2(source, swap_tmp)
+                os.replace(swap_tmp, destination)
+
+            meta = {
+                "source_run_id": int(source_run_id),
+                "artifact_checksum": str(expected_checksum),
+                "activated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            }
+            self._meta_path().write_text(
+                json.dumps(meta, ensure_ascii=False, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            self.load()
+        except Exception:
+            if not source_equals_destination:
+                if had_existing_destination and backup_tmp.exists():
+                    os.replace(backup_tmp, destination)
+                elif (not had_existing_destination) and destination.exists():
+                    destination.unlink(missing_ok=True)
+            raise
+        finally:
+            if swap_tmp.exists():
+                swap_tmp.unlink()
+            if backup_tmp.exists():
+                backup_tmp.unlink()
+
+    def get_live_owner_run_id(self) -> int | None:
+        meta_path = self._meta_path()
+        if not meta_path.exists():
+            return None
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        run_id = payload.get("source_run_id")
+        if run_id is None:
+            return None
+        return int(run_id)
+
+    def calculate_artifact_checksum(self, artifact_path: Path | None = None) -> str:
+        target = self.artifact_path if artifact_path is None else Path(artifact_path)
+        if not target.exists():
+            return ""
+        return hashlib.sha256(target.read_bytes()).hexdigest()
+
     def _build_index(self) -> None:
         self._hnsw_index = None
         self._backend = "bruteforce"
@@ -193,6 +271,9 @@ class AnnIndexStore:
         finally:
             if tmp_path.exists():
                 tmp_path.unlink()
+
+    def _meta_path(self) -> Path:
+        return self.artifact_path.with_name(f"{self.artifact_path.name}.meta.json")
 
     @staticmethod
     def _vector_from_row(row: Mapping[str, Any]) -> Embedding | None:

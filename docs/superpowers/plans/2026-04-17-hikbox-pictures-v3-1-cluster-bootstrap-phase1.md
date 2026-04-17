@@ -1997,7 +1997,7 @@ git commit -m "feat: persist v3.1 cluster lineage and member evidence (Task 4)"
 - 本任务不实现 activation journal / 自动 crash recovery。
 - `activate-run` 的 DB 与 ANN 切换不是单事务；若进程在两者之间异常，允许出现短暂不一致，执行者必须通过人工重试 `activate-run` 收敛并落审计日志。
 
-- [ ] **Step 1: 先写失败测试，锁定 checksum/manifest、`materialized->prepared->published` 状态切换、`publish_failed` 审计与发布失败回滚**
+- [x] **Step 1: 先写失败测试，锁定 checksum/manifest、`materialized->prepared->published` 状态切换、`publish_failed` 审计与发布失败回滚**
 
 ```python
 # tests/people_gallery/test_identity_cluster_prepare_service.py
@@ -2360,12 +2360,12 @@ def test_activate_run_failure_keeps_previous_owner_live_state_unchanged(tmp_path
 
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_prepare_service.py tests/people_gallery/test_identity_run_activation_service.py -q`
 Expected: FAIL，缺少 `prepare_run` / `activate_run`，或 manifest checksum、`materialized/prepared/published/publish_failed` 状态机、live assignment/trusted seed/prototype/ANN 切换、existing owner 失败保持、run-ann 失败全量回退未实现。
 
-- [ ] **Step 3: 实现 cluster-prepare 与 run-prepare，按 manifest + checksum 完整性决定 `materialized/prepared`**
+- [x] **Step 3: 实现 cluster-prepare 与 run-prepare，按 manifest + checksum 完整性决定 `materialized/prepared`**
 
 ```python
 # src/hikbox_pictures/services/identity_cluster_prepare_service.py
@@ -2413,7 +2413,7 @@ class IdentityClusterPrepareService:
         return {"prepared_cluster_count": len(prepared_cluster_ids)}
 ```
 
-- [ ] **Step 4: 实现 activate-run 发布流程（不引入 activation journal / 自动 crash recovery）**
+- [x] **Step 4: 实现 activate-run 发布流程（不引入 activation journal / 自动 crash recovery）**
 
 ```python
 # src/hikbox_pictures/services/identity_run_activation_service.py
@@ -2496,7 +2496,7 @@ class IdentityRunActivationService:
             raise
 ```
 
-- [ ] **Step 5: 回跑 prepare/publish 测试并确认无半成品 live 状态**
+- [x] **Step 5: 回跑 prepare/publish 测试并确认无半成品 live 状态**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_prepare_service.py tests/people_gallery/test_identity_run_activation_service.py -q`
 Expected: PASS，`prepare` 前没有 live person，`run-prepare` 成功后才出现 `materialized + prepared`；低于 materialize gate 的 cluster 在 prepare 后仍保持 `review_pending + not_applicable`；`activate_run` 后只有一个 owner run 且 live assignment/trusted seed/prototype/ANN 同步切到该 run；激活失败时若已有旧 owner 则保持旧 owner/live 指针不变；run-ann 失败时候选 cluster 统一回退 `review_pending`；publish 阶段错误必须落 `publish_failed + publish_failure_reason` 且无 `published` 假阳性。

@@ -252,6 +252,13 @@ class PrototypeService:
             )
             return self.ann_index_store.rebuild_from_prototypes(all_prototypes)
 
+    def activate_prepared_cluster_prototype(self, *, run_id: int, cluster_id: int, person_id: int) -> None:
+        ok = self.rebuild_person_prototype(person_id=int(person_id), model_key="insightface")
+        if not ok:
+            raise RuntimeError(
+                f"发布阶段 prototype 构建失败: run_id={int(run_id)}, cluster_id={int(cluster_id)}, person_id={int(person_id)}"
+            )
+
     def _report_progress(
         self,
         progress_reporter: Callable[[dict[str, object]], None] | None,
