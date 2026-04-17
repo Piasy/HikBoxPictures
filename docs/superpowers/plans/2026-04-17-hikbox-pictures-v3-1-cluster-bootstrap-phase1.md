@@ -3027,7 +3027,7 @@ git commit -m "feat: turn identity tuning into run review page (Task 7)"
 - Create: `tests/people_gallery/test_identity_cluster_neighbor_export_service.py`
 - Modify: `tests/people_gallery/test_export_observation_neighbors_script.py`
 
-- [ ] **Step 1: 先写失败测试，锁定默认 review target、`--run-id`/`--cluster-id` 与完整导出证据面**
+- [x] **Step 1: 先写失败测试，锁定默认 review target、`--run-id`/`--cluster-id` 与完整导出证据面**
 
 ```python
 # tests/people_gallery/test_export_observation_neighbors_script.py
@@ -3142,12 +3142,12 @@ def test_export_neighbors_defaults_to_review_target_when_run_id_not_given(tmp_pa
         ws.close()
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_neighbor_export_service.py tests/people_gallery/test_export_observation_neighbors_script.py -q`
 Expected: FAIL，脚本还只支持 `--observation-ids`，manifest 里也没有 run/cluster/member 语境字段。
 
-- [ ] **Step 3: 扩展导出服务和脚本参数，manifest 显式覆盖 retained/excluded/representative/竞争近邻证据**
+- [x] **Step 3: 扩展导出服务和脚本参数，manifest 显式覆盖 retained/excluded/representative/竞争近邻证据**
 
 ```python
 # scripts/export_observation_neighbors.py
@@ -3194,7 +3194,7 @@ summary["targets"].append(
 )
 ```
 
-- [ ] **Step 4: 回跑导出测试并人工检查 HTML/manifest 证据是否对齐**
+- [x] **Step 4: 回跑导出测试并人工检查 HTML/manifest 证据是否对齐**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_neighbor_export_service.py tests/people_gallery/test_export_observation_neighbors_script.py -q`
 Expected: PASS，manifest 里有 `run_id`、`observation_profile_id`、`cluster_profile_id`、`cluster_stage`、`member_role`、`decision_status`、`publish_state`、`is_selected_trusted_seed`、`seed_rank`，并覆盖 representative/retained/excluded 与竞争近邻字段；未显式传 `--run-id` 时在“review_target != latest”场景下仍默认使用 review target。

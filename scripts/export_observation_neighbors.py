@@ -25,7 +25,9 @@ def _parse_observation_ids(raw: str) -> list[int]:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="导出 observation 最近邻的 crop/preview 预览")
     parser.add_argument("--workspace", type=Path, required=True)
-    parser.add_argument("--observation-ids", type=str, required=True)
+    parser.add_argument("--observation-ids", type=str, required=False)
+    parser.add_argument("--run-id", type=int, required=False)
+    parser.add_argument("--cluster-id", type=int, required=False)
     parser.add_argument("--neighbor-count", type=int, default=8)
     parser.add_argument("--output-root", type=Path, default=None)
     return parser
@@ -42,10 +44,21 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        observation_ids = _parse_observation_ids(str(args.observation_ids))
+        if args.observation_ids is None and args.cluster_id is None:
+            raise ValueError("必须提供 --observation-ids 或 --cluster-id")
+        if args.observation_ids is not None and args.cluster_id is not None:
+            raise ValueError("--observation-ids 与 --cluster-id 不能同时提供")
+
+        observation_ids = (
+            _parse_observation_ids(str(args.observation_ids))
+            if args.observation_ids is not None
+            else None
+        )
         service = ObservationNeighborExportService(Path(args.workspace))
         result = service.export(
             observation_ids=observation_ids,
+            run_id=(None if args.run_id is None else int(args.run_id)),
+            cluster_id=(None if args.cluster_id is None else int(args.cluster_id)),
             output_root=output_root,
             neighbor_count=int(args.neighbor_count),
         )

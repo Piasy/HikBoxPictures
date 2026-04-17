@@ -27,6 +27,20 @@ class _ObservationRecord:
     cluster_status: str | None
     reject_reason: str | None
     distance: float | None = None
+    run_id: int | None = None
+    observation_snapshot_id: int | None = None
+    observation_profile_id: int | None = None
+    cluster_profile_id: int | None = None
+    cluster_stage: str | None = None
+    member_role: str | None = None
+    decision_status: str | None = None
+    publish_state: str | None = None
+    is_selected_trusted_seed: int | None = None
+    seed_rank: int | None = None
+    is_representative: int | None = None
+    nearest_competing_cluster_distance: float | None = None
+    separation_gap: float | None = None
+    exclusion_reason: str | None = None
 
 
 class ObservationNeighborExportService:
@@ -42,16 +56,50 @@ class ObservationNeighborExportService:
     def export(
         self,
         *,
-        observation_ids: list[int],
+        observation_ids: list[int] | None,
+        run_id: int | None = None,
+        cluster_id: int | None = None,
         output_root: Path,
         neighbor_count: int = 8,
     ) -> dict[str, Path]:
         if neighbor_count <= 0:
             raise ValueError("neighbor_count 必须大于 0")
 
-        requested_ids = _dedupe_preserve_order(observation_ids)
-        if not requested_ids:
-            raise ValueError("observation_ids 不能为空")
+        if cluster_id is not None and observation_ids is not None:
+            raise ValueError("cluster_id 与 observation_ids 不能同时传入")
+
+        run_context_summary: dict[str, Any] = {
+            "run_id": None,
+            "observation_snapshot_id": None,
+            "observation_profile_id": None,
+            "cluster_profile_id": None,
+        }
+        run_member_context: dict[int, dict[str, Any]] = {}
+        requested_ids: list[int]
+        if cluster_id is not None:
+            effective_run_id = self._resolve_effective_run_id(run_id)
+            run_context_summary, run_member_context = self._load_run_member_context(
+                run_id=int(effective_run_id)
+            )
+            requested_ids = self._list_cluster_member_observation_ids(
+                run_id=int(effective_run_id),
+                cluster_id=int(cluster_id),
+            )
+            if not requested_ids:
+                raise ValueError(f"cluster 没有成员，或不属于 run: cluster_id={int(cluster_id)}")
+        else:
+            requested_ids = _dedupe_preserve_order(observation_ids or [])
+            if not requested_ids:
+                raise ValueError("observation_ids 不能为空")
+            effective_run_id = (
+                int(run_id)
+                if run_id is not None
+                else self._resolve_review_target_run_id_or_none()
+            )
+            if effective_run_id is not None:
+                run_context_summary, run_member_context = self._load_run_member_context(
+                    run_id=int(effective_run_id)
+                )
 
         profile, pool, cluster_meta = self._load_bootstrap_pool()
         idx_by_observation = {
@@ -76,6 +124,10 @@ class ObservationNeighborExportService:
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "profile": profile,
             "neighbor_count_per_target": int(neighbor_count),
+            "run_id": run_context_summary["run_id"],
+            "observation_snapshot_id": run_context_summary["observation_snapshot_id"],
+            "observation_profile_id": run_context_summary["observation_profile_id"],
+            "cluster_profile_id": run_context_summary["cluster_profile_id"],
             "targets": [],
         }
 
@@ -85,12 +137,14 @@ class ObservationNeighborExportService:
             target_record = self._build_record(
                 pool=pool,
                 cluster_meta=cluster_meta,
+                run_member_context=run_member_context,
                 observation_index=target_index,
                 distance=None,
             )
             neighbors = self._select_neighbors(
                 pool=pool,
                 cluster_meta=cluster_meta,
+                run_member_context=run_member_context,
                 target_index=target_index,
                 neighbor_count=int(neighbor_count),
             )
@@ -268,6 +322,7 @@ class ObservationNeighborExportService:
         *,
         pool: dict[str, Any],
         cluster_meta: dict[int, dict[str, Any]],
+        run_member_context: dict[int, dict[str, Any]],
         target_index: int,
         neighbor_count: int,
     ) -> list[_ObservationRecord]:
@@ -283,6 +338,7 @@ class ObservationNeighborExportService:
                 self._build_record(
                     pool=pool,
                     cluster_meta=cluster_meta,
+                    run_member_context=run_member_context,
                     observation_index=int(observation_index),
                     distance=float(distances[int(observation_index)]),
                 )
@@ -296,18 +352,22 @@ class ObservationNeighborExportService:
         *,
         pool: dict[str, Any],
         cluster_meta: dict[int, dict[str, Any]],
+        run_member_context: dict[int, dict[str, Any]],
         observation_index: int,
         distance: float | None,
     ) -> _ObservationRecord:
         observation_id = int(pool["observation_ids"][int(observation_index)])
         cluster_info = cluster_meta.get(observation_id, {})
+        run_context = run_member_context.get(observation_id, {})
         return _ObservationRecord(
             observation_id=observation_id,
             photo_id=int(pool["photo_ids"][int(observation_index)]),
             quality_score=float(pool["quality_scores"][int(observation_index)]),
             primary_path=str(pool["primary_paths"][int(observation_index)]),
             cluster_id=(
-                int(cluster_info["cluster_id"])
+                int(run_context["cluster_id"])
+                if run_context.get("cluster_id") is not None
+                else int(cluster_info["cluster_id"])
                 if cluster_info.get("cluster_id") is not None
                 else None
             ),
@@ -322,6 +382,72 @@ class ObservationNeighborExportService:
                 else None
             ),
             distance=distance,
+            run_id=int(run_context["run_id"]) if run_context.get("run_id") is not None else None,
+            observation_snapshot_id=(
+                int(run_context["observation_snapshot_id"])
+                if run_context.get("observation_snapshot_id") is not None
+                else None
+            ),
+            observation_profile_id=(
+                int(run_context["observation_profile_id"])
+                if run_context.get("observation_profile_id") is not None
+                else None
+            ),
+            cluster_profile_id=(
+                int(run_context["cluster_profile_id"])
+                if run_context.get("cluster_profile_id") is not None
+                else None
+            ),
+            cluster_stage=(
+                str(run_context["cluster_stage"])
+                if run_context.get("cluster_stage") is not None
+                else None
+            ),
+            member_role=(
+                str(run_context["member_role"])
+                if run_context.get("member_role") is not None
+                else None
+            ),
+            decision_status=(
+                str(run_context["decision_status"])
+                if run_context.get("decision_status") is not None
+                else None
+            ),
+            publish_state=(
+                str(run_context["publish_state"])
+                if run_context.get("publish_state") is not None
+                else None
+            ),
+            is_selected_trusted_seed=(
+                int(run_context["is_selected_trusted_seed"])
+                if run_context.get("is_selected_trusted_seed") is not None
+                else None
+            ),
+            seed_rank=(
+                int(run_context["seed_rank"])
+                if run_context.get("seed_rank") is not None
+                else None
+            ),
+            is_representative=(
+                int(run_context["is_representative"])
+                if run_context.get("is_representative") is not None
+                else None
+            ),
+            nearest_competing_cluster_distance=(
+                float(run_context["nearest_competing_cluster_distance"])
+                if run_context.get("nearest_competing_cluster_distance") is not None
+                else None
+            ),
+            separation_gap=(
+                float(run_context["separation_gap"])
+                if run_context.get("separation_gap") is not None
+                else None
+            ),
+            exclusion_reason=(
+                str(run_context["exclusion_reason"])
+                if run_context.get("exclusion_reason") is not None
+                else None
+            ),
         )
 
     def _export_record_assets(
@@ -353,10 +479,183 @@ class ObservationNeighborExportService:
             "cluster_id": int(record.cluster_id) if record.cluster_id is not None else None,
             "cluster_status": record.cluster_status,
             "reject_reason": record.reject_reason,
+            "run_id": int(record.run_id) if record.run_id is not None else None,
+            "observation_snapshot_id": (
+                int(record.observation_snapshot_id)
+                if record.observation_snapshot_id is not None
+                else None
+            ),
+            "observation_profile_id": (
+                int(record.observation_profile_id)
+                if record.observation_profile_id is not None
+                else None
+            ),
+            "cluster_profile_id": (
+                int(record.cluster_profile_id) if record.cluster_profile_id is not None else None
+            ),
+            "cluster_stage": record.cluster_stage,
+            "member_role": record.member_role,
+            "decision_status": record.decision_status,
+            "publish_state": record.publish_state,
+            "is_selected_trusted_seed": (
+                int(record.is_selected_trusted_seed)
+                if record.is_selected_trusted_seed is not None
+                else None
+            ),
+            "seed_rank": int(record.seed_rank) if record.seed_rank is not None else None,
+            "is_representative": (
+                int(record.is_representative) if record.is_representative is not None else None
+            ),
+            "nearest_competing_cluster_distance": (
+                float(record.nearest_competing_cluster_distance)
+                if record.nearest_competing_cluster_distance is not None
+                else None
+            ),
+            "separation_gap": (
+                float(record.separation_gap) if record.separation_gap is not None else None
+            ),
+            "exclusion_reason": record.exclusion_reason,
             "crop_file": crop_file,
             "preview_file": preview_file,
         }
         return payload
+
+    def _resolve_effective_run_id(self, run_id: int | None) -> int:
+        if run_id is not None:
+            return int(run_id)
+        effective_run_id = self._resolve_review_target_run_id_or_none()
+        if effective_run_id is None:
+            raise ValueError("未提供 run_id，且当前 workspace 没有 review target run")
+        return int(effective_run_id)
+
+    def _resolve_review_target_run_id_or_none(self) -> int | None:
+        conn = connect_db(self.db_path)
+        try:
+            row = conn.execute(
+                """
+                SELECT id
+                FROM identity_cluster_run
+                WHERE is_review_target = 1
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return None
+            return int(row["id"])
+        finally:
+            conn.close()
+
+    def _load_run_member_context(
+        self, *, run_id: int
+    ) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
+        conn = connect_db(self.db_path)
+        try:
+            run_row = conn.execute(
+                """
+                SELECT r.id AS run_id,
+                       r.observation_snapshot_id,
+                       r.cluster_profile_id,
+                       s.observation_profile_id
+                FROM identity_cluster_run AS r
+                JOIN identity_observation_snapshot AS s
+                  ON s.id = r.observation_snapshot_id
+                WHERE r.id = ?
+                """,
+                (int(run_id),),
+            ).fetchone()
+            if run_row is None:
+                raise ValueError(f"run 不存在: {int(run_id)}")
+
+            rows = conn.execute(
+                """
+                SELECT m.observation_id,
+                       c.id AS cluster_id,
+                       c.cluster_stage,
+                       m.member_role,
+                       m.decision_status,
+                       r.publish_state,
+                       m.is_selected_trusted_seed,
+                       m.seed_rank,
+                       m.is_representative,
+                       m.nearest_competing_cluster_distance,
+                       m.separation_gap,
+                       m.decision_reason_code AS exclusion_reason
+                FROM identity_cluster AS c
+                JOIN identity_cluster_member AS m
+                  ON m.cluster_id = c.id
+                LEFT JOIN identity_cluster_resolution AS r
+                  ON r.cluster_id = c.id
+                WHERE c.run_id = ?
+                ORDER BY CASE c.cluster_stage
+                           WHEN 'final' THEN 0
+                           WHEN 'cleaned' THEN 1
+                           ELSE 2
+                         END ASC,
+                         c.id ASC,
+                         m.id ASC
+                """,
+                (int(run_id),),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        summary = {
+            "run_id": int(run_row["run_id"]),
+            "observation_snapshot_id": int(run_row["observation_snapshot_id"]),
+            "observation_profile_id": int(run_row["observation_profile_id"]),
+            "cluster_profile_id": int(run_row["cluster_profile_id"]),
+        }
+        context_by_observation: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            observation_id = int(row["observation_id"])
+            if observation_id in context_by_observation:
+                continue
+            context_by_observation[observation_id] = {
+                "run_id": int(run_row["run_id"]),
+                "observation_snapshot_id": int(run_row["observation_snapshot_id"]),
+                "observation_profile_id": int(run_row["observation_profile_id"]),
+                "cluster_profile_id": int(run_row["cluster_profile_id"]),
+                "cluster_id": int(row["cluster_id"]),
+                "cluster_stage": str(row["cluster_stage"]),
+                "member_role": str(row["member_role"]),
+                "decision_status": str(row["decision_status"]),
+                "publish_state": None if row["publish_state"] is None else str(row["publish_state"]),
+                "is_selected_trusted_seed": int(row["is_selected_trusted_seed"]),
+                "seed_rank": None if row["seed_rank"] is None else int(row["seed_rank"]),
+                "is_representative": int(row["is_representative"]),
+                "nearest_competing_cluster_distance": (
+                    None
+                    if row["nearest_competing_cluster_distance"] is None
+                    else float(row["nearest_competing_cluster_distance"])
+                ),
+                "separation_gap": (
+                    None if row["separation_gap"] is None else float(row["separation_gap"])
+                ),
+                "exclusion_reason": (
+                    None if row["exclusion_reason"] is None else str(row["exclusion_reason"])
+                ),
+            }
+        return summary, context_by_observation
+
+    def _list_cluster_member_observation_ids(self, *, run_id: int, cluster_id: int) -> list[int]:
+        conn = connect_db(self.db_path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT m.observation_id
+                FROM identity_cluster_member AS m
+                JOIN identity_cluster AS c
+                  ON c.id = m.cluster_id
+                WHERE c.id = ?
+                  AND c.run_id = ?
+                ORDER BY m.id ASC
+                """,
+                (int(cluster_id), int(run_id)),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [int(row["observation_id"]) for row in rows]
 
     def _ensure_crop_path(self, observation_id: int) -> Path:
         conn = connect_db(self.db_path)
