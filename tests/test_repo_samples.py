@@ -50,7 +50,7 @@ def test_readme_mentions_deepface_runtime_basics() -> None:
     ):
         assert command_snippet in readme
 
-    phase1_title = "## v3 第一阶段：身份层重建与调参验收（phase1）"
+    phase1_title = "## v3.1 第一阶段：cluster bootstrap rerun + review（phase1）"
     assert phase1_title in readme
     phase1_section = readme.split(phase1_title, maxsplit=1)[1]
     next_header_marker = "\n## "
@@ -58,20 +58,28 @@ def test_readme_mentions_deepface_runtime_basics() -> None:
         phase1_section = phase1_section.split(next_header_marker, maxsplit=1)[0]
 
     phase1_required_tokens = (
-        ("scripts/rebuild_identities_v3.py", "--workspace <workspace>", "--dry-run"),
-        ("scripts/rebuild_identities_v3.py", "--workspace <workspace>", "--backup-db"),
+        ("scripts/build_identity_observation_snapshot.py", "--workspace <workspace>"),
         (
-            "scripts/evaluate_identity_thresholds.py",
+            "scripts/rerun_identity_cluster_run.py",
             "--workspace <workspace>",
-            "--output-dir .tmp/identity-threshold-tuning/<timestamp>/",
+            "--snapshot-id <snapshot_id>",
         ),
         (
-            "scripts/rebuild_identities_v3.py",
-            "--workspace <workspace-copy>",
-            "--backup-db",
-            "--threshold-profile",
+            "scripts/select_identity_cluster_run.py",
+            "--workspace <workspace>",
+            "--run-id <run_id>",
         ),
-        ("python -m hikbox_pictures.cli serve", "--workspace <workspace>", "--host 0.0.0.0", "--port 8000"),
+        (
+            "scripts/export_observation_neighbors.py",
+            "--workspace <workspace>",
+            "--run-id <run_id>",
+            "--cluster-id <cluster_id>",
+        ),
+        (
+            "scripts/activate_identity_cluster_run.py",
+            "--workspace <workspace>",
+            "--run-id <run_id>",
+        ),
     )
     for token_group in phase1_required_tokens:
         for token in token_group:
@@ -79,10 +87,10 @@ def test_readme_mentions_deepface_runtime_basics() -> None:
 
     for phase1_phrase in (
         "/identity-tuning",
-        "phase1 明确允许",
-        "scan/review/actions/export",
-        "主链验收必须包含真实图片路径",
-        "seed/mock",
+        "is_review_target = 1",
+        "is_materialization_owner = 1",
+        "evaluate_identity_thresholds.py",
+        "已弃用",
     ):
         assert phase1_phrase in phase1_section
 

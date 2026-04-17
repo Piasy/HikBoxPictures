@@ -121,23 +121,21 @@ PYTHONPATH=src python3 -m hikbox_pictures.cli serve --workspace /path/to/workspa
 - `GET /logs`：运行日志列表
 - `GET /static/style.css`、`GET /static/app.js`：静态资源
 
-## v3 第一阶段：身份层重建与调参验收（phase1）
+## v3.1 第一阶段：cluster bootstrap rerun + review（phase1）
 
 ```bash
 source .venv/bin/activate
-python scripts/rebuild_identities_v3.py --workspace <workspace> --dry-run
-python scripts/rebuild_identities_v3.py --workspace <workspace> --backup-db
-python scripts/evaluate_identity_thresholds.py --workspace <workspace> --output-dir .tmp/identity-threshold-tuning/<timestamp>/
-cp -R <workspace> <workspace-copy>
-python scripts/rebuild_identities_v3.py --workspace <workspace-copy> --backup-db --threshold-profile <candidate-thresholds.json 文件路径>
-python -m hikbox_pictures.cli serve --workspace <workspace> --host 0.0.0.0 --port 8000
+PYTHONPATH=src python scripts/build_identity_observation_snapshot.py --workspace <workspace>
+PYTHONPATH=src python scripts/rerun_identity_cluster_run.py --workspace <workspace> --snapshot-id <snapshot_id>
+PYTHONPATH=src python scripts/select_identity_cluster_run.py --workspace <workspace> --run-id <run_id>
+PYTHONPATH=src python scripts/export_observation_neighbors.py --workspace <workspace> --run-id <run_id> --cluster-id <cluster_id>
+PYTHONPATH=src python scripts/activate_identity_cluster_run.py --workspace <workspace> --run-id <run_id>
 ```
 
-- 如果当前 workspace 还没有 active `identity_threshold_profile`，首次执行 `rebuild_identities_v3.py` 且未传 `--threshold-profile` 时，会按当前 `face_embedding` 绑定自动创建一份默认 profile，并在本轮质量回填阶段更新面积/清晰度分位点。
-- 调参验收入口：`/identity-tuning`（只读）。
-
-- phase1 明确允许 scan/review/actions/export 旧功能暂时失效；不在本阶段做封禁或兼容兜底。
-- 主链验收必须包含真实图片路径，不允许只跑 seed/mock 夹具。
+- 默认 review 页入口：`/identity-tuning`（只读）。
+- 默认 review 对象：`is_review_target = 1`。
+- live 物化结果 owner：`is_materialization_owner = 1`。
+- `scripts/evaluate_identity_thresholds.py` 已弃用，不再参与 phase1 调参主链。
 
 指定 observation 最近邻人工核对页：
 
@@ -145,16 +143,16 @@ python -m hikbox_pictures.cli serve --workspace <workspace> --host 0.0.0.0 --por
 source .venv/bin/activate
 PYTHONPATH=src python scripts/export_observation_neighbors.py \
   --workspace <workspace> \
-  --observation-ids 20416,24677,7695 \
-  --neighbor-count 8
+  --run-id <run_id> \
+  --cluster-id <cluster_id>
 ```
 
 说明：
-- `--observation-ids` 必填，使用英文逗号分隔多个 observation id。
-- `--neighbor-count` 选填，表示每个目标 observation 展示多少个最近邻，默认 `8`。
+- `--run-id` 与 `--cluster-id` 必填，导出会绑定本次 review 目标 run 的证据。
+- `--neighbor-count` 选填，表示每个目标成员展示多少个竞争近邻，默认 `8`。
 - `--output-root` 选填；默认输出到 `.tmp/observation-nearest-neighbors/<timestamp>/`。
-- 输出目录下会按 `obs-<id>/` 拆分子目录，并生成 `index.html` 与 `manifest.json`，便于直接肉眼核对 crop / preview。
-- HTML 页面中的 `quality`、`distance` 和阈值说明统一保留两位小数，方便快速对比。
+- 输出目录会生成 `index.html` 与 `manifest.json`，便于直接核对 retained/excluded/representative 与竞争近邻证据。
+- HTML 页面中的 `quality`、`distance` 和关键判定字段统一保留两位小数，方便快速对比。
 
 ## 测试
 

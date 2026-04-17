@@ -3230,7 +3230,7 @@ git commit -m "feat: add run-aware observation neighbor export (Task 8)"
 - Delete: `tests/people_gallery/test_identity_threshold_profile_contract.py`
 - Delete: `tests/people_gallery/test_identity_rebuild_v3_real_pipeline.py`
 
-- [ ] **Step 1: 先写失败测试，固定 README 新流程、旧评估脚本弃用提示与端到端闭环验收**
+- [x] **Step 1: 先写失败测试，固定 README 新流程、旧评估脚本弃用提示与端到端闭环验收**
 
 ```python
 # tests/people_gallery/test_identity_threshold_evaluation_script.py
@@ -3336,12 +3336,12 @@ def test_phase1_e2e_build_snapshot_rerun_select_activate_and_review(tmp_path: Pa
         ws.close()
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_threshold_evaluation_script.py tests/people_gallery/test_rebuild_identities_v3_script.py tests/people_gallery/test_identity_cluster_phase1_e2e.py tests/test_repo_samples.py -q`
 Expected: FAIL，README 仍是旧 phase1 指令，`evaluate_identity_thresholds.py` 还在执行旧逻辑，wrapper/e2e 验收尚未对齐（包括“同一 snapshot + 不同 cluster profile”场景）。
 
-- [ ] **Step 3: 更新 README、添加弃用提示、补 Playwright 调试脚本并清理旧 v3-only 测试**
+- [x] **Step 3: 更新 README、添加弃用提示、补 Playwright 调试脚本并清理旧 v3-only 测试**
 
 ```python
 # scripts/evaluate_identity_thresholds.py
@@ -3413,7 +3413,7 @@ PYTHONPATH=src python3 scripts/activate_identity_cluster_run.py --workspace <wor
 - `scripts/evaluate_identity_thresholds.py` 已弃用
 ~~~~
 
-- [ ] **Step 4: 回跑文档/脚本/e2e 测试，并做一次 Playwright 调试验收**
+- [x] **Step 4: 回跑文档/脚本/e2e 测试，并做一次 Playwright 调试验收**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_threshold_evaluation_script.py tests/people_gallery/test_rebuild_identities_v3_script.py tests/people_gallery/test_identity_cluster_phase1_e2e.py tests/test_repo_samples.py -q`
 Expected: PASS，README 指令收敛到 snapshot/rerun/select/activate 流程，旧评估脚本稳定返回弃用提示，且 e2e 覆盖“同一 snapshot + 不同 cluster profile”双 run 场景。
