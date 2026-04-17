@@ -2527,7 +2527,7 @@ git commit -m "feat: add prepared publish and run activation flow (Task 5)"
 - Modify: `scripts/rebuild_identities_v3.py`
 - Create: `tests/people_gallery/test_identity_cluster_bootstrap_scripts.py`
 
-- [ ] **Step 1: 先写失败测试，固定显式脚本入口、rerun 保留历史 run 行为，以及 `succeeded` 前置落库完整性**
+- [x] **Step 1: 先写失败测试，固定显式脚本入口、rerun 保留历史 run 行为，以及 `succeeded` 前置落库完整性**
 
 ```python
 # tests/people_gallery/test_identity_cluster_bootstrap_scripts.py
@@ -2671,12 +2671,12 @@ def test_activate_script_sets_materialization_owner_and_rejects_unprepared_run(t
         ws.close()
 ```
 
-- [ ] **Step 2: 运行测试并确认失败**
+- [x] **Step 2: 运行测试并确认失败**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_bootstrap_scripts.py -q`
 Expected: FAIL，缺少新脚本文件或 `identity_bootstrap_orchestrator.py`。
 
-- [ ] **Step 3: 实现 orchestrator 与四个显式脚本入口，`rebuild_identities_v3.py` 改为兼容 wrapper**
+- [x] **Step 3: 实现 orchestrator 与四个显式脚本入口，`rebuild_identities_v3.py` 改为兼容 wrapper**
 
 ```python
 # src/hikbox_pictures/services/identity_bootstrap_orchestrator.py
@@ -2796,7 +2796,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 ```
 
-- [ ] **Step 4: 回跑脚本测试，并手动验证 `rebuild_identities_v3.py` 仍可一键跑通 snapshot + rerun**
+- [x] **Step 4: 回跑脚本测试，并手动验证 `rebuild_identities_v3.py` 仍可一键跑通 snapshot + rerun**
 
 Run: `source .venv/bin/activate && PYTHONPATH=src python3 -m pytest tests/people_gallery/test_identity_cluster_bootstrap_scripts.py -q`
 Expected: PASS，`build snapshot -> rerun -> select -> activate` 全部可执行，且第二轮 run 不覆盖第一轮历史；同一 `snapshot_id` 上可指定不同 `cluster_profile_id` 生成独立 run；脚本级验证未 `prepare` 的 run 不能激活、`prepare` 后可成功激活；并验证 `rerun` 产出的 `succeeded` run 已有 `cluster/member/resolution` 完整落库，不允许只写 run 壳记录。

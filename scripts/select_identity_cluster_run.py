@@ -40,72 +40,26 @@ from hikbox_pictures.services.identity_bootstrap_orchestrator import IdentityBoo
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="兼容入口：执行 snapshot + rerun(含 prepare)")
+    parser = argparse.ArgumentParser(description="切换 identity cluster run review target")
     parser.add_argument("--workspace", type=Path, required=True)
-    parser.add_argument("--observation-profile-id", type=int, default=None)
-    parser.add_argument("--cluster-profile-id", type=int, default=None)
-    parser.add_argument("--candidate-knn-limit", type=int, default=24)
-
-    # 兼容旧参数：保留解析但不再参与新流程语义。
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--backup-db", action="store_true")
-    parser.add_argument("--skip-ann-rebuild", action="store_true")
-    parser.add_argument("--threshold-profile", type=Path, default=None)
+    parser.add_argument("--run-id", type=int, required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.dry_run:
-        print("identity v3 兼容重建已拒绝：--dry-run 不受支持，该脚本会写入数据库。", file=sys.stderr)
-        return 2
-
-    if args.backup_db:
-        print("identity v3 兼容重建警告：--backup-db 已废弃并被忽略。", file=sys.stderr)
-    if args.skip_ann_rebuild:
-        print("identity v3 兼容重建警告：--skip-ann-rebuild 已废弃并被忽略。", file=sys.stderr)
-    if args.threshold_profile is not None:
-        print("identity v3 兼容重建警告：--threshold-profile 已废弃并被忽略。", file=sys.stderr)
-
     orchestrator: IdentityBootstrapOrchestrator | None = None
     try:
         orchestrator = IdentityBootstrapOrchestrator(Path(args.workspace))
-        snapshot = orchestrator.build_snapshot(
-            observation_profile_id=args.observation_profile_id,
-            candidate_knn_limit=int(args.candidate_knn_limit),
-        )
-        rerun = orchestrator.rerun_cluster_run(
-            snapshot_id=int(snapshot["snapshot_id"]),
-            cluster_profile_id=args.cluster_profile_id,
-            supersedes_run_id=None,
-            select_as_review_target=True,
-        )
+        summary = orchestrator.select_review_target(run_id=int(args.run_id))
     except Exception as exc:
-        print(f"identity v3 兼容重建失败: {exc}", file=sys.stderr)
+        print(f"identity cluster run 选择失败: {exc}", file=sys.stderr)
         return 1
     finally:
         if orchestrator is not None:
             orchestrator.close()
 
-    ignored_options = {
-        "dry_run": bool(args.dry_run),
-        "backup_db": bool(args.backup_db),
-        "skip_ann_rebuild": bool(args.skip_ann_rebuild),
-        "threshold_profile": str(args.threshold_profile) if args.threshold_profile is not None else None,
-    }
-    print(
-        "identity v3 兼容重建完成: "
-        + json.dumps(
-            {
-                "snapshot_id": int(snapshot["snapshot_id"]),
-                "run_id": int(rerun["run_id"]),
-                "prepared_cluster_count": int(rerun["prepared_cluster_count"]),
-                "candidate_cluster_count": int(rerun["candidate_cluster_count"]),
-                "ignored_legacy_options": ignored_options,
-            },
-            ensure_ascii=False,
-        )
-    )
+    print("identity cluster run 选择完成: " + json.dumps(summary, ensure_ascii=False))
     return 0
 
 
