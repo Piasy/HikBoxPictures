@@ -290,7 +290,7 @@ candidate_count = auto_assign_count + review_count + reject_count
 - Create: `tests/people_gallery/fixtures_identity_v3_1_export.py`
 - Create: `tests/people_gallery/test_identity_v3_1_export_fixtures.py`
 
-- [ ] **Step 1: 先写共享夹具契约测试，锁定后续任务可依赖的 phase1 数据拓扑**
+- [x] **Step 1: 先写共享夹具契约测试，锁定后续任务可依赖的 phase1 数据拓扑**
 
 在 `tests/people_gallery/test_identity_v3_1_export_fixtures.py` 先写失败测试，至少断言：
 
@@ -346,7 +346,7 @@ def test_build_identity_v3_1_export_workspace_seeds_expected_topology(tmp_path: 
         ws.close()
 ```
 
-- [ ] **Step 2: 运行夹具契约测试，确认当前仓库还没有这套 export fixture**
+- [x] **Step 2: 运行夹具契约测试，确认当前仓库还没有这套 export fixture**
 
 Run:
 
@@ -357,7 +357,7 @@ PYTHONPATH=src python -m pytest tests/people_gallery/test_identity_v3_1_export_f
 
 Expected: FAIL，报 `ModuleNotFoundError` 或 `ImportError`，因为 `fixtures_identity_v3_1_export.py` 和实验包尚未创建。
 
-- [ ] **Step 3: 新建共享 dataclass/参数契约，并实现可复用的 phase1 export fixture**
+- [x] **Step 3: 新建共享 dataclass/参数契约，并实现可复用的 phase1 export fixture**
 
 实现要求：
 
@@ -554,7 +554,7 @@ class AssignParameters:
   - `expected_candidate_ids_by_run_id_and_source`
   - `close()`
 
-- [ ] **Step 4: 回跑共享夹具测试，确认后续任务可以复用同一套 deterministic 数据**
+- [x] **Step 4: 回跑共享夹具测试，确认后续任务可以复用同一套 deterministic 数据**
 
 Run:
 
