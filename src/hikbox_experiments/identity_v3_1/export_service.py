@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime
 import html
 import json
+import math
 from pathlib import Path
 from shutil import copy2
 from typing import Any
@@ -141,16 +142,29 @@ class IdentityV31ReportExportService:
             "errors": list(seed_result.errors),
             "assignments": assignments,
         }
+        json_safe_manifest = self._json_safe(manifest)
         index_path.write_text(
-            self._build_html(manifest=manifest, assets_by_observation=assets_by_observation),
+            self._build_html(manifest=json_safe_manifest, assets_by_observation=assets_by_observation),
             encoding="utf-8",
         )
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        manifest_path.write_text(
+            json.dumps(json_safe_manifest, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
         return {
             "output_dir": output_dir,
             "index_path": index_path,
             "manifest_path": manifest_path,
         }
+
+    def _json_safe(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: self._json_safe(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._json_safe(item) for item in value]
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return value
 
     def _collect_observation_meta(
         self,

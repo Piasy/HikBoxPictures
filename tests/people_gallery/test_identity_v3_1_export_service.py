@@ -411,3 +411,28 @@ def test_export_service_assign_parameters_really_change_export_result(tmp_path: 
         assert changed_count > 0
     finally:
         ws.close()
+
+
+def test_export_service_manifest_is_strict_json_when_single_seed(tmp_path: Path) -> None:
+    ws = build_identity_v3_1_export_workspace(tmp_path / "identity-v3-1-export-single-seed")
+    try:
+        _materialize_valid_source_images(ws.conn)
+        service = IdentityV31ReportExportService(workspace=ws.root)
+        result = service.export(
+            output_root=tmp_path / "bundle-root",
+            disable_seed_cluster_ids={ws.cluster_ids["seed_fallback"]},
+        )
+
+        manifest_text = result["manifest_path"].read_text(encoding="utf-8")
+        assert "Infinity" not in manifest_text
+        assert "-Infinity" not in manifest_text
+        assert "NaN" not in manifest_text
+
+        def _strict_constant(value: str) -> None:
+            pytest.fail(f"manifest.json 出现非标准 JSON 常量: {value}")
+
+        manifest = json.loads(manifest_text, parse_constant=_strict_constant)
+        assert manifest["assignments"]
+        assert any(item["second_best_distance"] is None for item in manifest["assignments"])
+    finally:
+        ws.close()
