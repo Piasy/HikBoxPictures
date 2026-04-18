@@ -579,7 +579,7 @@ Expected: PASS。
 - Create: `src/hikbox_experiments/identity_v3_1/query_service.py`
 - Create: `tests/people_gallery/test_identity_v3_1_query_service.py`
 
-- [ ] **Step 1: 先写查询层测试，锁定 run 选择、cluster 过滤和 candidate 来源聚合规则**
+- [x] **Step 1: 先写查询层测试，锁定 run 选择、cluster 过滤和 candidate 来源聚合规则**
 
 在 `tests/people_gallery/test_identity_v3_1_query_service.py` 先写失败测试，至少覆盖：
 
@@ -745,7 +745,7 @@ def test_query_service_selects_only_matching_normalized_embedding_row(tmp_path: 
 - 对 `embedding_probe`，测试必须证明 QueryService 只接受 `feature_type='face'`、正确 `model_key`、`normalized=1` 的那一条 row；错误 `model_key` 和 `normalized=0` 的 row 必须被忽略
 - QueryContext 必须显式暴露每个 cluster 下 `decision_status != 'rejected'` 的 member observation id，供 Task 3 做“已属于启用 seed 的 observation 排除”；这一层不要提前应用该排除，因为 promote/disable 还未决
 
-- [ ] **Step 2: 运行查询层测试，确认服务尚未实现**
+- [x] **Step 2: 运行查询层测试，确认服务尚未实现**
 
 Run:
 
@@ -756,7 +756,7 @@ PYTHONPATH=src python -m pytest tests/people_gallery/test_identity_v3_1_query_se
 
 Expected: FAIL，报 `ModuleNotFoundError`、`ImportError` 或 `AttributeError`。
 
-- [ ] **Step 3: 用直接 SQL 实现 `IdentityV31QueryService`，不要为了这个实验工具改 repository 层**
+- [x] **Step 3: 用直接 SQL 实现 `IdentityV31QueryService`，不要为了这个实验工具改 repository 层**
 
 实现要求：
 
@@ -812,7 +812,7 @@ source_priority = {
   - `source_candidate_observation_ids`
   让 Task 3 可以在 seed 集合确定后，基于启用 seed 的非 rejected 成员做最终 candidate 排除。
 
-- [ ] **Step 4: 回跑查询层测试，确认 run 选择、过滤和来源聚合稳定**
+- [x] **Step 4: 回跑查询层测试，确认 run 选择、过滤和来源聚合稳定**
 
 Run:
 
