@@ -837,7 +837,7 @@ Expected: PASS。
 - Create: `src/hikbox_experiments/identity_v3_1/assignment_service.py`
 - Create: `tests/people_gallery/test_identity_v3_1_assignment_service.py`
 
-- [ ] **Step 1: 先写 assign 层测试，锁定 trusted-seed 优先级、L2 margin 和同图冲突判定**
+- [x] **Step 1: 先写 assign 层测试，锁定 trusted-seed 优先级、L2 margin 和同图冲突判定**
 
 在 `tests/people_gallery/test_identity_v3_1_assignment_service.py` 先写失败测试。测试不要依赖 DB 查询层，而是直接使用 `models.py` 的 dataclass 构造最小输入，这样本任务可与查询层并行：
 
@@ -966,7 +966,7 @@ def test_build_seed_identities_fails_when_all_enabled_seeds_are_invalid() -> Non
 - 当候选集合非空但全部 observation 都缺 embedding 时抛出 `ValueError("所有候选 observation 都缺少可用 embedding")`
 - `missing_embedding_count` / `dimension_mismatch_count` 会增加，但这些 observation 不计入 `candidate_count`
 
-- [ ] **Step 2: 运行 assign 层测试，确认当前仓库还没有该服务**
+- [x] **Step 2: 运行 assign 层测试，确认当前仓库还没有该服务**
 
 Run:
 
@@ -977,7 +977,7 @@ PYTHONPATH=src python -m pytest tests/people_gallery/test_identity_v3_1_assignme
 
 Expected: FAIL，报 `ModuleNotFoundError` 或 `AttributeError`。
 
-- [ ] **Step 3: 实现 `IdentityV31AssignmentService`，让 seed 与 assign 完全基于内存计算**
+- [x] **Step 3: 实现 `IdentityV31AssignmentService`，让 seed 与 assign 完全基于内存计算**
 
 实现要求：
 
@@ -1034,7 +1034,7 @@ order = np.lexsort((seed_cluster_ids_array, distance_array))
   - `prototype_dimension`
   让 Task 4 能把 valid/invalid seed 按同一契约传到页面摘要、overrides 和 manifest。
 
-- [ ] **Step 4: 回跑 assign 层测试，确认 prototype、margin、same-photo 决策都已固定**
+- [x] **Step 4: 回跑 assign 层测试，确认 prototype、margin、same-photo 决策都已固定**
 
 Run:
 
