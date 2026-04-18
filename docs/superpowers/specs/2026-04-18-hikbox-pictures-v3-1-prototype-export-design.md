@@ -2,14 +2,14 @@
 
 ## 目标
 
-本设计的目标不是继续扩张 `src/hikbox_pictures` 的正式产品面，而是在仓库内新增一套面向 `.hikbox` workspace 的快速验证工具，用最短路径验证 v3.1 的两个核心问题：
+本设计的目标不是继续扩张 `src/hikbox_pictures` 的正式产品面，而是在仓库内新增一套面向 `repo/.tmp/.hikbox` workspace 的快速验证工具，用最短路径验证 v3.1 的两个核心问题：
 
 - 当前 phase1 跑出的自动聚类结果是否足够合理，能否直接作为后续 identity seed 的来源。
 - 其他 observation 往这些 seed identity 上做 assign 时，`auto_assign / review / reject` 的分布和证据是否站得住。
 
 本工具必须满足以下要求：
 
-- 直接消费 `.hikbox/.hikbox/library.db` 与现有 artifact，不接扫描主链。
+- 直接消费 `repo/.tmp/.hikbox/.hikbox/library.db` 与现有 artifact，不接扫描主链。
 - 输出类似 `export_observation_neighbors.py` 的本地离线证据包，而不是常驻 WebUI。
 - 默认只导出单个 `index.html`，所有验证信息在一页内折叠查看。
 - 允许为了快速验证临时改变参数和 seed 选择，但不把这些实验结果回写成正式运行时真相。
@@ -19,7 +19,7 @@
 本设计建立在以下前提上：
 
 - 当前 workspace 已经具备 phase1 的 `identity_observation_snapshot`、`identity_cluster_run`、`identity_cluster`、`identity_cluster_member`、`identity_cluster_resolution` 等基础数据。
-- 当前 `.hikbox` 可能还没有 live `person`、`person_trusted_sample`、`person_prototype`，因此不能把“assign 是否有效”建立在正式人物层之上。
+- 当前 `repo/.tmp/.hikbox` 可能还没有 live `person`、`person_trusted_sample`、`person_prototype`，因此不能把“assign 是否有效”建立在正式人物层之上。
 - 当前 phase1 的 `/identity-tuning` 和 `export_observation_neighbors.py` 已经证明“本地 HTML + crop/context 证据文件”的调试形式可用，应优先复用这种模式。
 - 用户当前目标是快速验证，不要求主 CLI/API/WebUI 兼容，也不要求设计成长期正式入口。
 
@@ -366,6 +366,8 @@ manifest 的主要用途是：
 - `--review-max-distance`
 - `--min-margin`
 - `--output-root`
+
+其中 `--workspace` 默认应指向 `repo/.tmp/.hikbox`，仅在需要切换到其他 workspace 时显式覆盖。
 
 脚本输出保持与现有导出脚本一致的风格，打印：
 
