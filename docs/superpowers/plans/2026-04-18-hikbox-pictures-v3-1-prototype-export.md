@@ -1455,7 +1455,7 @@ Expected: PASS。
 - Create: `scripts/export_identity_v3_1_report.py`
 - Create: `tests/people_gallery/test_export_identity_v3_1_report_script.py`
 
-- [ ] **Step 1: 先写脚本测试，锁定 argparse、默认 workspace/输出目录和非零退出码行为**
+- [x] **Step 1: 先写脚本测试，锁定 argparse、默认 workspace/输出目录和非零退出码行为**
 
 测试模式直接复用现有 `tests/people_gallery/test_export_observation_neighbors_script.py` 的 `spec_from_file_location + main(argv)` 方式，不要把脚本硬塞进主 CLI。至少覆盖：
 
@@ -1524,7 +1524,7 @@ def test_script_happy_path_runs_real_fixture_workspace_and_uses_default_output_r
 - 当禁用所有 seed 时，脚本返回 `1`
 - 在真实夹具 workspace 上直接跑 `main(argv)` 会生成离线 bundle，stdout JSON 摘要里的 `output_dir` 指向默认时间戳子目录
 
-- [ ] **Step 2: 运行脚本测试，确认脚本入口尚未实现**
+- [x] **Step 2: 运行脚本测试，确认脚本入口尚未实现**
 
 Run:
 
@@ -1535,7 +1535,7 @@ PYTHONPATH=src python -m pytest tests/people_gallery/test_export_identity_v3_1_r
 
 Expected: FAIL，报脚本文件不存在或 `main` 未定义。
 
-- [ ] **Step 3: 新建 `scripts/export_identity_v3_1_report.py`，保持和现有导出脚本一致的交互风格**
+- [x] **Step 3: 新建 `scripts/export_identity_v3_1_report.py`，保持和现有导出脚本一致的交互风格**
 
 实现要求：
 
@@ -1592,7 +1592,7 @@ assign_parameters = AssignParameters(
 - 脚本失败时打印 stderr，并返回 `1`；不要吞掉异常后返回 `0`。
 - `Task 5` 的真实 happy path 测试必须直接调用 `main(argv)`，不能只用 stub service 证明参数传递。
 
-- [ ] **Step 4: 回跑脚本测试，再跑整套新增测试子集确认闭环**
+- [x] **Step 4: 回跑脚本测试，再跑整套新增测试子集确认闭环**
 
 Run:
 
