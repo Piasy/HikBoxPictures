@@ -3,7 +3,7 @@
 ## 文档定位
 
 - 本文记录当前仓库 `src/hikbox_pictures/db/migrations/` 已落地 migration 链对应的最新数据库 schema 快照。
-- 当前最新 migration 为 `0005_identity_cluster_bootstrap_v3_1.sql`。
+- 当前最新 migration 为 `0006_identity_cluster_raw_edge_threshold.sql`。
 - 数据库类型为 SQLite。
 - 本文按领域描述已经落地的表结构，重点覆盖核心字段与关键索引/约束；完整字段定义以 migration SQL 为准，不包含设计稿或讨论中的未来变更。
 
@@ -21,7 +21,7 @@
 | 人物与复核 | `identity_threshold_profile`、`identity_observation_profile`、`identity_observation_snapshot`、`identity_observation_pool_entry`、`identity_cluster_profile`、`identity_cluster_run`、`identity_cluster`、`identity_cluster_lineage`、`identity_cluster_member`、`identity_cluster_resolution`、`person`、`person_cluster_origin`、`person_face_assignment`、`person_face_exclusion`、`person_trusted_sample`、`person_prototype`、`review_item` |
 | 导出与运维 | `export_template`、`export_template_person`、`export_run`、`export_delivery`、`ops_event` |
 
-## 0005 迁移要点
+## 0005/0006 迁移要点
 
 - 新增 observation/profile/run 主链表：`identity_observation_profile`、`identity_observation_snapshot`、`identity_observation_pool_entry`、`identity_cluster_profile`、`identity_cluster_run`、`identity_cluster`、`identity_cluster_lineage`、`identity_cluster_member`、`identity_cluster_resolution`。
 - 新增人物来源真相表：`person_cluster_origin`，用于承接原 `person.origin_cluster_id` 的历史来源记录。
@@ -29,6 +29,7 @@
 - `person_face_assignment` 与 `person_trusted_sample` 新增 `source_run_id`、`source_cluster_id`，用于追踪来源 run/cluster。
 - `identity_cluster_run` 保留唯一索引，保证全库最多一个 `is_review_target = 1` 与一个 `is_materialization_owner = 1`。
 - `identity_threshold_profile` 会在迁移时回填一组 observation/cluster profile；若无 legacy profile，会自动生成 fallback profile。
+- `identity_cluster_profile` 新增 `raw_edge_max_distance`，用于限制 raw mutual-kNN 图的最大允许边距离；bootstrap 生成的默认 cluster profile 同步把 `discovery_knn_k` 收敛到 `7`。
 
 ## 当前表结构
 
@@ -335,7 +336,7 @@
 
 核心字段：
 
-- `discovery_knn_k`、`density_min_samples`：密度聚类核心参数。
+- `discovery_knn_k`、`raw_edge_max_distance`、`density_min_samples`：raw 建图与密度聚类核心参数。
 - `anchor_core_*` / `core_*` / `boundary_*`：成员角色判定参数。
 - `existence_*`：cluster 存在性 gate。
 - `materialize_*`：materialize gate。
@@ -745,6 +746,11 @@
 - `person` 表移除 `origin_cluster_id` 列。
 - `person_face_assignment` 与 `person_trusted_sample` 增加 `source_run_id`、`source_cluster_id` 字段。
 - 回填 legacy migration succeeded run 的 `summary`、`cluster`、`member`、`resolution` 数据。
+
+### `0006_identity_cluster_raw_edge_threshold.sql`
+
+- `identity_cluster_profile` 新增 `raw_edge_max_distance` 字段，默认值为 `0.35`。
+- 将 bootstrap 生成的默认 cluster profile `discovery_knn_k` 从 `24` 收敛到 `7`，降低跨身份桥接误连风险。
 
 ## 维护要求
 

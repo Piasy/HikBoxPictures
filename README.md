@@ -132,6 +132,30 @@ PYTHONPATH=src python scripts/export_observation_neighbors.py --workspace <works
 PYTHONPATH=src python scripts/activate_identity_cluster_run.py --workspace <workspace> --run-id <run_id>
 ```
 
+执行关系说明：
+
+- `build_identity_observation_snapshot.py -> rerun_identity_cluster_run.py` 是严格前后依赖。先产出 `snapshot_id`，再基于该 `snapshot_id` 重跑 cluster run。
+- 如果你刚执行完 `build_identity_observation_snapshot.py`，下一步通常就是执行 `rerun_identity_cluster_run.py --snapshot-id <snapshot_id>`。
+- `select_identity_cluster_run.py` 不是每次必跑。`rerun_identity_cluster_run.py` 默认会把新产生的 succeeded run 设为当前 review target；只有当你想手动切换到另一个已成功的 run 时，才需要显式执行 `select_identity_cluster_run.py`。
+- `export_observation_neighbors.py` 不是主链必跑步骤。它用于导出指定 cluster 或 observation 的最近邻证据页，辅助人工核对 retained/excluded/representative 与竞争近邻。
+- `activate_identity_cluster_run.py` 是发布动作，会把该 run 激活为当前 live 物化结果 owner。通常应在 review 完成、确认结果可接受后再执行。
+
+各命令职责：
+
+- `build_identity_observation_snapshot.py`：冻结当前 observation 候选池，生成可复用的 snapshot，并输出 `snapshot_id`。
+- `rerun_identity_cluster_run.py`：基于指定 `snapshot_id` 执行 clustering，并完成 prepare 阶段，输出新的 `run_id`。
+- `select_identity_cluster_run.py`：手动切换当前 review target run。
+- `export_observation_neighbors.py`：导出人工核对用的 HTML/JSON 证据页，便于查看目标 observation 或 cluster 成员的最近邻样本。
+- `activate_identity_cluster_run.py`：将指定 run 正式发布为 live 结果。
+
+推荐操作顺序：
+
+1. 运行 `build_identity_observation_snapshot.py`，记下输出里的 `snapshot_id`。
+2. 运行 `rerun_identity_cluster_run.py --snapshot-id <snapshot_id>`，记下输出里的 `run_id`。
+3. 打开 `/identity-tuning` 查看当前 review target run 的证据；必要时再使用 `export_observation_neighbors.py` 导出局部证据。
+4. 如需切换 review 对象，再执行 `select_identity_cluster_run.py --run-id <run_id>`。
+5. 确认 review 通过后，最后执行 `activate_identity_cluster_run.py --run-id <run_id>`。
+
 - 默认 review 页入口：`/identity-tuning`（只读）。
 - 默认 review 对象：`is_review_target = 1`。
 - live 物化结果 owner：`is_materialization_owner = 1`。

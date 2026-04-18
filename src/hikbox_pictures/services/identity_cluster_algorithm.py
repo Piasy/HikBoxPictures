@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 import math
 from typing import Any
@@ -27,6 +28,7 @@ class IdentityClusterAlgorithm:
         *,
         observation_snapshot_id: int,
         cluster_profile_id: int,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, Any]:
         self.cluster_repo.get_snapshot_required(observation_snapshot_id)
         profile = self.cluster_repo.get_cluster_profile_required(cluster_profile_id)
@@ -74,11 +76,17 @@ class IdentityClusterAlgorithm:
             for point in [*core_points, *attachment_points]
         }
 
-        raw_clusters = self._build_raw_clusters(core_points=core_points, profile=profile, vector_map=vector_map)
+        raw_clusters = self._build_raw_clusters(
+            core_points=core_points,
+            profile=profile,
+            vector_map=vector_map,
+            progress_reporter=progress_reporter,
+        )
         cleaned_clusters, raw_to_cleaned_lineage = self._build_cleaned_clusters(
             raw_clusters=raw_clusters,
             profile=profile,
             vector_map=vector_map,
+            progress_reporter=progress_reporter,
         )
         final_clusters = self._build_final_clusters(
             cleaned_clusters=cleaned_clusters,
@@ -88,6 +96,7 @@ class IdentityClusterAlgorithm:
             vector_map=vector_map,
             photo_map=photo_map,
             quality_map=quality_map,
+            progress_reporter=progress_reporter,
         )
 
         lineage: list[dict[str, Any]] = [*raw_to_cleaned_lineage]
@@ -127,13 +136,15 @@ class IdentityClusterAlgorithm:
         core_points: list[_Point],
         profile: dict[str, Any],
         vector_map: dict[int, np.ndarray],
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> list[dict[str, Any]]:
         obs_ids = [int(point.observation_id) for point in core_points]
         index_by_obs = {obs_id: idx for idx, obs_id in enumerate(obs_ids)}
         k = min(max(1, int(profile["discovery_knn_k"])), max(0, len(obs_ids) - 1))
+        max_edge_distance = float(profile.get("raw_edge_max_distance", 1.0))
 
-        neighbors_by_obs: dict[int, list[int]] = {}
-        for obs_id in obs_ids:
+        neighbors_by_obs: dict[int, list[tuple[int, float]]] = {}
+        for index, obs_id in enumerate(obs_ids, start=1):
             distances = sorted(
                 (
                     (other_id, self._cosine_distance(vector_map[obs_id], vector_map[other_id]))
@@ -142,12 +153,23 @@ class IdentityClusterAlgorithm:
                 ),
                 key=lambda item: (float(item[1]), int(item[0])),
             )
-            neighbors_by_obs[obs_id] = [int(item[0]) for item in distances[:k]]
+            neighbors_by_obs[obs_id] = [
+                (int(other_id), float(distance)) for other_id, distance in distances[:k]
+            ]
+            self._report_progress(
+                progress_reporter,
+                subphase="build_raw_neighbors",
+                total_count=len(obs_ids),
+                completed_count=index,
+            )
 
         undirected_edges: set[tuple[int, int]] = set()
         for obs_id in obs_ids:
-            for other_id in neighbors_by_obs.get(obs_id, []):
-                if obs_id in neighbors_by_obs.get(other_id, []):
+            for other_id, distance in neighbors_by_obs.get(obs_id, []):
+                if float(distance) > max_edge_distance:
+                    continue
+                reverse_neighbor_ids = {int(item[0]) for item in neighbors_by_obs.get(other_id, [])}
+                if obs_id in reverse_neighbor_ids:
                     edge = (int(min(obs_id, other_id)), int(max(obs_id, other_id)))
                     undirected_edges.add(edge)
 
@@ -187,6 +209,7 @@ class IdentityClusterAlgorithm:
                     "summary_json": {
                         "mutual_knn_edges": edge_pairs,
                         "component_size": int(len(component)),
+                        "raw_edge_max_distance": float(max_edge_distance),
                     },
                 }
             )
@@ -199,6 +222,7 @@ class IdentityClusterAlgorithm:
         raw_clusters: list[dict[str, Any]],
         profile: dict[str, Any],
         vector_map: dict[int, np.ndarray],
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         cleaned_clusters: list[dict[str, Any]] = []
         lineage: list[dict[str, Any]] = []
@@ -277,30 +301,34 @@ class IdentityClusterAlgorithm:
                             }
                         )
 
-            if did_split:
-                continue
-
-            cleaned_index = len(cleaned_clusters)
-            cleaned_clusters.append(
-                {
-                    "members": [int(obs_id) for obs_id in members],
-                    "split_rejected_members": [],
-                    "summary_json": {
-                        "split_applied": False,
-                        "parent_raw_index": int(raw_index),
-                    },
-                }
-            )
-            lineage.append(
-                {
-                    "parent_stage": "raw",
-                    "parent_index": int(raw_index),
-                    "child_stage": "cleaned",
-                    "child_index": int(cleaned_index),
-                    "relation_kind": "carry_over",
-                    "reason_code": None,
-                    "detail_json": {},
-                }
+            if not did_split:
+                cleaned_index = len(cleaned_clusters)
+                cleaned_clusters.append(
+                    {
+                        "members": [int(obs_id) for obs_id in members],
+                        "split_rejected_members": [],
+                        "summary_json": {
+                            "split_applied": False,
+                            "parent_raw_index": int(raw_index),
+                        },
+                    }
+                )
+                lineage.append(
+                    {
+                        "parent_stage": "raw",
+                        "parent_index": int(raw_index),
+                        "child_stage": "cleaned",
+                        "child_index": int(cleaned_index),
+                        "relation_kind": "carry_over",
+                        "reason_code": None,
+                        "detail_json": {},
+                    }
+                )
+            self._report_progress(
+                progress_reporter,
+                subphase="build_cleaned_clusters",
+                total_count=len(raw_clusters),
+                completed_count=raw_index + 1,
             )
 
         return cleaned_clusters, lineage
@@ -315,11 +343,12 @@ class IdentityClusterAlgorithm:
         vector_map: dict[int, np.ndarray],
         photo_map: dict[int, int],
         quality_map: dict[int, float],
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> list[dict[str, Any]]:
         core_obs_ids = [int(point.observation_id) for point in core_points]
 
         final_clusters: list[dict[str, Any]] = []
-        for cleaned_cluster in cleaned_clusters:
+        for index, cleaned_cluster in enumerate(cleaned_clusters, start=1):
             candidate_obs_ids = [int(obs_id) for obs_id in cleaned_cluster["members"]]
             classified = self._classify_core_members(
                 candidate_obs_ids=candidate_obs_ids,
@@ -342,6 +371,12 @@ class IdentityClusterAlgorithm:
                     "summary_json": dict(classified["summary_json"]),
                 }
             )
+            self._report_progress(
+                progress_reporter,
+                subphase="classify_final_clusters",
+                total_count=len(cleaned_clusters),
+                completed_count=index,
+            )
 
         self._assign_attachments(
             final_clusters=final_clusters,
@@ -350,6 +385,7 @@ class IdentityClusterAlgorithm:
             core_obs_ids=core_obs_ids,
             vector_map=vector_map,
             photo_map=photo_map,
+            progress_reporter=progress_reporter,
         )
 
         self._finalize_cluster_metrics(
@@ -359,6 +395,7 @@ class IdentityClusterAlgorithm:
             vector_map=vector_map,
             photo_map=photo_map,
             quality_map=quality_map,
+            progress_reporter=progress_reporter,
         )
 
         return final_clusters
@@ -598,6 +635,7 @@ class IdentityClusterAlgorithm:
         core_obs_ids: list[int],
         vector_map: dict[int, np.ndarray],
         photo_map: dict[int, int],
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         if not attachment_points or not final_clusters:
             return
@@ -610,10 +648,11 @@ class IdentityClusterAlgorithm:
         if not active_indices:
             active_indices = [0]
 
-        for point in sorted(attachment_points, key=lambda value: int(value.observation_id)):
+        sorted_attachment_points = sorted(attachment_points, key=lambda value: int(value.observation_id))
+        for attachment_index, point in enumerate(sorted_attachment_points, start=1):
             distance_candidates: list[tuple[int, float]] = []
-            for index in active_indices:
-                retained_ids = [int(obs_id) for obs_id in final_clusters[index].get("core_retained_ids", set())]
+            for candidate_index in active_indices:
+                retained_ids = [int(obs_id) for obs_id in final_clusters[candidate_index].get("core_retained_ids", set())]
                 if not retained_ids:
                     continue
                 representative = self._medoid_id(obs_ids=retained_ids, vector_map=vector_map)
@@ -621,7 +660,7 @@ class IdentityClusterAlgorithm:
                     vector_map[int(point.observation_id)],
                     vector_map[int(representative)],
                 )
-                distance_candidates.append((int(index), float(dist)))
+                distance_candidates.append((int(candidate_index), float(dist)))
 
             if not distance_candidates:
                 target_index = int(active_indices[0])
@@ -692,6 +731,12 @@ class IdentityClusterAlgorithm:
                     },
                 }
             )
+            self._report_progress(
+                progress_reporter,
+                subphase="assign_attachments",
+                total_count=len(sorted_attachment_points),
+                completed_count=attachment_index,
+            )
 
     def _finalize_cluster_metrics(
         self,
@@ -702,6 +747,7 @@ class IdentityClusterAlgorithm:
         vector_map: dict[int, np.ndarray],
         photo_map: dict[int, int],
         quality_map: dict[int, float],
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> None:
         retained_rep_ids: dict[int, int] = {}
 
@@ -805,31 +851,43 @@ class IdentityClusterAlgorithm:
             }
 
             self._mark_trusted_seeds(cluster=cluster, profile=profile, quality_map=quality_map)
+            self._report_progress(
+                progress_reporter,
+                subphase="finalize_cluster_metrics",
+                total_count=len(final_clusters),
+                completed_count=index + 1,
+            )
 
         for index, cluster in enumerate(final_clusters):
             representative = retained_rep_ids.get(int(index))
             if representative is None:
                 cluster["persist_metrics"]["nearest_cluster_distance"] = None
                 cluster["persist_metrics"]["separation_gap"] = None
-                continue
-            distances = []
-            for other_index, other_rep in retained_rep_ids.items():
-                if int(other_index) == int(index):
-                    continue
-                distances.append(
-                    self._cosine_distance(
-                        vector_map[int(representative)],
-                        vector_map[int(other_rep)],
+            else:
+                distances = []
+                for other_index, other_rep in retained_rep_ids.items():
+                    if int(other_index) == int(index):
+                        continue
+                    distances.append(
+                        self._cosine_distance(
+                            vector_map[int(representative)],
+                            vector_map[int(other_rep)],
+                        )
                     )
-                )
-            if not distances:
-                cluster["persist_metrics"]["nearest_cluster_distance"] = None
-                cluster["persist_metrics"]["separation_gap"] = None
-                continue
-            nearest = float(min(distances))
-            cluster["persist_metrics"]["nearest_cluster_distance"] = float(nearest)
-            cluster["persist_metrics"]["separation_gap"] = float(
-                max(0.0, nearest - float(cluster["persist_metrics"]["compactness_p90"]))
+                if not distances:
+                    cluster["persist_metrics"]["nearest_cluster_distance"] = None
+                    cluster["persist_metrics"]["separation_gap"] = None
+                else:
+                    nearest = float(min(distances))
+                    cluster["persist_metrics"]["nearest_cluster_distance"] = float(nearest)
+                    cluster["persist_metrics"]["separation_gap"] = float(
+                        max(0.0, nearest - float(cluster["persist_metrics"]["compactness_p90"]))
+                    )
+            self._report_progress(
+                progress_reporter,
+                subphase="measure_cluster_separation",
+                total_count=len(final_clusters),
+                completed_count=index + 1,
             )
 
     def _mark_trusted_seeds(
@@ -900,6 +958,30 @@ class IdentityClusterAlgorithm:
             "trusted_seed_candidate_count": int(len(candidates)),
             "trusted_seed_reject_distribution": reject_distribution,
         }
+
+    def _report_progress(
+        self,
+        progress_reporter: Callable[[dict[str, object]], None] | None,
+        *,
+        subphase: str,
+        total_count: int,
+        completed_count: int,
+    ) -> None:
+        if progress_reporter is None:
+            return
+        total = max(0, int(total_count))
+        completed = min(max(0, int(completed_count)), total)
+        percent = 100.0 if total <= 0 else round((completed / total) * 100.0, 1)
+        progress_reporter(
+            {
+                "phase": "cluster_run",
+                "subphase": str(subphase),
+                "status": "running",
+                "total_count": total,
+                "completed_count": completed,
+                "percent": percent,
+            }
+        )
 
     def _support_ratio(
         self,

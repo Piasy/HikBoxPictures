@@ -46,8 +46,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.observation_ids is None and args.cluster_id is None:
             raise ValueError("必须提供 --observation-ids 或 --cluster-id")
-        if args.observation_ids is not None and args.cluster_id is not None:
-            raise ValueError("--observation-ids 与 --cluster-id 不能同时提供")
 
         observation_ids = (
             _parse_observation_ids(str(args.observation_ids))

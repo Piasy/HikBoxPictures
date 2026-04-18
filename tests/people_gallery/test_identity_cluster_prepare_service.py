@@ -116,6 +116,46 @@ def test_prepare_run_rolls_all_candidates_back_to_review_pending_when_run_ann_bu
         ws.close()
 
 
+def test_prepare_run_reports_progress_events_with_total_completed_percent(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "prepare-run-progress")
+    try:
+        ws.seed_materialize_candidate_case()
+        snapshot = ws.new_observation_snapshot_service().build_snapshot(
+            observation_profile_id=ws.observation_profile_id,
+            candidate_knn_limit=24,
+        )
+        run = ws.new_cluster_run_service().execute_run(
+            observation_snapshot_id=int(snapshot["snapshot_id"]),
+            cluster_profile_id=ws.cluster_profile_id,
+            supersedes_run_id=None,
+            select_as_review_target=True,
+        )
+        events: list[dict[str, object]] = []
+
+        result = ws.new_cluster_prepare_service().prepare_run(
+            run_id=int(run["run_id"]),
+            progress_reporter=events.append,
+        )
+
+        assert int(result["candidate_cluster_count"]) >= 1
+        assert events
+        assert any(
+            str(event.get("phase")) == "prepare_run" and str(event.get("subphase")) == "prepare_candidates"
+            for event in events
+        )
+        assert any(
+            str(event.get("phase")) == "prepare_run" and str(event.get("subphase")) == "prepare_run_ann_bundle"
+            for event in events
+        )
+        assert all("total_count" in event for event in events)
+        assert all("completed_count" in event for event in events)
+        assert all("percent" in event for event in events)
+        assert all(int(event["completed_count"]) <= int(event["total_count"]) for event in events)
+        assert any(int(event["completed_count"]) == int(event["total_count"]) for event in events)
+    finally:
+        ws.close()
+
+
 def test_prepare_run_does_not_materialize_cluster_below_gate_thresholds(tmp_path: Path) -> None:
     ws = build_identity_phase1_workspace(tmp_path / "prepare-run-gate-negative")
     try:

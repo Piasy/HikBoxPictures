@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 import json
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -213,6 +214,7 @@ class IdentityObservationRepo:
         *,
         snapshot_id: int,
         observation_profile_id: int,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, int]:
         profile = self.get_observation_profile_required(observation_profile_id)
         rows = self._list_rows_for_pooling(model_key=str(profile["embedding_model_key"]))
@@ -224,7 +226,8 @@ class IdentityObservationRepo:
         burst_window_seconds = int(profile["burst_window_seconds"])
 
         candidates: list[dict[str, Any]] = []
-        for row in rows:
+        total_rows = len(rows)
+        for index, row in enumerate(rows, start=1):
             pool_kind = "excluded"
             excluded_reason = "low_quality"
             if row.quality_score >= core_threshold:
@@ -240,6 +243,12 @@ class IdentityObservationRepo:
                     "excluded_reason": excluded_reason,
                 }
             )
+            self._report_progress(
+                progress_reporter,
+                subphase="classify_candidates",
+                total_count=total_rows,
+                completed_count=index,
+            )
 
         same_photo_sorted = sorted(
             [item for item in candidates if item["excluded_reason"] is None],
@@ -248,30 +257,39 @@ class IdentityObservationRepo:
         photo_representative: dict[int, _ObservationRow] = {}
         dedup_excluded: list[dict[str, Any]] = [item for item in candidates if item["excluded_reason"] is not None]
         after_same_photo: list[dict[str, Any]] = []
-        for item in same_photo_sorted:
+        total_same_photo = len(same_photo_sorted)
+        for index, item in enumerate(same_photo_sorted, start=1):
             row = item["row"]
             representative = photo_representative.get(row.photo_asset_id)
             if representative is None:
                 photo_representative[row.photo_asset_id] = row
                 after_same_photo.append(item)
-                continue
-            dedup_group_key = f"photo:{row.photo_asset_id}"
-            dedup_excluded.append(
-                {
-                    "row": row,
-                    "pool_kind": "excluded",
-                    "excluded_reason": "same_photo_duplicate",
-                    "representative_observation_id": int(representative.observation_id),
-                    "dedup_group_key": dedup_group_key,
-                    "diagnostic_json": {
+            else:
+                dedup_group_key = f"photo:{row.photo_asset_id}"
+                dedup_excluded.append(
+                    {
+                        "row": row,
+                        "pool_kind": "excluded",
+                        "excluded_reason": "same_photo_duplicate",
+                        "representative_observation_id": int(representative.observation_id),
                         "dedup_group_key": dedup_group_key,
-                        "policy": "same_photo_keep_best",
-                    },
-                }
+                        "diagnostic_json": {
+                            "dedup_group_key": dedup_group_key,
+                            "policy": "same_photo_keep_best",
+                        },
+                    }
+                )
+            self._report_progress(
+                progress_reporter,
+                subphase="deduplicate_same_photo",
+                total_count=total_same_photo,
+                completed_count=index,
             )
 
         kept_rows: list[dict[str, Any]] = []
-        for item in sorted(after_same_photo, key=lambda value: int(value["row"].observation_id)):
+        sorted_after_same_photo = sorted(after_same_photo, key=lambda value: int(value["row"].observation_id))
+        total_global_dedup = len(sorted_after_same_photo)
+        for index, item in enumerate(sorted_after_same_photo, start=1):
             row = item["row"]
             matched, reason = self._find_duplicate(
                 candidate=row,
@@ -282,20 +300,26 @@ class IdentityObservationRepo:
             )
             if matched is None or reason is None:
                 kept_rows.append(item)
-                continue
-            dedup_group_key = f"rep:{int(matched.observation_id)}"
-            dedup_excluded.append(
-                {
-                    "row": row,
-                    "pool_kind": "excluded",
-                    "excluded_reason": reason,
-                    "representative_observation_id": int(matched.observation_id),
-                    "dedup_group_key": dedup_group_key,
-                    "diagnostic_json": {
+            else:
+                dedup_group_key = f"rep:{int(matched.observation_id)}"
+                dedup_excluded.append(
+                    {
+                        "row": row,
+                        "pool_kind": "excluded",
+                        "excluded_reason": reason,
+                        "representative_observation_id": int(matched.observation_id),
                         "dedup_group_key": dedup_group_key,
-                        "distance": float(self._cosine_distance(row.vector, matched.vector)),
-                    },
-                }
+                        "diagnostic_json": {
+                            "dedup_group_key": dedup_group_key,
+                            "distance": float(self._cosine_distance(row.vector, matched.vector)),
+                        },
+                    }
+                )
+            self._report_progress(
+                progress_reporter,
+                subphase="deduplicate_global",
+                total_count=total_global_dedup,
+                completed_count=index,
             )
 
         pool_counts = {
@@ -303,6 +327,8 @@ class IdentityObservationRepo:
             "attachment": 0,
             "excluded": 0,
         }
+        total_insert_entries = len(kept_rows) + len(dedup_excluded)
+        inserted_count = 0
         for item in kept_rows:
             row = item["row"]
             pool_kind = str(item["pool_kind"])
@@ -319,6 +345,13 @@ class IdentityObservationRepo:
                     "dedup_group_key": f"self:{int(row.observation_id)}",
                 },
             )
+            inserted_count += 1
+            self._report_progress(
+                progress_reporter,
+                subphase="insert_entries",
+                total_count=total_insert_entries,
+                completed_count=inserted_count,
+            )
 
         for item in sorted(dedup_excluded, key=lambda value: int(value["row"].observation_id)):
             row = item["row"]
@@ -332,6 +365,13 @@ class IdentityObservationRepo:
                 representative_observation_id=item.get("representative_observation_id"),
                 excluded_reason=str(item["excluded_reason"]),
                 diagnostic_json=item.get("diagnostic_json") or {},
+            )
+            inserted_count += 1
+            self._report_progress(
+                progress_reporter,
+                subphase="insert_entries",
+                total_count=total_insert_entries,
+                completed_count=inserted_count,
             )
 
         self.conn.execute(
@@ -488,3 +528,28 @@ class IdentityObservationRepo:
             if isinstance(payload, dict):
                 return payload
         return {}
+
+    def _report_progress(
+        self,
+        progress_reporter: Callable[[dict[str, object]], None] | None,
+        *,
+        subphase: str,
+        total_count: int,
+        completed_count: int,
+    ) -> None:
+        if progress_reporter is None:
+            return
+        total = max(0, int(total_count))
+        completed = min(max(0, int(completed_count)), total)
+        percent = 100.0 if total <= 0 else round((completed / total) * 100.0, 1)
+        progress_reporter(
+            {
+                "phase": "snapshot_pooling",
+                "subphase": str(subphase),
+                "status": "running",
+                "unit": "observation",
+                "total_count": total,
+                "completed_count": completed,
+                "percent": percent,
+            }
+        )

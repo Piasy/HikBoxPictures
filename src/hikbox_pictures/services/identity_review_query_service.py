@@ -33,7 +33,6 @@ class IdentityReviewQueryService:
             run_id=int(review_run["id"]),
             run_summary_raw=self._load_json(review_run.get("summary_json")),
             snapshot_summary=self._load_json(snapshot.get("summary_json")),
-            clusters=clusters,
         )
 
         return {
@@ -124,12 +123,15 @@ class IdentityReviewQueryService:
             FROM identity_cluster
             WHERE run_id = ?
               AND cluster_stage = 'final'
+              AND cluster_state <> 'discarded'
             ORDER BY id ASC
             """,
             (int(run_id),),
         ).fetchall()
 
-        return [self._build_cluster_payload(cluster_row=dict(row)) for row in rows]
+        payload = [self._build_cluster_payload(cluster_row=dict(row)) for row in rows]
+        payload.sort(key=self._cluster_sort_key)
+        return payload
 
     def _build_cluster_payload(self, *, cluster_row: dict[str, Any]) -> dict[str, Any]:
         cluster_id = int(cluster_row["id"])
@@ -181,6 +183,21 @@ class IdentityReviewQueryService:
             "lineage": self._list_cluster_lineage(cluster_id=cluster_id),
             "members": self._group_cluster_members(cluster_id=cluster_id),
         }
+
+    def _cluster_sort_key(self, cluster: dict[str, Any]) -> tuple[int, int, int]:
+        resolution = cluster.get("resolution")
+        resolution_state = ""
+        if isinstance(resolution, dict):
+            resolution_state = str(resolution.get("resolution_state") or "")
+        priority = {
+            "materialized": 0,
+            "review_pending": 1,
+        }.get(resolution_state, 9)
+        metrics = cluster.get("metrics")
+        member_count = 0
+        if isinstance(metrics, dict):
+            member_count = int(metrics.get("member_count") or 0)
+        return (priority, -member_count, int(cluster.get("cluster_id") or 0))
 
     def _build_seed_audit(self, *, resolution_row: sqlite3.Row | None) -> dict[str, Any]:
         if resolution_row is None:
@@ -331,11 +348,21 @@ class IdentityReviewQueryService:
         run_id: int,
         run_summary_raw: dict[str, Any],
         snapshot_summary: dict[str, Any],
-        clusters: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        cluster_count = int(len(clusters))
-        active_cluster_count = int(sum(1 for item in clusters if str(item["cluster_state"]) == "active"))
-        discarded_cluster_count = int(sum(1 for item in clusters if str(item["cluster_state"]) == "discarded"))
+        cluster_state_rows = self.conn.execute(
+            """
+            SELECT cluster_state, COUNT(*) AS c
+            FROM identity_cluster
+            WHERE run_id = ?
+              AND cluster_stage = 'final'
+            GROUP BY cluster_state
+            """,
+            (int(run_id),),
+        ).fetchall()
+        cluster_state_counts = {str(row["cluster_state"]): int(row["c"]) for row in cluster_state_rows}
+        active_cluster_count = int(cluster_state_counts.get("active", 0))
+        discarded_cluster_count = int(cluster_state_counts.get("discarded", 0))
+        cluster_count = int(sum(cluster_state_counts.values()))
 
         observation_total = snapshot_summary.get("observation_total")
         if observation_total is None:

@@ -72,6 +72,21 @@ def test_migrate_phase1_v3_workspace_to_v3_1_runtime_truth(tmp_path):
     ).fetchone()
     assert int(observation_profiles["c"]) >= 1
     assert int(cluster_profiles["c"]) >= 1
+    cluster_profile_columns = _table_columns(conn, "identity_cluster_profile")
+    assert "raw_edge_max_distance" in cluster_profile_columns
+
+    active_cluster_profile = conn.execute(
+        """
+        SELECT discovery_knn_k, raw_edge_max_distance
+        FROM identity_cluster_profile
+        WHERE active = 1
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    assert active_cluster_profile is not None
+    assert int(active_cluster_profile["discovery_knn_k"]) == 7
+    assert float(active_cluster_profile["raw_edge_max_distance"]) == 0.35
 
     origin_rows = conn.execute(
         """

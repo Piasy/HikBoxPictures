@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 try:
@@ -198,6 +199,7 @@ class IdentityClusterRunService:
         cluster_profile_id: int,
         supersedes_run_id: int | None,
         select_as_review_target: bool,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, Any]:
         algorithm_version = "identity.cluster_run.v3_1"
         self.cluster_repo.get_snapshot_required(int(observation_snapshot_id))
@@ -216,8 +218,13 @@ class IdentityClusterRunService:
             plan = self.algorithm.build_run_plan(
                 observation_snapshot_id=int(observation_snapshot_id),
                 cluster_profile_id=int(cluster_profile_id),
+                progress_reporter=progress_reporter,
             )
-            counts = self._persist_run_plan(run_id=int(run_id), plan=plan)
+            counts = self._persist_run_plan(
+                run_id=int(run_id),
+                plan=plan,
+                progress_reporter=progress_reporter,
+            )
             if (
                 int(counts["cluster_count"]) <= 0
                 or int(counts["member_count"]) <= 0
@@ -248,12 +255,19 @@ class IdentityClusterRunService:
             self.mark_run_failed(run_id=int(run_id), reason=str(exc))
             raise
 
-    def _persist_run_plan(self, *, run_id: int, plan: dict[str, Any]) -> dict[str, int]:
+    def _persist_run_plan(
+        self,
+        *,
+        run_id: int,
+        plan: dict[str, Any],
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
+    ) -> dict[str, int]:
         raw_ids: list[int] = []
         cleaned_ids: list[int] = []
         final_ids: list[int] = []
 
-        for raw_cluster in plan.get("raw_clusters") or []:
+        raw_clusters = list(plan.get("raw_clusters") or [])
+        for index, raw_cluster in enumerate(raw_clusters, start=1):
             raw_members = [int(obs_id) for obs_id in raw_cluster.get("members") or []]
             cluster_id = self.cluster_repo.insert_cluster(
                 run_id=int(run_id),
@@ -301,8 +315,15 @@ class IdentityClusterRunService:
                     is_representative=False,
                     diagnostic_json={"phase": "raw"},
                 )
+            self._report_progress(
+                progress_reporter,
+                subphase="persist_raw_clusters",
+                total_count=len(raw_clusters),
+                completed_count=index,
+            )
 
-        for cleaned_cluster in plan.get("cleaned_clusters") or []:
+        cleaned_clusters = list(plan.get("cleaned_clusters") or [])
+        for index, cleaned_cluster in enumerate(cleaned_clusters, start=1):
             cleaned_members = [int(obs_id) for obs_id in cleaned_cluster.get("members") or []]
             split_rejected = [int(obs_id) for obs_id in cleaned_cluster.get("split_rejected_members") or []]
             cluster_id = self.cluster_repo.insert_cluster(
@@ -372,8 +393,15 @@ class IdentityClusterRunService:
                     is_representative=False,
                     diagnostic_json={"phase": "cleaned_split"},
                 )
+            self._report_progress(
+                progress_reporter,
+                subphase="persist_cleaned_clusters",
+                total_count=len(cleaned_clusters),
+                completed_count=index,
+            )
 
-        for final_cluster in plan.get("final_clusters") or []:
+        final_clusters = list(plan.get("final_clusters") or [])
+        for index, final_cluster in enumerate(final_clusters, start=1):
             metrics = dict(final_cluster.get("persist_metrics") or {})
             cluster_id = self.cluster_repo.insert_cluster(
                 run_id=int(run_id),
@@ -491,8 +519,15 @@ class IdentityClusterRunService:
                     "summary": dict(final_cluster.get("summary_json") or {}),
                 },
             )
+            self._report_progress(
+                progress_reporter,
+                subphase="persist_final_clusters",
+                total_count=len(final_clusters),
+                completed_count=index,
+            )
 
-        for lineage in plan.get("lineage") or []:
+        lineage_entries = list(plan.get("lineage") or [])
+        for index, lineage in enumerate(lineage_entries, start=1):
             parent_stage = str(lineage.get("parent_stage"))
             child_stage = str(lineage.get("child_stage"))
             parent_index = int(lineage.get("parent_index", -1))
@@ -531,6 +566,12 @@ class IdentityClusterRunService:
                 ),
                 detail_json=dict(lineage.get("detail_json") or {}),
             )
+            self._report_progress(
+                progress_reporter,
+                subphase="persist_lineage",
+                total_count=len(lineage_entries),
+                completed_count=index,
+            )
 
         return self.cluster_repo.get_run_persistence_counts(run_id=int(run_id))
 
@@ -558,3 +599,27 @@ class IdentityClusterRunService:
             return payload if isinstance(payload, dict) else {}
         except Exception:
             return {}
+
+    def _report_progress(
+        self,
+        progress_reporter: Callable[[dict[str, object]], None] | None,
+        *,
+        subphase: str,
+        total_count: int,
+        completed_count: int,
+    ) -> None:
+        if progress_reporter is None:
+            return
+        total = max(0, int(total_count))
+        completed = min(max(0, int(completed_count)), total)
+        percent = 100.0 if total <= 0 else round((completed / total) * 100.0, 1)
+        progress_reporter(
+            {
+                "phase": "cluster_run",
+                "subphase": str(subphase),
+                "status": "running",
+                "total_count": total,
+                "completed_count": completed,
+                "percent": percent,
+            }
+        )

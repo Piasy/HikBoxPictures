@@ -57,6 +57,24 @@ class IdentityPublishRepo:
             raise ValueError(f"run cluster profile 不存在: {int(run_id)}")
         return dict(row)
 
+    def get_run_embedding_model_key(self, *, run_id: int) -> str:
+        row = self.conn.execute(
+            """
+            SELECT op.embedding_model_key
+            FROM identity_cluster_run AS r
+            JOIN identity_observation_snapshot AS s ON s.id = r.observation_snapshot_id
+            JOIN identity_observation_profile AS op ON op.id = s.observation_profile_id
+            WHERE r.id = ?
+            """,
+            (int(run_id),),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"run observation profile 不存在: {int(run_id)}")
+        model_key = str(row["embedding_model_key"] or "").strip()
+        if not model_key:
+            raise ValueError(f"run observation profile 缺少 embedding_model_key: {int(run_id)}")
+        return model_key
+
     def list_prepare_candidates(self, *, run_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute(
             """
@@ -103,6 +121,7 @@ class IdentityPublishRepo:
 
     def prepare_cluster_bundle(self, *, cluster_id: int, run_id: int) -> dict[str, Any]:
         threshold_profile_id = self._get_active_threshold_profile_id()
+        embedding_model_key = self.get_run_embedding_model_key(run_id=int(run_id))
         members = self._list_retained_members(cluster_id=int(cluster_id))
         if not members:
             manifest = {
@@ -160,6 +179,7 @@ class IdentityPublishRepo:
         ]
         prototype_vector = self._build_centroid_vector(
             [int(row["observation_id"]) for row in trusted_seed_rows],
+            model_key=embedding_model_key,
         )
         prototype_checksum = ""
         if prototype_vector is not None:
@@ -240,6 +260,7 @@ class IdentityPublishRepo:
                 "cluster_count": 0,
             }
 
+        embedding_model_key = self.get_run_embedding_model_key(run_id=int(run_id))
         run_dir = self.artifact_root / f"run-{int(run_id)}"
         run_dir.mkdir(parents=True, exist_ok=True)
         artifact_path = run_dir / "prepared_ann_bundle.npz"
@@ -252,7 +273,7 @@ class IdentityPublishRepo:
             if isinstance(publish_plan, dict):
                 trusted_seeds = publish_plan.get("trusted_seeds") or []
             obs_ids = [int(item["face_observation_id"]) for item in trusted_seeds if "face_observation_id" in item]
-            vector = self._build_centroid_vector(obs_ids)
+            vector = self._build_centroid_vector(obs_ids, model_key=embedding_model_key)
             if vector is None:
                 continue
             cluster_ids.append(int(cluster_id))
@@ -596,7 +617,12 @@ class IdentityPublishRepo:
                 (int(rank), int(cluster_id), int(obs_id)),
             )
 
-    def _build_centroid_vector(self, observation_ids: list[int]) -> np.ndarray[Any, np.dtype[np.float32]] | None:
+    def _build_centroid_vector(
+        self,
+        observation_ids: list[int],
+        *,
+        model_key: str,
+    ) -> np.ndarray[Any, np.dtype[np.float32]] | None:
         if not observation_ids:
             return None
         placeholders = ", ".join("?" for _ in observation_ids)
@@ -606,11 +632,11 @@ class IdentityPublishRepo:
             FROM face_embedding
             WHERE face_observation_id IN ({placeholders})
               AND feature_type = 'face'
-              AND model_key = 'insightface'
+              AND model_key = ?
               AND normalized = 1
             ORDER BY face_observation_id ASC
             """,
-            tuple(int(obs_id) for obs_id in observation_ids),
+            (*tuple(int(obs_id) for obs_id in observation_ids), str(model_key)),
         ).fetchall()
         vectors: list[np.ndarray[Any, np.dtype[np.float32]]] = []
         for row in rows:

@@ -5,6 +5,34 @@ import pytest
 from .fixtures_identity_v3_1 import build_identity_phase1_workspace
 
 
+def _rewrite_embedding_model_key(*, ws, model_key: str) -> None:  # type: ignore[no-untyped-def]
+    ws.conn.execute(
+        """
+        UPDATE face_embedding
+        SET model_key = ?
+        WHERE feature_type = 'face'
+        """,
+        (str(model_key),),
+    )
+    ws.conn.execute(
+        """
+        UPDATE identity_threshold_profile
+        SET embedding_model_key = ?
+        WHERE active = 1
+        """,
+        (str(model_key),),
+    )
+    ws.conn.execute(
+        """
+        UPDATE identity_observation_profile
+        SET embedding_model_key = ?
+        WHERE id = ?
+        """,
+        (str(model_key), int(ws.observation_profile_id)),
+    )
+    ws.conn.commit()
+
+
 def test_execute_run_persists_lineage_member_roles_and_resolution_states(tmp_path: Path) -> None:
     ws = build_identity_phase1_workspace(tmp_path / "cluster-execute")
     try:
@@ -66,6 +94,66 @@ def test_execute_run_persists_gate_metrics_and_discard_reason_alignment(tmp_path
         )
         ws.assert_final_gate_metrics_frozen_before_attachment(run_id=int(run["run_id"]))
         ws.assert_cluster_discard_reason_equals_resolution_reason(run_id=int(run["run_id"]))
+    finally:
+        ws.close()
+
+
+def test_execute_run_uses_snapshot_embedding_model_key_instead_of_hardcoded_insightface(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "cluster-non-insightface-model")
+    try:
+        ws.seed_split_and_attachment_case()
+        _rewrite_embedding_model_key(ws=ws, model_key="MockArcFace@retinaface")
+        snapshot = ws.new_observation_snapshot_service().build_snapshot(
+            observation_profile_id=ws.observation_profile_id,
+            candidate_knn_limit=24,
+        )
+
+        run = ws.new_cluster_run_service().execute_run(
+            observation_snapshot_id=int(snapshot["snapshot_id"]),
+            cluster_profile_id=ws.cluster_profile_id,
+            supersedes_run_id=None,
+            select_as_review_target=True,
+        )
+
+        assert run["run_status"] == "succeeded"
+        assert ws.count_clusters(run_id=int(run["run_id"])) > 0
+    finally:
+        ws.close()
+
+
+def test_execute_run_reports_progress_events_with_total_completed_percent(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "cluster-progress")
+    try:
+        ws.seed_split_and_attachment_case()
+        snapshot = ws.new_observation_snapshot_service().build_snapshot(
+            observation_profile_id=ws.observation_profile_id,
+            candidate_knn_limit=24,
+        )
+        events: list[dict[str, object]] = []
+
+        run = ws.new_cluster_run_service().execute_run(
+            observation_snapshot_id=int(snapshot["snapshot_id"]),
+            cluster_profile_id=ws.cluster_profile_id,
+            supersedes_run_id=None,
+            select_as_review_target=False,
+            progress_reporter=events.append,
+        )
+
+        assert run["run_status"] == "succeeded"
+        assert events
+        assert any(
+            str(event.get("phase")) == "cluster_run" and str(event.get("subphase")) == "build_raw_neighbors"
+            for event in events
+        )
+        assert any(
+            str(event.get("phase")) == "cluster_run" and str(event.get("subphase")) == "persist_final_clusters"
+            for event in events
+        )
+        assert all("total_count" in event for event in events)
+        assert all("completed_count" in event for event in events)
+        assert all("percent" in event for event in events)
+        assert all(int(event["completed_count"]) <= int(event["total_count"]) for event in events)
+        assert any(int(event["completed_count"]) == int(event["total_count"]) for event in events)
     finally:
         ws.close()
 

@@ -40,6 +40,151 @@ def _count(conn: sqlite3.Connection, sql: str, params: tuple[int, ...]) -> int:
     return int(row["c"])
 
 
+def test_build_snapshot_script_prints_throttled_progress_logs(tmp_path: Path, monkeypatch, capsys) -> None:
+    module = _load_script_module(
+        "build_identity_observation_snapshot.py",
+        "task6_build_identity_observation_snapshot_script_progress_logs",
+    )
+    clock = {"now": 0.0}
+
+    class _FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return float(clock["now"])
+
+    class _FakeOrchestrator:
+        def __init__(self, workspace: Path) -> None:
+            self.workspace = Path(workspace)
+
+        def build_snapshot(
+            self,
+            *,
+            observation_profile_id: int | None,
+            candidate_knn_limit: int,
+            progress_reporter=None,
+        ) -> dict[str, object]:
+            assert observation_profile_id is None
+            assert candidate_knn_limit == 24
+            payloads = [
+                (0.0, {"phase": "quality_backfill", "subphase": "prepare_sharpness", "total_count": 100, "completed_count": 1, "percent": 1.0}),
+                (5.0, {"phase": "quality_backfill", "subphase": "prepare_sharpness", "total_count": 100, "completed_count": 20, "percent": 20.0}),
+                (10.0, {"phase": "quality_backfill", "subphase": "prepare_sharpness", "total_count": 100, "completed_count": 30, "percent": 30.0}),
+                (19.9, {"phase": "snapshot_pooling", "subphase": "deduplicate", "total_count": 100, "completed_count": 40, "percent": 40.0}),
+                (20.0, {"phase": "snapshot_pooling", "subphase": "deduplicate", "total_count": 100, "completed_count": 50, "percent": 50.0}),
+            ]
+            for now, payload in payloads:
+                clock["now"] = now
+                if progress_reporter is not None:
+                    progress_reporter(dict(payload))
+            return {
+                "snapshot_id": 7,
+                "reused": False,
+                "pool_counts": {"core_discovery": 1, "attachment": 1, "excluded": 0},
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "time", _FakeTime, raising=False)
+    monkeypatch.setattr(module, "IdentityBootstrapOrchestrator", _FakeOrchestrator)
+
+    rc = module.main(["--workspace", str(tmp_path), "--candidate-knn-limit", "24"])
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    progress_lines = [line for line in captured.out.splitlines() if line.startswith("identity snapshot 进度:")]
+    assert len(progress_lines) == 3
+    assert "phase=quality_backfill" in progress_lines[0]
+    assert "total=100" in progress_lines[0]
+    assert "completed=1" in progress_lines[0]
+    assert "percent=1.0%" in progress_lines[0]
+    assert "completed=30" in progress_lines[1]
+    assert "completed=50" in progress_lines[2]
+
+
+def test_rerun_script_prints_throttled_progress_logs(tmp_path: Path, monkeypatch, capsys) -> None:
+    module = _load_script_module(
+        "rerun_identity_cluster_run.py",
+        "task6_rerun_identity_cluster_run_script_progress_logs",
+    )
+    clock = {"now": 0.0}
+
+    class _FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return float(clock["now"])
+
+    class _FakeOrchestrator:
+        def __init__(self, workspace: Path) -> None:
+            self.workspace = Path(workspace)
+
+        def rerun_cluster_run(
+            self,
+            *,
+            snapshot_id: int,
+            cluster_profile_id: int | None,
+            supersedes_run_id: int | None,
+            select_as_review_target: bool,
+            progress_reporter=None,
+        ) -> dict[str, object]:
+            assert snapshot_id == 9
+            assert cluster_profile_id == 12
+            assert supersedes_run_id == 5
+            assert select_as_review_target is True
+            assert progress_reporter is not None
+            payloads = [
+                (0.0, {"phase": "cluster_run", "subphase": "build_raw_clusters", "total_count": 100, "completed_count": 1, "percent": 1.0}),
+                (5.0, {"phase": "cluster_run", "subphase": "build_raw_clusters", "total_count": 100, "completed_count": 20, "percent": 20.0}),
+                (10.0, {"phase": "cluster_run", "subphase": "build_raw_clusters", "total_count": 100, "completed_count": 30, "percent": 30.0}),
+                (19.9, {"phase": "prepare_run", "subphase": "prepare_candidates", "total_count": 100, "completed_count": 40, "percent": 40.0}),
+                (20.0, {"phase": "prepare_run", "subphase": "prepare_candidates", "total_count": 100, "completed_count": 50, "percent": 50.0}),
+            ]
+            for now, payload in payloads:
+                clock["now"] = now
+                progress_reporter(dict(payload))
+            return {
+                "snapshot_id": 9,
+                "cluster_profile_id": 12,
+                "run_id": 21,
+                "run_status": "succeeded",
+                "prepared_cluster_count": 7,
+                "candidate_cluster_count": 9,
+                "summary": {"cluster_count": 8},
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(module, "time", _FakeTime, raising=False)
+    monkeypatch.setattr(module, "IdentityBootstrapOrchestrator", _FakeOrchestrator)
+
+    rc = module.main(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--snapshot-id",
+            "9",
+            "--cluster-profile-id",
+            "12",
+            "--supersedes-run-id",
+            "5",
+        ]
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    progress_lines = [line for line in captured.out.splitlines() if line.startswith("identity cluster rerun 进度:")]
+    assert len(progress_lines) == 3
+    assert "phase=cluster_run" in progress_lines[0]
+    assert "subphase=build_raw_clusters" in progress_lines[0]
+    assert "total=100" in progress_lines[0]
+    assert "completed=1" in progress_lines[0]
+    assert "percent=1.0%" in progress_lines[0]
+    assert "completed=30" in progress_lines[1]
+    assert "phase=prepare_run" in progress_lines[2]
+    assert "completed=50" in progress_lines[2]
+
+
 def _create_second_cluster_profile(ws) -> int:  # type: ignore[no-untyped-def]
     cursor = ws.conn.execute(
         """
@@ -47,6 +192,7 @@ def _create_second_cluster_profile(ws) -> int:  # type: ignore[no-untyped-def]
             profile_name,
             profile_version,
             discovery_knn_k,
+            raw_edge_max_distance,
             density_min_samples,
             raw_cluster_min_size,
             raw_cluster_min_distinct_photo_count,
@@ -83,6 +229,7 @@ def _create_second_cluster_profile(ws) -> int:  # type: ignore[no-untyped-def]
             profile_name || '.variant',
             profile_version || '.variant',
             discovery_knn_k,
+            raw_edge_max_distance,
             density_min_samples,
             raw_cluster_min_size,
             raw_cluster_min_distinct_photo_count,

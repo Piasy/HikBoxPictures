@@ -63,11 +63,13 @@ class IdentityClusterRepo:
                    COALESCE(pe.quality_score_snapshot, fo.quality_score, 0.0) AS quality_score,
                    fe.vector_blob
             FROM identity_observation_pool_entry AS pe
+            JOIN identity_observation_snapshot AS s ON s.id = pe.snapshot_id
+            JOIN identity_observation_profile AS op ON op.id = s.observation_profile_id
             JOIN face_observation AS fo ON fo.id = pe.observation_id
             JOIN face_embedding AS fe
               ON fe.face_observation_id = pe.observation_id
              AND fe.feature_type = 'face'
-             AND fe.model_key = 'insightface'
+             AND fe.model_key = op.embedding_model_key
              AND fe.normalized = 1
             WHERE pe.snapshot_id = ?
               AND pe.pool_kind = ?

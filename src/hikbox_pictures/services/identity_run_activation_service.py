@@ -31,6 +31,7 @@ class IdentityRunActivationService:
 
     def activate_run(self, *, run_id: int) -> None:
         prepared = self.publish_repo.get_prepared_run_required_with_verified_manifest(int(run_id))
+        embedding_model_key = self.publish_repo.get_run_embedding_model_key(run_id=int(run_id))
         previous_owner = self.publish_repo.get_materialization_owner()
         previous_owner_run_id = int(previous_owner["id"]) if previous_owner is not None else None
         previous_owner_live_snapshot: dict[str, object] | None = None
@@ -69,6 +70,7 @@ class IdentityRunActivationService:
                     run_id=int(run_id),
                     cluster_id=cluster_id,
                     person_id=int(person_id),
+                    model_key=embedding_model_key,
                 )
                 self.publish_repo.mark_cluster_published(
                     cluster_id=cluster_id,

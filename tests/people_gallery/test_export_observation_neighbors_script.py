@@ -144,6 +144,52 @@ def test_export_observation_neighbors_script_accepts_run_and_cluster_arguments(
     assert export_kwargs["observation_ids"] is None
 
 
+def test_export_observation_neighbors_script_accepts_observation_ids_with_run_and_cluster_arguments(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class _StubService:
+        def __init__(self, workspace: Path) -> None:
+            calls["workspace"] = Path(workspace)
+
+        def export(self, **kwargs: object) -> dict[str, Path]:
+            calls["export_kwargs"] = dict(kwargs)
+            output_dir = Path(tmp_path / "script-run-cluster-observation-ids" / "bundle")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            return {
+                "output_dir": output_dir,
+                "index_path": output_dir / "index.html",
+                "manifest_path": output_dir / "manifest.json",
+            }
+
+    monkeypatch.setattr(_SCRIPT_MODULE, "ObservationNeighborExportService", _StubService)
+
+    rc = export_main(
+        [
+            "--workspace",
+            str(tmp_path / "ws"),
+            "--run-id",
+            "101",
+            "--cluster-id",
+            "202",
+            "--observation-ids",
+            "11,22,33",
+            "--output-root",
+            str(tmp_path / "script-run-cluster-observation-ids"),
+        ]
+    )
+
+    assert rc == 0
+    assert calls["workspace"] == Path(tmp_path / "ws")
+    export_kwargs = calls["export_kwargs"]
+    assert isinstance(export_kwargs, dict)
+    assert int(export_kwargs["run_id"]) == 101
+    assert int(export_kwargs["cluster_id"]) == 202
+    assert export_kwargs["observation_ids"] == [11, 22, 33]
+
+
 def test_export_observation_neighbors_script_exports_bundle_and_rounds_html_numbers(
     tmp_path: Path,
 ) -> None:
@@ -240,6 +286,309 @@ def test_export_observation_neighbors_script_exports_bundle_and_rounds_html_numb
         }
         for expected_file in expected_files:
             assert expected_file.is_file()
+    finally:
+        ws.close()
+
+
+def test_export_observation_neighbors_script_exports_cluster_connectivity_paths(
+    tmp_path: Path,
+) -> None:
+    ws = build_identity_seed_workspace(tmp_path / "task9-script-cluster-connectivity")
+    output_root = tmp_path / "script-cluster-connectivity-output"
+    try:
+        obs_a = ws.insert_observation_with_embedding(
+            vector=[1.00, 0.00, 0.00, 0.00],
+            quality_score=0.98,
+            photo_label="graph-a",
+        )
+        obs_b = ws.insert_observation_with_embedding(
+            vector=[0.98, 0.02, 0.00, 0.00],
+            quality_score=0.97,
+            photo_label="graph-b",
+        )
+        obs_c = ws.insert_observation_with_embedding(
+            vector=[0.96, 0.04, 0.00, 0.00],
+            quality_score=0.96,
+            photo_label="graph-c",
+        )
+        obs_d = ws.insert_observation_with_embedding(
+            vector=[0.94, 0.06, 0.00, 0.00],
+            quality_score=0.95,
+            photo_label="graph-d",
+        )
+
+        run_context = _seed_run_context(ws, run_status="succeeded", is_review_target=True)
+        snapshot_id = int(run_context["snapshot_id"])
+        run_id = int(run_context["run_id"])
+
+        for item, quality_score in (
+            (obs_a, 0.98),
+            (obs_b, 0.97),
+            (obs_c, 0.96),
+            (obs_d, 0.95),
+        ):
+            ws.conn.execute(
+                """
+                INSERT INTO identity_observation_pool_entry(
+                    snapshot_id,
+                    observation_id,
+                    pool_kind,
+                    quality_score_snapshot,
+                    diagnostic_json
+                )
+                VALUES (?, ?, 'core_discovery', ?, '{}')
+                """,
+                (snapshot_id, int(item["observation_id"]), float(quality_score)),
+            )
+
+        raw_cluster_id = ws.conn.execute(
+            """
+            INSERT INTO identity_cluster(
+                run_id,
+                cluster_stage,
+                cluster_state,
+                member_count,
+                retained_member_count,
+                core_count,
+                distinct_photo_count,
+                representative_observation_id,
+                summary_json
+            )
+            VALUES (
+                ?, 'raw', 'active', 4, 4, 4, 4, ?, ?
+            )
+            """,
+            (
+                run_id,
+                int(obs_a["observation_id"]),
+                json.dumps(
+                    {
+                        "component_size": 4,
+                        "mutual_knn_edges": [
+                            [int(obs_a["observation_id"]), int(obs_b["observation_id"])],
+                            [int(obs_b["observation_id"]), int(obs_a["observation_id"])],
+                            [int(obs_b["observation_id"]), int(obs_c["observation_id"])],
+                            [int(obs_c["observation_id"]), int(obs_b["observation_id"])],
+                            [int(obs_c["observation_id"]), int(obs_d["observation_id"])],
+                            [int(obs_d["observation_id"]), int(obs_c["observation_id"])],
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        ).lastrowid
+        assert raw_cluster_id is not None
+
+        for item in (obs_a, obs_b, obs_c, obs_d):
+            ws.conn.execute(
+                """
+                INSERT INTO identity_cluster_member(
+                    cluster_id,
+                    observation_id,
+                    source_pool_kind,
+                    quality_score_snapshot,
+                    member_role,
+                    decision_status,
+                    is_representative,
+                    diagnostic_json
+                )
+                VALUES (?, ?, 'core_discovery', 0.95, 'core', 'retained', 0, '{}')
+                """,
+                (int(raw_cluster_id), int(item["observation_id"])),
+            )
+
+        cleaned_cluster_id = ws.conn.execute(
+            """
+            INSERT INTO identity_cluster(
+                run_id,
+                cluster_stage,
+                cluster_state,
+                member_count,
+                retained_member_count,
+                core_count,
+                distinct_photo_count,
+                representative_observation_id,
+                summary_json
+            )
+            VALUES (
+                ?, 'cleaned', 'active', 4, 4, 4, 4, ?, '{"split_applied": false}'
+            )
+            """,
+            (run_id, int(obs_a["observation_id"])),
+        ).lastrowid
+        assert cleaned_cluster_id is not None
+
+        for item in (obs_a, obs_b, obs_c, obs_d):
+            ws.conn.execute(
+                """
+                INSERT INTO identity_cluster_member(
+                    cluster_id,
+                    observation_id,
+                    source_pool_kind,
+                    quality_score_snapshot,
+                    member_role,
+                    decision_status,
+                    is_representative,
+                    diagnostic_json
+                )
+                VALUES (?, ?, 'core_discovery', 0.95, 'core', 'retained', 0, '{}')
+                """,
+                (int(cleaned_cluster_id), int(item["observation_id"])),
+            )
+
+        final_cluster_id = ws.conn.execute(
+            """
+            INSERT INTO identity_cluster(
+                run_id,
+                cluster_stage,
+                cluster_state,
+                member_count,
+                retained_member_count,
+                anchor_core_count,
+                core_count,
+                distinct_photo_count,
+                representative_observation_id,
+                compactness_p90,
+                support_ratio_p50,
+                summary_json
+            )
+            VALUES (
+                ?, 'final', 'active', 4, 4, 2, 2, 4, ?, 0.12, 0.90, '{}'
+            )
+            """,
+            (run_id, int(obs_a["observation_id"])),
+        ).lastrowid
+        assert final_cluster_id is not None
+
+        for index, item in enumerate((obs_a, obs_b, obs_c, obs_d), start=1):
+            member_role = "anchor_core" if index in {1, 4} else "core"
+            ws.conn.execute(
+                """
+                INSERT INTO identity_cluster_member(
+                    cluster_id,
+                    observation_id,
+                    source_pool_kind,
+                    quality_score_snapshot,
+                    member_role,
+                    decision_status,
+                    distance_to_medoid,
+                    support_ratio,
+                    is_selected_trusted_seed,
+                    seed_rank,
+                    is_representative,
+                    diagnostic_json
+                )
+                VALUES (?, ?, 'core_discovery', 0.95, ?, 'retained', 0.10, 0.90, 0, NULL, ?, '{}')
+                """,
+                (
+                    int(final_cluster_id),
+                    int(item["observation_id"]),
+                    member_role,
+                    1 if index == 1 else 0,
+                ),
+            )
+
+        ws.conn.execute(
+            """
+            INSERT INTO identity_cluster_resolution(
+                cluster_id,
+                resolution_state,
+                source_run_id,
+                trusted_seed_count,
+                trusted_seed_candidate_count,
+                trusted_seed_reject_distribution_json,
+                detail_json
+            )
+            VALUES (?, 'review_pending', ?, 0, 0, '{}', '{}')
+            """,
+            (int(final_cluster_id), run_id),
+        )
+        ws.conn.execute(
+            """
+            INSERT INTO identity_cluster_lineage(
+                parent_cluster_id,
+                child_cluster_id,
+                relation_kind,
+                detail_json
+            )
+            VALUES (?, ?, 'carry_over', '{}')
+            """,
+            (int(raw_cluster_id), int(cleaned_cluster_id)),
+        )
+        ws.conn.execute(
+            """
+            INSERT INTO identity_cluster_lineage(
+                parent_cluster_id,
+                child_cluster_id,
+                relation_kind,
+                detail_json
+            )
+            VALUES (?, ?, 'promote', '{}')
+            """,
+            (int(cleaned_cluster_id), int(final_cluster_id)),
+        )
+        ws.conn.commit()
+
+        rc = export_main(
+            [
+                "--workspace",
+                str(ws.root),
+                "--run-id",
+                str(run_id),
+                "--cluster-id",
+                str(final_cluster_id),
+                "--observation-ids",
+                f"{obs_a['observation_id']},{obs_d['observation_id']}",
+                "--output-root",
+                str(output_root),
+            ]
+        )
+
+        assert rc == 0
+        output_dirs = [path for path in output_root.iterdir() if path.is_dir()]
+        assert len(output_dirs) == 1
+        output_dir = output_dirs[0]
+
+        manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["mode"] == "cluster_connectivity"
+        assert int(manifest["run_id"]) == run_id
+        assert int(manifest["cluster_id"]) == int(final_cluster_id)
+        assert int(manifest["graph_scope"]["raw_cluster_id"]) == int(raw_cluster_id)
+        assert manifest["graph_scope"]["raw_cluster_stage"] == "raw"
+        assert [int(item["observation_id"]) for item in manifest["targets"]] == [
+            int(obs_a["observation_id"]),
+            int(obs_d["observation_id"]),
+        ]
+
+        graph_paths = manifest["graph_paths"]
+        assert len(graph_paths) == 1
+        path_payload = graph_paths[0]
+        assert int(path_payload["source_observation_id"]) == int(obs_a["observation_id"])
+        assert int(path_payload["target_observation_id"]) == int(obs_d["observation_id"])
+        assert int(path_payload["hop_count"]) == 3
+        edge_pairs = [
+            (int(edge["from"]["observation_id"]), int(edge["to"]["observation_id"]))
+            for edge in path_payload["edges"]
+        ]
+        assert edge_pairs == [
+            (int(obs_a["observation_id"]), int(obs_b["observation_id"])),
+            (int(obs_b["observation_id"]), int(obs_c["observation_id"])),
+            (int(obs_c["observation_id"]), int(obs_d["observation_id"])),
+        ]
+
+        edge_dir = output_dir / str(path_payload["asset_dir"])
+        assert edge_dir.is_dir()
+        for edge in path_payload["edges"]:
+            for side in ("from", "to"):
+                payload = edge[side]
+                assert (edge_dir / payload["crop_file"]).is_file()
+                assert (edge_dir / payload["preview_file"]).is_file()
+
+        html_text = (output_dir / "index.html").read_text(encoding="utf-8")
+        assert "Cluster 连通路径核对" in html_text
+        assert f"cluster #{int(final_cluster_id)}" in html_text
+        assert f"obs {int(obs_a['observation_id'])}" in html_text
+        assert f"obs {int(obs_d['observation_id'])}" in html_text
     finally:
         ws.close()
 

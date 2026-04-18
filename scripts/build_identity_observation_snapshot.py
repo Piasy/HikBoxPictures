@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 if __package__ in (None, ""):
     script_dir = Path(__file__).resolve().parent
@@ -39,6 +40,36 @@ if __package__ in (None, ""):
 from hikbox_pictures.services.identity_bootstrap_orchestrator import IdentityBootstrapOrchestrator
 
 
+_PROGRESS_LOG_INTERVAL_SECONDS = 10.0
+
+
+class _ThrottledProgressPrinter:
+    def __init__(self) -> None:
+        self._last_emit_at: float | None = None
+
+    def __call__(self, payload: dict[str, object]) -> None:
+        now = time.monotonic()
+        if self._last_emit_at is None or (now - self._last_emit_at) >= _PROGRESS_LOG_INTERVAL_SECONDS:
+            self._emit(payload)
+            self._last_emit_at = now
+
+    def _emit(self, payload: dict[str, object]) -> None:
+        phase = str(payload.get("phase") or "unknown")
+        subphase = str(payload.get("subphase") or "unknown")
+        total = max(0, int(payload.get("total_count") or 0))
+        completed = min(max(0, int(payload.get("completed_count") or 0)), total)
+        percent = 100.0 if total <= 0 else float(payload.get("percent") or 0.0)
+        print(
+            "identity snapshot 进度: "
+            f"phase={phase} "
+            f"subphase={subphase} "
+            f"total={total} "
+            f"completed={completed} "
+            f"percent={percent:.1f}%",
+            flush=True,
+        )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="构建 identity observation snapshot")
     parser.add_argument("--workspace", type=Path, required=True)
@@ -50,11 +81,13 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     orchestrator: IdentityBootstrapOrchestrator | None = None
+    progress_printer = _ThrottledProgressPrinter()
     try:
         orchestrator = IdentityBootstrapOrchestrator(Path(args.workspace))
         summary = orchestrator.build_snapshot(
             observation_profile_id=args.observation_profile_id,
             candidate_knn_limit=int(args.candidate_knn_limit),
+            progress_reporter=progress_printer,
         )
     except Exception as exc:
         print(f"identity snapshot 构建失败: {exc}", file=sys.stderr)

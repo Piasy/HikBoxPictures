@@ -7,6 +7,34 @@ from hikbox_pictures.db.connection import connect_db
 from .fixtures_identity_v3_1 import build_identity_phase1_workspace
 
 
+def _rewrite_embedding_model_key(*, ws, model_key: str) -> None:  # type: ignore[no-untyped-def]
+    ws.conn.execute(
+        """
+        UPDATE face_embedding
+        SET model_key = ?
+        WHERE feature_type = 'face'
+        """,
+        (str(model_key),),
+    )
+    ws.conn.execute(
+        """
+        UPDATE identity_threshold_profile
+        SET embedding_model_key = ?
+        WHERE active = 1
+        """,
+        (str(model_key),),
+    )
+    ws.conn.execute(
+        """
+        UPDATE identity_observation_profile
+        SET embedding_model_key = ?
+        WHERE id = ?
+        """,
+        (str(model_key), int(ws.observation_profile_id)),
+    )
+    ws.conn.commit()
+
+
 def _list_published_person_ids(*, ws, run_id: int) -> list[int]:  # type: ignore[no-untyped-def]
     rows = ws.conn.execute(
         """
@@ -20,6 +48,31 @@ def _list_published_person_ids(*, ws, run_id: int) -> list[int]:  # type: ignore
         (int(run_id),),
     ).fetchall()
     return [int(row["person_id"]) for row in rows]
+
+
+def test_activate_run_supports_non_insightface_embedding_model_key(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "activate-run-non-insightface-model")
+    try:
+        ws.seed_materialize_candidate_case()
+        _rewrite_embedding_model_key(ws=ws, model_key="MockArcFace@retinaface")
+        snapshot = ws.new_observation_snapshot_service().build_snapshot(
+            observation_profile_id=ws.observation_profile_id,
+            candidate_knn_limit=24,
+        )
+        run = ws.new_cluster_run_service().execute_run(
+            observation_snapshot_id=int(snapshot["snapshot_id"]),
+            cluster_profile_id=ws.cluster_profile_id,
+            supersedes_run_id=None,
+            select_as_review_target=True,
+        )
+
+        ws.new_cluster_prepare_service().prepare_run(run_id=int(run["run_id"]))
+        ws.new_run_activation_service().activate_run(run_id=int(run["run_id"]))
+
+        assert ws.get_live_prototype_owner_run_id() == int(run["run_id"])
+        assert ws.get_live_ann_owner_run_id() == int(run["run_id"])
+    finally:
+        ws.close()
 
 
 def test_activate_run_switches_owner_and_live_assignment_seed_prototype_ann(tmp_path: Path) -> None:

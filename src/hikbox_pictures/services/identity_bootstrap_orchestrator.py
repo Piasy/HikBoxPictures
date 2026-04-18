@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ class IdentityBootstrapOrchestrator:
         *,
         observation_profile_id: int | None,
         candidate_knn_limit: int,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, Any]:
         resolved_profile_id = int(observation_profile_id) if observation_profile_id is not None else int(
             IdentityObservationProfileService(self.conn).get_active_profile_id()
@@ -47,6 +49,7 @@ class IdentityBootstrapOrchestrator:
         ).build_snapshot(
             observation_profile_id=resolved_profile_id,
             candidate_knn_limit=int(candidate_knn_limit),
+            progress_reporter=progress_reporter,
         )
         return {
             **dict(snapshot),
@@ -61,6 +64,7 @@ class IdentityBootstrapOrchestrator:
         cluster_profile_id: int | None,
         supersedes_run_id: int | None,
         select_as_review_target: bool,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, Any]:
         resolved_profile_id = int(cluster_profile_id) if cluster_profile_id is not None else int(
             IdentityClusterProfileService(self.conn).get_active_profile_id()
@@ -73,10 +77,14 @@ class IdentityBootstrapOrchestrator:
             cluster_profile_id=resolved_profile_id,
             supersedes_run_id=int(supersedes_run_id) if supersedes_run_id is not None else None,
             select_as_review_target=bool(select_as_review_target),
+            progress_reporter=progress_reporter,
         )
         run_id = int(run_result["run_id"])
 
-        prepare_result = self._new_prepare_service().prepare_run(run_id=run_id)
+        prepare_result = self._new_prepare_service().prepare_run(
+            run_id=run_id,
+            progress_reporter=progress_reporter,
+        )
         return {
             "snapshot_id": int(snapshot_id),
             "cluster_profile_id": int(resolved_profile_id),

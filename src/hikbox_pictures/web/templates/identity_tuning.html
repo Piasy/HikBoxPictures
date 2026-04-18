@@ -1,4 +1,45 @@
 {% extends "base.html" %}
+{% macro render_member_cards(title, members) %}
+{% if members %}
+<section class="identity-review-member-section">
+  <h5>{{ title }}（{{ members|length }}）</h5>
+  <div class="identity-observation-grid">
+    {% for member in members %}
+    <figure class="identity-observation-card">
+      <div class="identity-observation-media-grid">
+        <img class="identity-observation-preview-image" src="{{ member.preview_url }}" alt="observation {{ member.observation_id }} 原图预览" loading="lazy" />
+        <img class="identity-observation-crop-image" src="{{ member.crop_url }}" alt="observation {{ member.observation_id }} 人脸裁剪" loading="lazy" />
+      </div>
+      <figcaption>
+        <div class="identity-member-meta">
+          <strong>obs #{{ member.observation_id }}</strong>
+          <span class="identity-member-chip">{{ member.member_role }}</span>
+          <span class="identity-member-chip">{{ member.decision_status }}</span>
+          {% if member.is_representative %}
+          <span class="identity-member-chip">representative</span>
+          {% endif %}
+          {% if member.is_selected_trusted_seed %}
+          <span class="identity-member-chip">seed #{{ member.seed_rank }}</span>
+          {% endif %}
+        </div>
+        <div class="identity-member-metrics">
+          <p>photo #{{ member.photo_asset_id }} / pool={{ member.source_pool_kind }}</p>
+          <p>
+            quality={{ "%.2f"|format(member.quality_score_snapshot or 0.0) }}
+            / support={{ "%.2f"|format(member.support_ratio or 0.0) }}
+            / distance={{ "%.2f"|format(member.distance_to_medoid or 0.0) }}
+          </p>
+          {% if member.decision_reason_code %}
+          <p>reason={{ member.decision_reason_code }}</p>
+          {% endif %}
+        </div>
+      </figcaption>
+    </figure>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+{% endmacro %}
 {% block content %}
 <section class="identity-tuning-page">
   <header class="panel identity-tuning-hero">
@@ -62,10 +103,17 @@
           <pre class="identity-json-block">{{ cluster.lineage | tojson(indent=2) }}</pre>
         </details>
 
+        {% if cluster.resolution.resolution_state in ["review_pending", "materialized"] %}
+        <details class="identity-review-member-panel" data-review-cluster-id="{{ cluster.cluster_id }}">
+          <summary>review 成员（保留 {{ cluster.members.retained|length }} / 排除 {{ cluster.members.excluded|length }}）</summary>
+          <p class="summary">同时展示原图 preview 和人脸 crop，便于核对 retained / excluded 判定。</p>
+          {{ render_member_cards("retained", cluster.members.retained) }}
+          {{ render_member_cards("excluded", cluster.members.excluded) }}
+        </details>
+        {% endif %}
+
         <details>
-          <summary>
-            members（代表 {{ cluster.members.representative|length }} / 保留 {{ cluster.members.retained|length }} / 排除 {{ cluster.members.excluded|length }}）
-          </summary>
+          <summary>members 原始 JSON（代表 {{ cluster.members.representative|length }} / 保留 {{ cluster.members.retained|length }} / 排除 {{ cluster.members.excluded|length }}）</summary>
           <div class="identity-member-groups">
             <div>
               <h4>representative</h4>
@@ -89,7 +137,7 @@
       {% endfor %}
     </ul>
     {% else %}
-    <p class="summary">当前 run 没有 final cluster。</p>
+    <p class="summary">当前 run 没有可 review 的 final cluster。</p>
     {% endif %}
   </section>
 </section>

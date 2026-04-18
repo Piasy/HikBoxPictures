@@ -32,6 +32,7 @@ class _NoopBackfillService:
         profile_id: int,
         update_profile_quantiles: bool = False,
         allow_legacy_profile: bool = True,
+        progress_reporter=None,
     ) -> dict[str, int | float]:
         self._owner.backfill_call_count += 1
         return {
@@ -363,6 +364,16 @@ class IdentityPhase1Workspace:
     def seed_split_and_attachment_case(self) -> None:
         source_id = self._ensure_source()
         self._reset_observations()
+        self.conn.execute(
+            """
+            UPDATE identity_cluster_profile
+            SET discovery_knn_k = 24,
+                raw_edge_max_distance = 1.0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (int(self.cluster_profile_id),),
+        )
 
         specs = [
             ("split-a1.jpg", 0, [1.000, 0.000, 0.000, 0.000], 0.94, 0.95, "diag"),
@@ -419,6 +430,16 @@ class IdentityPhase1Workspace:
     def seed_known_topology_case(self) -> None:
         source_id = self._ensure_source()
         self._reset_observations()
+        self.conn.execute(
+            """
+            UPDATE identity_cluster_profile
+            SET discovery_knn_k = 24,
+                raw_edge_max_distance = 1.0,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (int(self.cluster_profile_id),),
+        )
 
         specs = [
             ("known-a1.jpg", 0, [1.00, 0.00, 0.00, 0.00], 0.95, 0.95, "diag"),
@@ -444,6 +465,32 @@ class IdentityPhase1Workspace:
             )
             self._insert_embedding(obs_id, np.asarray(vector, dtype=np.float32))
         self.conn.commit()
+
+    def seed_raw_edge_threshold_case(self) -> dict[str, int]:
+        source_id = self._ensure_source()
+        self._reset_observations()
+
+        specs = [
+            ("raw-a1", "raw-a1.jpg", 0, [1.000, 0.000, 0.000, 0.000], "diag"),
+            ("raw-a2", "raw-a2.jpg", 10, [0.980, 0.200, 0.000, 0.000], "diag"),
+            ("raw-b1", "raw-b1.jpg", 20, [0.000, 1.000, 0.000, 0.000], "stripe"),
+            ("raw-b2", "raw-b2.jpg", 30, [0.200, 0.980, 0.000, 0.000], "stripe"),
+        ]
+        observation_ids: dict[str, int] = {}
+        for index, (key, file_name, capture_second, vector, pattern) in enumerate(specs, start=1):
+            image_path = self._make_image(file_name, pattern=pattern)
+            photo_id = self._insert_photo(source_id, image_path, capture_second=capture_second)
+            obs_id = self._insert_observation(
+                photo_id,
+                bbox=(0.10, 0.40, 0.40, 0.10),
+                area_ratio=0.18 + float(index) * 0.01,
+                pose=0.92,
+                quality=0.90,
+            )
+            self._insert_embedding(obs_id, np.asarray(vector, dtype=np.float32))
+            observation_ids[key] = int(obs_id)
+        self.conn.commit()
+        return observation_ids
 
     def seed_materialize_candidate_case(self) -> None:
         self.seed_split_and_attachment_case()

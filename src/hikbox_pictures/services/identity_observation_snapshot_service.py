@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 from hikbox_pictures.repositories.identity_observation_repo import IdentityObservationRepo
@@ -25,12 +26,14 @@ class IdentityObservationSnapshotService:
         *,
         observation_profile_id: int,
         candidate_knn_limit: int,
+        progress_reporter: Callable[[dict[str, object]], None] | None = None,
     ) -> dict[str, Any]:
         profile = self.observation_repo.get_observation_profile_required(observation_profile_id)
         self.quality_backfill_service.backfill_all_observations(
             profile_id=observation_profile_id,
             update_profile_quantiles=False,
             allow_legacy_profile=False,
+            progress_reporter=progress_reporter,
         )
         dataset_hash = self.observation_repo.compute_observation_dataset_hash(
             model_key=str(profile["embedding_model_key"])
@@ -65,6 +68,7 @@ class IdentityObservationSnapshotService:
             pool_counts = self.observation_repo.populate_snapshot_entries(
                 snapshot_id=snapshot_id,
                 observation_profile_id=observation_profile_id,
+                progress_reporter=progress_reporter,
             )
             self.conn.commit()
         except Exception as exc:

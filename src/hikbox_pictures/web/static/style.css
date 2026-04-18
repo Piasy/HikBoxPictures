@@ -310,6 +310,56 @@ body {
   color: var(--muted);
 }
 
+.identity-review-member-panel {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.identity-review-member-panel summary,
+.identity-review-member-section h5 {
+  margin: 0;
+}
+
+.identity-review-member-panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.identity-review-member-section {
+  display: grid;
+  gap: 8px;
+}
+
+.identity-member-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.identity-member-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #edf5ee;
+  color: #26432d;
+  font-size: 12px;
+}
+
+.identity-member-metrics {
+  display: grid;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.identity-member-metrics p {
+  margin: 0;
+}
+
 .identity-preview-layout {
   display: grid;
   gap: 12px;

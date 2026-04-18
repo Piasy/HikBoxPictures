@@ -4,6 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from hikbox_pictures.repositories.identity_observation_repo import IdentityObservationRepo
+from hikbox_pictures.services.identity_observation_snapshot_service import (
+    ALGORITHM_VERSION,
+    IdentityObservationSnapshotService,
+)
+
 from .fixtures_identity_v3_1 import build_identity_phase1_workspace
 
 
@@ -238,5 +244,136 @@ def test_snapshot_build_marks_failed_when_population_errors(tmp_path: Path, monk
         ).fetchone()
         assert pool_entry_count is not None
         assert int(pool_entry_count["c"]) == 0
+    finally:
+        ws.close()
+
+
+def test_snapshot_build_forwards_progress_reporter_to_backfill_and_pooling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "snapshot-build-progress-forwarding")
+    try:
+        ws.seed_observation_mix_case()
+        events: list[dict[str, object]] = []
+
+        class _RecordingBackfillService:
+            def backfill_all_observations(
+                self,
+                *,
+                profile_id: int,
+                update_profile_quantiles: bool = False,
+                allow_legacy_profile: bool = True,
+                progress_reporter=None,
+            ) -> dict[str, int | float]:
+                assert profile_id == ws.observation_profile_id
+                if progress_reporter is not None:
+                    progress_reporter(
+                        {
+                            "phase": "quality_backfill",
+                            "subphase": "write_scores",
+                            "total_count": 9,
+                            "completed_count": 9,
+                            "percent": 100.0,
+                        }
+                    )
+                return {
+                    "updated_observation_count": 9,
+                    "area_log_p10": 0.0,
+                    "area_log_p90": 0.0,
+                    "sharpness_log_p10": 0.0,
+                    "sharpness_log_p90": 0.0,
+                }
+
+        service = IdentityObservationSnapshotService(
+            ws.conn,
+            observation_repo=IdentityObservationRepo(ws.conn),
+            quality_backfill_service=_RecordingBackfillService(),
+        )
+        original_populate = service.observation_repo.populate_snapshot_entries
+
+        def _wrapped_populate(**kwargs):
+            progress_reporter = kwargs.get("progress_reporter")
+            assert progress_reporter is not None
+            progress_reporter(
+                {
+                    "phase": "snapshot_pooling",
+                    "subphase": "insert_entries",
+                    "total_count": 9,
+                    "completed_count": 9,
+                    "percent": 100.0,
+                }
+            )
+            return original_populate(
+                snapshot_id=int(kwargs["snapshot_id"]),
+                observation_profile_id=int(kwargs["observation_profile_id"]),
+            )
+
+        monkeypatch.setattr(service.observation_repo, "populate_snapshot_entries", _wrapped_populate)
+
+        service.build_snapshot(
+            observation_profile_id=ws.observation_profile_id,
+            candidate_knn_limit=24,
+            progress_reporter=events.append,
+        )
+
+        assert [str(item["phase"]) for item in events] == ["quality_backfill", "snapshot_pooling"]
+        assert int(events[-1]["total_count"]) == 9
+        assert int(events[-1]["completed_count"]) == 9
+        assert float(events[-1]["percent"]) == 100.0
+    finally:
+        ws.close()
+
+
+def test_populate_snapshot_entries_reports_total_completed_and_percent(tmp_path: Path) -> None:
+    ws = build_identity_phase1_workspace(tmp_path / "snapshot-pool-progress")
+    try:
+        ws.seed_observation_mix_case()
+        repo = IdentityObservationRepo(ws.conn)
+        profile = repo.get_observation_profile_required(ws.observation_profile_id)
+        snapshot_id = repo.create_snapshot(
+            observation_profile_id=ws.observation_profile_id,
+            dataset_hash=repo.compute_observation_dataset_hash(model_key=str(profile["embedding_model_key"])),
+            candidate_policy_hash=repo.compute_candidate_policy_hash(
+                profile_id=ws.observation_profile_id,
+                candidate_knn_limit=24,
+            ),
+            max_knn_supported=24,
+            algorithm_version=ALGORITHM_VERSION,
+        )
+        ws.conn.commit()
+        events: list[dict[str, object]] = []
+
+        pool_counts = repo.populate_snapshot_entries(
+            snapshot_id=snapshot_id,
+            observation_profile_id=ws.observation_profile_id,
+            progress_reporter=events.append,
+        )
+
+        total_entries = sum(int(value) for value in pool_counts.values())
+        for subphase in (
+            "classify_candidates",
+            "deduplicate_same_photo",
+            "deduplicate_global",
+            "insert_entries",
+        ):
+            subphase_events = [
+                item
+                for item in events
+                if item.get("phase") == "snapshot_pooling" and item.get("subphase") == subphase
+            ]
+            assert subphase_events, f"缺少进度事件: {subphase}"
+            final = subphase_events[-1]
+            assert int(final["total_count"]) == int(final["completed_count"]), subphase
+            assert float(final["percent"]) == 100.0, subphase
+
+        insert_events = [
+            item
+            for item in events
+            if item.get("phase") == "snapshot_pooling" and item.get("subphase") == "insert_entries"
+        ]
+        final_insert = insert_events[-1]
+        assert int(final_insert["total_count"]) == total_entries
+        assert int(final_insert["completed_count"]) == total_entries
     finally:
         ws.close()
