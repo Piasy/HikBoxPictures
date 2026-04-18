@@ -1059,7 +1059,7 @@ Expected: PASS。
 - Create: `src/hikbox_experiments/identity_v3_1/export_service.py`
 - Create: `tests/people_gallery/test_identity_v3_1_export_service.py`
 
-- [ ] **Step 1: 先写导出服务测试，锁定 bundle 结构、manifest 字段和 HTML 区块**
+- [x] **Step 1: 先写导出服务测试，锁定 bundle 结构、manifest 字段和 HTML 区块**
 
 在 `tests/people_gallery/test_identity_v3_1_export_service.py` 先写失败测试，至少覆盖：
 
@@ -1332,7 +1332,7 @@ def test_export_service_renders_full_html_sections_not_shells(tmp_path: Path) ->
   - `preview_paths_by_photo_id: dict[int, Path]`（key = `photo_id`）
   导出后断言 bundle 内对应 `crop/context/preview` 文件字节与这些源 artifact 完全一致，禁止用空白图或硬编码占位图混过测试
 
-- [ ] **Step 2: 运行导出服务测试，确认导出服务尚未存在**
+- [x] **Step 2: 运行导出服务测试，确认导出服务尚未存在**
 
 Run:
 
@@ -1343,7 +1343,7 @@ PYTHONPATH=src python -m pytest tests/people_gallery/test_identity_v3_1_export_s
 
 Expected: FAIL，报 `ModuleNotFoundError` 或 `AttributeError`。
 
-- [ ] **Step 3: 实现 `IdentityV31ReportExportService`，生成单页 HTML、manifest 和自包含 assets**
+- [x] **Step 3: 实现 `IdentityV31ReportExportService`，生成单页 HTML、manifest 和自包含 assets**
 
 实现要求：
 
@@ -1430,7 +1430,7 @@ Expected: FAIL，报 `ModuleNotFoundError` 或 `AttributeError`。
 }
 ```
 
-- [ ] **Step 4: 回跑导出服务测试，确认 bundle 已可离线打开且具备软失败记录**
+- [x] **Step 4: 回跑导出服务测试，确认 bundle 已可离线打开且具备软失败记录**
 
 Run:
 
