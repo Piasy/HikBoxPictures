@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hikbox-pictures"
+version = "0.1.0"
+description = "Find photos that contain two specific people and export them by month."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "deepface>=0.0.93",
+  "insightface>=0.7.3",
+  "hdbscan>=0.8.39",
+  "torch>=2.1.0",
+  "onnxruntime>=1.18.0",
+  "onnx>=1.16.0",
+  "fastapi>=0.116.0",
+  "jinja2>=3.1.6",
+  "hnswlib>=0.8.0",
+  "tf-keras>=2.21.0",
+  "numpy>=1.26.0",
+  "Pillow>=10.0.0",
+  "pillow-heif>=0.18.0",
+  "uvicorn>=0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "httpx>=0.28.0",
+  "playwright>=1.54.0",
+]
+
+[project.scripts]
+hikbox-pictures = "hikbox_pictures.cli:cli_entry"
+hikbox-face-review = "hikbox_pictures.face_review_pipeline:main"
+
+[tool.setuptools.package-data]
+hikbox_pictures = [
+  "web/templates/*.html",
+  "web/static/*",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "real_face_engine: 使用真实 DeepFace 引擎执行测试",
+]
