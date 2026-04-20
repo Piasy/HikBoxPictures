@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from hikbox_pictures.face_review_pipeline import (
+    attach_noise_faces_to_clusters,
     group_faces_by_cluster,
     iter_embedded_faces,
     iter_faces_pending_embedding,
@@ -209,6 +210,56 @@ def test_merge_clusters_to_persons_same_photo_cannot_link_is_optional() -> None:
     assert all(item["person_cluster_count"] == 1 for item in persons_enabled)
 
 
+def test_attach_noise_faces_to_clusters_attaches_clear_nearest_cluster() -> None:
+    faces = [
+        {"face_id": "a0", "embedding": [1.0, 0.0], "quality_score": 0.95},
+        {"face_id": "a1", "embedding": [0.998, 0.06], "quality_score": 0.90},
+        {"face_id": "b0", "embedding": [0.0, 1.0], "quality_score": 0.94},
+        {"face_id": "b1", "embedding": [0.06, 0.998], "quality_score": 0.91},
+        {"face_id": "n0", "embedding": [0.989, 0.147], "quality_score": 0.88},
+    ]
+    labels = [0, 0, 1, 1, -1]
+    probabilities = [0.99, 0.98, 0.97, 0.96, 0.0]
+
+    attached_labels, attached_probabilities, attached_count = attach_noise_faces_to_clusters(
+        faces=faces,
+        labels=labels,
+        probabilities=probabilities,
+        rep_top_k=2,
+        distance_threshold=0.20,
+        margin_threshold=0.04,
+    )
+
+    assert attached_count == 1
+    assert attached_labels == [0, 0, 1, 1, 0]
+    assert attached_probabilities[-1] is None
+
+
+def test_attach_noise_faces_to_clusters_keeps_ambiguous_noise_unassigned() -> None:
+    faces = [
+        {"face_id": "a0", "embedding": [1.0, 0.0], "quality_score": 0.95},
+        {"face_id": "a1", "embedding": [0.998, 0.06], "quality_score": 0.90},
+        {"face_id": "b0", "embedding": [0.0, 1.0], "quality_score": 0.94},
+        {"face_id": "b1", "embedding": [0.06, 0.998], "quality_score": 0.91},
+        {"face_id": "n0", "embedding": [0.72, 0.69], "quality_score": 0.88},
+    ]
+    labels = [0, 0, 1, 1, -1]
+    probabilities = [0.99, 0.98, 0.97, 0.96, 0.0]
+
+    attached_labels, attached_probabilities, attached_count = attach_noise_faces_to_clusters(
+        faces=faces,
+        labels=labels,
+        probabilities=probabilities,
+        rep_top_k=2,
+        distance_threshold=0.40,
+        margin_threshold=0.04,
+    )
+
+    assert attached_count == 0
+    assert attached_labels == labels
+    assert attached_probabilities == probabilities
+
+
 def test_render_review_html_has_two_stage_collapsible_sections() -> None:
     payload = {
         "meta": {"model": "MagFace", "clusterer": "HDBSCAN", "person_clusterer": "AHC", "person_count": 1},
@@ -365,6 +416,92 @@ def test_run_cluster_stage_can_merge_split_micro_clusters(tmp_path: Path, monkey
     for cluster in payload["persons"][0]["clusters"]:
         for member in cluster["members"]:
             assert "embedding" not in member
+
+
+def test_run_cluster_stage_can_attach_noise_face_after_hdbscan(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "out"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "dummy.jpg").write_bytes(b"x")
+
+    db_path = output_dir / "cache" / "pipeline.db"
+    conn = open_pipeline_db(db_path)
+    rows = [
+        {
+            "face_id": "a_000",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_000.jpg",
+            "context_relpath": "assets/context/a_000.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_000.png",
+            "bbox": [1, 2, 3, 4],
+            "detector_confidence": 0.95,
+            "face_area_ratio": 0.032,
+        },
+        {
+            "face_id": "a_001",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_001.jpg",
+            "context_relpath": "assets/context/a_001.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_001.png",
+            "bbox": [5, 6, 7, 8],
+            "detector_confidence": 0.94,
+            "face_area_ratio": 0.030,
+        },
+        {
+            "face_id": "n_000",
+            "photo_relpath": "album/n.jpg",
+            "crop_relpath": "assets/crops/n_000.jpg",
+            "context_relpath": "assets/context/n_000.jpg",
+            "preview_relpath": "assets/preview/n.jpg",
+            "aligned_relpath": "assets/aligned/n_000.png",
+            "bbox": [11, 12, 13, 14],
+            "detector_confidence": 0.91,
+            "face_area_ratio": 0.028,
+        },
+    ]
+    for row in rows:
+        upsert_detected_face(conn, row)
+
+    mark_face_embedded(conn, "a_000", embedding=[1.0, 0.0], magface_quality=12.3, quality_score=0.95)
+    mark_face_embedded(conn, "a_001", embedding=[0.997, 0.077], magface_quality=12.0, quality_score=0.92)
+    mark_face_embedded(conn, "n_000", embedding=[0.989, 0.147], magface_quality=11.8, quality_score=0.90)
+    set_meta(conn, "max_images", 1)
+    conn.close()
+
+    def fake_cluster(embeddings, min_cluster_size, min_samples):
+        assert len(embeddings) == 3
+        return [0, 0, -1], [0.99, 0.98, 0.0]
+
+    monkeypatch.setattr("hikbox_pictures.face_review_pipeline._cluster_with_hdbscan", fake_cluster)
+
+    payload = run_cluster_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        detector_model_name="buffalo_l",
+        det_size=640,
+        min_cluster_size=3,
+        min_samples=1,
+        person_merge_threshold=0.03,
+        person_rep_top_k=2,
+        person_knn_k=2,
+        person_linkage="average",
+        person_enable_same_photo_cannot_link=False,
+        preview_max_side=480,
+        magface_checkpoint=Path(".cache/magface/magface_iresnet100_ms1mv2.pth"),
+        noise_attach_distance_threshold=0.20,
+        noise_attach_margin_threshold=0.04,
+        noise_attach_rep_top_k=2,
+    )
+
+    assert payload["meta"]["noise_count"] == 0
+    assert payload["meta"]["noise_attach_count"] == 1
+    assert payload["meta"]["noise_attach_distance_threshold"] == 0.20
+    assert payload["clusters"][0]["cluster_label"] == 0
+    assert len(payload["clusters"][0]["members"]) == 3
+    assert payload["clusters"][0]["members"][2]["face_id"] == "n_000"
+    assert payload["clusters"][0]["members"][2]["cluster_probability"] is None
 
 
 def test_sqlite_roundtrip_for_two_phase_pipeline(tmp_path: Path) -> None:

@@ -290,14 +290,14 @@ def count_pending_faces(conn: sqlite3.Connection) -> int:
     return int(row["c"])
 
 
-def update_cluster_result(conn: sqlite3.Connection, face_id: str, label: int, probability: float) -> None:
+def update_cluster_result(conn: sqlite3.Connection, face_id: str, label: int, probability: float | None) -> None:
     conn.execute(
         """
         UPDATE detected_faces
         SET cluster_label=?, cluster_probability=?, updated_at=CURRENT_TIMESTAMP
         WHERE face_id=?
         """,
-        (int(label), float(probability), face_id),
+        (int(label), None if probability is None else float(probability), face_id),
     )
     conn.commit()
 
@@ -461,6 +461,82 @@ def _build_cluster_representative(cluster: dict[str, Any], rep_top_k: int) -> np
     weights_np = np.asarray(weights, dtype=np.float32)
     weighted_sum = np.sum(vectors_np * weights_np[:, None], axis=0)
     return _normalize_embedding(weighted_sum)
+
+
+def attach_noise_faces_to_clusters(
+    faces: list[dict[str, Any]],
+    labels: list[int],
+    probabilities: list[float | None],
+    rep_top_k: int,
+    distance_threshold: float,
+    margin_threshold: float,
+) -> tuple[list[int], list[float | None], int]:
+    if len(faces) != len(labels) or len(faces) != len(probabilities):
+        raise ValueError("faces、labels、probabilities 数量不一致")
+
+    if distance_threshold <= 0:
+        return list(labels), list(probabilities), 0
+
+    grouped_clusters = group_faces_by_cluster(faces=faces, labels=labels)
+    normal_clusters = [cluster for cluster in grouped_clusters if int(cluster.get("cluster_label", -1)) != -1]
+    if not normal_clusters:
+        return list(labels), list(probabilities), 0
+
+    representatives: list[np.ndarray] = []
+    representative_labels: list[int] = []
+    for cluster in normal_clusters:
+        representative = _build_cluster_representative(cluster, rep_top_k=rep_top_k)
+        if representative is None:
+            continue
+        representatives.append(representative)
+        representative_labels.append(int(cluster.get("cluster_label", -1)))
+
+    if not representatives:
+        return list(labels), list(probabilities), 0
+
+    rep_matrix = np.stack(representatives, axis=0)
+    updated_labels = list(labels)
+    updated_probabilities = list(probabilities)
+    attached_count = 0
+
+    for idx, (face, label) in enumerate(zip(faces, labels, strict=True)):
+        if int(label) != -1:
+            continue
+
+        raw_embedding = face.get("embedding")
+        if not isinstance(raw_embedding, list) or not raw_embedding:
+            continue
+
+        vector = np.asarray(raw_embedding, dtype=np.float32)
+        if vector.ndim != 1:
+            continue
+        vector = _normalize_embedding(vector)
+
+        sims = np.clip(rep_matrix @ vector, -1.0, 1.0)
+        if sims.size <= 0:
+            continue
+
+        best_idx = int(np.argmax(sims))
+        best_sim = float(sims[best_idx])
+        best_dist = 1.0 - best_sim
+
+        if sims.size >= 2:
+            second_sim = float(np.partition(sims, -2)[-2])
+        else:
+            second_sim = -1.0
+        margin = best_sim - second_sim
+
+        if best_dist > float(distance_threshold):
+            continue
+        if margin < float(margin_threshold):
+            continue
+
+        updated_labels[idx] = representative_labels[best_idx]
+        # 这里的回挂置信不是 HDBSCAN 原生 probability，review 中留空避免误解。
+        updated_probabilities[idx] = None
+        attached_count += 1
+
+    return updated_labels, updated_probabilities, attached_count
 
 
 def _pairwise_cosine_distance(vectors: np.ndarray) -> np.ndarray:
@@ -1369,6 +1445,9 @@ def run_cluster_stage(
     person_enable_same_photo_cannot_link: bool,
     preview_max_side: int,
     magface_checkpoint: Path,
+    noise_attach_distance_threshold: float | None = None,
+    noise_attach_margin_threshold: float = 0.04,
+    noise_attach_rep_top_k: int = 3,
 ) -> dict[str, Any]:
     dirs = _ensure_dirs(output_dir, reset_output=False)
     conn = open_pipeline_db(dirs["db"])
@@ -1400,10 +1479,22 @@ def run_cluster_stage(
         min_samples=min_samples,
     )
 
+    noise_attach_count = 0
+    if noise_attach_distance_threshold is not None and noise_attach_distance_threshold > 0:
+        attach_faces = [{**asdict(obs), "bbox": list(obs.bbox)} for obs in observations]
+        labels, probabilities, noise_attach_count = attach_noise_faces_to_clusters(
+            faces=attach_faces,
+            labels=labels,
+            probabilities=probabilities,
+            rep_top_k=noise_attach_rep_top_k,
+            distance_threshold=float(noise_attach_distance_threshold),
+            margin_threshold=float(noise_attach_margin_threshold),
+        )
+
     for obs, label, probability in zip(observations, labels, probabilities, strict=True):
         obs.cluster_label = int(label)
-        obs.cluster_probability = float(probability)
-        update_cluster_result(conn, obs.face_id, int(label), float(probability))
+        obs.cluster_probability = None if probability is None else float(probability)
+        update_cluster_result(conn, obs.face_id, int(label), probability)
 
     face_rows = [{**asdict(obs), "bbox": list(obs.bbox)} for obs in observations]
     face_rows.sort(key=lambda row: (1 if row.get("cluster_label") == -1 else 0, -(row.get("quality_score") or 0.0)))
@@ -1448,6 +1539,10 @@ def run_cluster_stage(
             "noise_count": len(next((c["members"] for c in grouped_clusters if c["cluster_key"] == "noise"), [])),
             "min_cluster_size": min_cluster_size,
             "min_samples": min_samples,
+            "noise_attach_distance_threshold": noise_attach_distance_threshold,
+            "noise_attach_margin_threshold": noise_attach_margin_threshold,
+            "noise_attach_rep_top_k": noise_attach_rep_top_k,
+            "noise_attach_count": noise_attach_count,
             "person_count": len(persons),
             "person_clusterer": "AHC",
             "person_linkage": person_linkage,
@@ -1487,6 +1582,9 @@ def run_pipeline(
     person_linkage: str,
     person_enable_same_photo_cannot_link: bool,
     preview_max_side: int,
+    noise_attach_distance_threshold: float | None,
+    noise_attach_margin_threshold: float,
+    noise_attach_rep_top_k: int,
     max_images: int | None,
     stage: str,
     reset_output: bool,
@@ -1532,6 +1630,9 @@ def run_pipeline(
             person_enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
             preview_max_side=preview_max_side,
             magface_checkpoint=magface_checkpoint,
+            noise_attach_distance_threshold=noise_attach_distance_threshold,
+            noise_attach_margin_threshold=noise_attach_margin_threshold,
+            noise_attach_rep_top_k=noise_attach_rep_top_k,
         )
 
     # all 阶段通过子进程串行执行，确保每个阶段释放内存。
@@ -1567,6 +1668,17 @@ def run_pipeline(
         "--preview-max-side",
         str(preview_max_side),
     ]
+    if noise_attach_distance_threshold is not None:
+        base_cmd.extend(
+            [
+                "--noise-attach-distance-threshold",
+                str(noise_attach_distance_threshold),
+                "--noise-attach-margin-threshold",
+                str(noise_attach_margin_threshold),
+                "--noise-attach-rep-top-k",
+                str(noise_attach_rep_top_k),
+            ]
+        )
     if person_enable_same_photo_cannot_link:
         base_cmd.append("--person-enable-same-photo-cannot-link")
     if max_images is not None:
@@ -1616,6 +1728,24 @@ def _parse_args() -> argparse.Namespace:
         help="开启同图冲突硬约束：同一张图出现过的人脸簇禁止在二阶段合并（默认关闭）",
     )
     parser.add_argument("--preview-max-side", type=int, default=480, help="预览图最长边")
+    parser.add_argument(
+        "--noise-attach-distance-threshold",
+        type=float,
+        default=None,
+        help="一阶段噪声回挂的最大余弦距离；不传则关闭",
+    )
+    parser.add_argument(
+        "--noise-attach-margin-threshold",
+        type=float,
+        default=0.04,
+        help="一阶段噪声回挂时 top1-top2 最小相似度间隔",
+    )
+    parser.add_argument(
+        "--noise-attach-rep-top-k",
+        type=int,
+        default=3,
+        help="一阶段噪声回挂构建微簇代表向量时使用的高质量样本数",
+    )
     parser.add_argument("--max-images", type=int, default=None, help="仅处理前 N 张图片（调试）")
     parser.add_argument("--stage", choices=["all", "detect", "embed", "cluster"], default="all", help="分阶段执行")
     parser.add_argument("--reset-output", action="store_true", help="执行 detect 时先清空输出目录与数据库")
@@ -1639,6 +1769,9 @@ def main() -> int:
         person_linkage=args.person_linkage,
         person_enable_same_photo_cannot_link=args.person_enable_same_photo_cannot_link,
         preview_max_side=args.preview_max_side,
+        noise_attach_distance_threshold=args.noise_attach_distance_threshold,
+        noise_attach_margin_threshold=args.noise_attach_margin_threshold,
+        noise_attach_rep_top_k=args.noise_attach_rep_top_k,
         max_images=args.max_images,
         stage=args.stage,
         reset_output=args.reset_output,
