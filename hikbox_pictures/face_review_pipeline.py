@@ -9,8 +9,8 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-from collections import defaultdict
-from dataclasses import asdict, dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -29,6 +29,7 @@ register_heif_opener()
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 MAGFACE_GOOGLE_DRIVE_ID = "1Bd87admxOZvbIOAyTkGEntsEz3fyMt7H"
+DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE = 120
 
 
 @dataclass
@@ -46,6 +47,7 @@ class FaceObservation:
     cluster_label: int | None = None
     cluster_probability: float | None = None
     cluster_assignment_source: str | None = None
+    quality_gate_excluded: bool = False
 
 
 def _ensure_detected_faces_schema(conn: sqlite3.Connection) -> None:
@@ -106,6 +108,14 @@ def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS processed_images (
+            photo_relpath TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            face_count INTEGER NOT NULL DEFAULT 0,
+            error TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE TABLE IF NOT EXISTS pipeline_meta (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -145,6 +155,29 @@ def get_meta(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
 def reset_pipeline_state(conn: sqlite3.Connection) -> None:
     conn.execute("DELETE FROM detected_faces")
     conn.execute("DELETE FROM failed_images")
+    conn.execute("DELETE FROM processed_images")
+    conn.commit()
+
+
+def upsert_processed_image(
+    conn: sqlite3.Connection,
+    photo_relpath: str,
+    status: str,
+    face_count: int = 0,
+    error: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO processed_images(photo_relpath, status, face_count, error, updated_at)
+        VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(photo_relpath) DO UPDATE SET
+            status=excluded.status,
+            face_count=excluded.face_count,
+            error=excluded.error,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        (photo_relpath, status, int(face_count), error),
+    )
     conn.commit()
 
 
@@ -427,6 +460,28 @@ def iter_image_files(root: Path) -> list[Path]:
     return sorted(candidates, key=lambda item: item.relative_to(root).as_posix())
 
 
+def compute_detect_workset_stats(
+    total_images: int,
+    max_images: int | None,
+    processed_count: int,
+    detect_max_images_per_run: int | None = None,
+) -> tuple[int, int, int]:
+    effective_total = int(total_images)
+    if max_images is not None and int(max_images) > 0:
+        effective_total = min(effective_total, int(max_images))
+    effective_total = max(effective_total, 0)
+
+    effective_processed = max(int(processed_count), 0)
+    remaining = max(effective_total - effective_processed, 0)
+
+    if detect_max_images_per_run is not None and int(detect_max_images_per_run) > 0:
+        batch_size = int(detect_max_images_per_run)
+    else:
+        batch_size = DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE
+
+    return effective_total, remaining, batch_size
+
+
 def group_faces_by_cluster(faces: list[dict[str, Any]], labels: list[int]) -> list[dict[str, Any]]:
     if len(faces) != len(labels):
         raise ValueError("faces 与 labels 数量不一致")
@@ -556,6 +611,8 @@ def attach_noise_faces_to_person_consensus(
     for idx, (face, label) in enumerate(zip(faces, labels, strict=True)):
         if int(label) != -1:
             continue
+        if bool(face.get("quality_gate_excluded", False)):
+            continue
 
         raw_embedding = face.get("embedding")
         if not isinstance(raw_embedding, list) or not raw_embedding:
@@ -599,6 +656,36 @@ def attach_noise_faces_to_person_consensus(
         attached_count += 1
 
     return updated_labels, updated_probabilities, attached_count
+
+
+def exclude_low_quality_faces_from_assignment(
+    faces: list[dict[str, Any]],
+    labels: list[int],
+    probabilities: list[float | None],
+    min_quality_score: float | None,
+) -> tuple[list[int], list[float | None], list[bool], int]:
+    if len(faces) != len(labels) or len(faces) != len(probabilities):
+        raise ValueError("faces、labels、probabilities 数量不一致")
+
+    if min_quality_score is None or float(min_quality_score) <= 0:
+        return list(labels), list(probabilities), [False for _ in faces], 0
+
+    updated_labels = list(labels)
+    updated_probabilities = list(probabilities)
+    excluded_flags = [False for _ in faces]
+    excluded_count = 0
+    threshold = float(min_quality_score)
+
+    for idx, face in enumerate(faces):
+        quality_score = float(face.get("quality_score") or 0.0)
+        if quality_score >= threshold:
+            continue
+        excluded_flags[idx] = True
+        excluded_count += 1
+        updated_labels[idx] = -1
+        updated_probabilities[idx] = 0.0
+
+    return updated_labels, updated_probabilities, excluded_flags, excluded_count
 
 
 def demote_low_quality_micro_clusters(
@@ -740,6 +827,78 @@ def _cluster_by_ahc_distance_matrix(
     return model.fit_predict(dist_matrix).astype(int).tolist()
 
 
+def _build_person_uuid(cluster_refs: list[dict[str, Any]]) -> str:
+    face_ids: list[str] = []
+    for cluster in cluster_refs:
+        for member in cluster.get("members", []):
+            face_id = str(member.get("face_id", ""))
+            if face_id:
+                face_ids.append(face_id)
+
+    if face_ids:
+        seed = "|".join(sorted(face_ids))
+    else:
+        cluster_labels = [str(int(cluster.get("cluster_label", -1))) for cluster in cluster_refs]
+        seed = "|".join(sorted(cluster_labels))
+    digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+    return f"person_{digest}"
+
+
+def _materialize_persons_from_cluster_buckets(buckets: dict[int, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    merged_persons: list[dict[str, Any]] = []
+    for source_label, person_clusters in buckets.items():
+        sorted_clusters = sorted(
+            person_clusters,
+            key=lambda row: (-len(row.get("members", [])), int(row.get("cluster_label", 0))),
+        )
+        cluster_refs: list[dict[str, Any]] = []
+        person_face_count = 0
+        for cluster in sorted_clusters:
+            cluster_members = sorted(
+                list(cluster.get("members", [])),
+                key=lambda row: -(row.get("quality_score") or 0.0),
+            )
+            person_face_count += len(cluster_members)
+            cluster_refs.append(
+                {
+                    "cluster_key": str(cluster.get("cluster_key", "")),
+                    "cluster_label": int(cluster.get("cluster_label", -1)),
+                    "member_count": len(cluster_members),
+                    "members": cluster_members,
+                }
+            )
+
+        if not cluster_refs:
+            continue
+
+        merged_persons.append(
+            {
+                "source_person_label": int(source_label),
+                "clusters": cluster_refs,
+                "person_face_count": person_face_count,
+                "person_cluster_count": len(sorted_clusters),
+                "min_cluster_label": min(item["cluster_label"] for item in cluster_refs),
+            }
+        )
+
+    merged_persons.sort(
+        key=lambda row: (
+            -int(row.get("person_face_count", 0)),
+            -int(row.get("person_cluster_count", 0)),
+            int(row.get("min_cluster_label", 0)),
+        )
+    )
+
+    for idx, person in enumerate(merged_persons):
+        person["person_label"] = idx
+        person["person_key"] = f"person_{idx}"
+        person["person_uuid"] = _build_person_uuid(list(person.get("clusters", [])))
+        person.pop("min_cluster_label", None)
+        person.pop("source_person_label", None)
+
+    return merged_persons
+
+
 def merge_clusters_to_persons(
     clusters: list[dict[str, Any]],
     distance_threshold: float,
@@ -794,53 +953,212 @@ def merge_clusters_to_persons(
         buckets[next_label].append(cluster)
         next_label += 1
 
-    merged_persons: list[dict[str, Any]] = []
-    for source_label, person_clusters in buckets.items():
-        sorted_clusters = sorted(
-            person_clusters,
-            key=lambda row: (-len(row.get("members", [])), int(row.get("cluster_label", 0))),
-        )
-        cluster_refs: list[dict[str, Any]] = []
-        person_face_count = 0
-        for cluster in sorted_clusters:
-            cluster_members = sorted(
-                list(cluster.get("members", [])),
-                key=lambda row: -(row.get("quality_score") or 0.0),
+    return _materialize_persons_from_cluster_buckets(buckets)
+
+
+def _collect_normalized_member_embeddings(cluster: dict[str, Any]) -> np.ndarray | None:
+    vectors: list[np.ndarray] = []
+    dim: int | None = None
+    for member in cluster.get("members", []):
+        raw_embedding = member.get("embedding")
+        if not isinstance(raw_embedding, list) or not raw_embedding:
+            continue
+        vector = np.asarray(raw_embedding, dtype=np.float32)
+        if vector.ndim != 1:
+            continue
+        if dim is None:
+            dim = int(vector.shape[0])
+        if int(vector.shape[0]) != dim:
+            continue
+        vectors.append(_normalize_embedding(vector))
+    if not vectors:
+        return None
+    return np.stack(vectors, axis=0)
+
+
+def _person_face_vector_matrix(person: dict[str, Any]) -> np.ndarray | None:
+    vectors: list[np.ndarray] = []
+    dim: int | None = None
+    for cluster in person.get("clusters", []):
+        matrix = _collect_normalized_member_embeddings(cluster)
+        if matrix is None or matrix.size <= 0:
+            continue
+        if dim is None:
+            dim = int(matrix.shape[1])
+        if int(matrix.shape[1]) != dim:
+            continue
+        vectors.append(matrix)
+    if not vectors:
+        return None
+    return np.concatenate(vectors, axis=0)
+
+
+def attach_micro_clusters_to_existing_persons(
+    persons: list[dict[str, Any]],
+    source_max_cluster_size: int,
+    source_max_person_face_count: int,
+    target_min_person_face_count: int,
+    knn_top_n: int,
+    min_votes: int,
+    distance_threshold: float,
+    margin_threshold: float,
+    max_rounds: int = 2,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    if not persons:
+        return [], [], 0
+
+    if (
+        int(source_max_cluster_size) <= 0
+        or int(source_max_person_face_count) <= 0
+        or int(target_min_person_face_count) <= 0
+        or int(knn_top_n) <= 0
+        or int(min_votes) <= 0
+        or float(distance_threshold) <= 0
+        or int(max_rounds) <= 0
+    ):
+        return list(persons), [], 0
+
+    clusters_by_label: dict[int, dict[str, Any]] = {}
+    owner_by_cluster: dict[int, int] = {}
+    for person in persons:
+        person_label = int(person.get("person_label", -1))
+        for cluster in person.get("clusters", []):
+            cluster_label = int(cluster.get("cluster_label", -1))
+            if cluster_label == -1:
+                continue
+            clusters_by_label[cluster_label] = cluster
+            owner_by_cluster[cluster_label] = person_label
+
+    if not clusters_by_label:
+        return list(persons), [], 0
+
+    moved_count = 0
+    events: list[dict[str, Any]] = []
+
+    for round_idx in range(1, int(max_rounds) + 1):
+        buckets_by_owner: dict[int, list[int]] = defaultdict(list)
+        for cluster_label, owner in owner_by_cluster.items():
+            buckets_by_owner[int(owner)].append(cluster_label)
+
+        person_face_count: dict[int, int] = {}
+        for owner, cluster_labels in buckets_by_owner.items():
+            person_face_count[int(owner)] = sum(len(clusters_by_label[label].get("members", [])) for label in cluster_labels)
+
+        target_person_labels = [
+            owner for owner, count in person_face_count.items() if int(count) >= int(target_min_person_face_count)
+        ]
+        if not target_person_labels:
+            break
+
+        target_vectors: dict[int, np.ndarray] = {}
+        for owner in target_person_labels:
+            person_payload = {
+                "clusters": [clusters_by_label[label] for label in buckets_by_owner.get(owner, [])],
+            }
+            matrix = _person_face_vector_matrix(person_payload)
+            if matrix is not None and matrix.size > 0:
+                target_vectors[int(owner)] = matrix
+        if not target_vectors:
+            break
+
+        candidate_cluster_labels: list[int] = []
+        for cluster_label, owner in owner_by_cluster.items():
+            cluster_size = len(clusters_by_label[cluster_label].get("members", []))
+            owner_face_count = int(person_face_count.get(owner, 0))
+
+            if owner_face_count >= int(target_min_person_face_count) and owner_face_count > int(source_max_person_face_count):
+                continue
+            if cluster_size > int(source_max_cluster_size) and owner_face_count > int(source_max_person_face_count):
+                continue
+            candidate_cluster_labels.append(cluster_label)
+
+        candidate_cluster_labels.sort(
+            key=lambda label: (
+                -max(float(member.get("quality_score") or 0.0) for member in clusters_by_label[label].get("members", [{}])),
+                label,
             )
-            person_face_count += len(cluster_members)
-            cluster_refs.append(
+        )
+
+        moved_in_round = 0
+        for cluster_label in candidate_cluster_labels:
+            current_owner = int(owner_by_cluster.get(cluster_label, -1))
+            if current_owner == -1:
+                continue
+
+            candidate_targets = [owner for owner in target_person_labels if owner != current_owner and owner in target_vectors]
+            if not candidate_targets:
+                continue
+
+            cluster_vectors = _collect_normalized_member_embeddings(clusters_by_label[cluster_label])
+            if cluster_vectors is None or cluster_vectors.size <= 0:
+                continue
+
+            person_scores: list[tuple[int, float, float, int]] = []
+            global_pairs: list[tuple[float, int]] = []
+            for target_owner in candidate_targets:
+                matrix = target_vectors[target_owner]
+                sims = np.clip(cluster_vectors @ matrix.T, -1.0, 1.0)
+                dist = np.maximum(1.0 - sims, 0.0)
+                flat = np.sort(dist.reshape(-1))
+                if flat.size <= 0:
+                    continue
+
+                score_k = max(1, min(int(min_votes), int(flat.size)))
+                score_mean = float(np.mean(flat[:score_k]))
+                best_dist = float(flat[0])
+                person_scores.append((int(target_owner), score_mean, best_dist, score_k))
+
+                pair_k = max(1, min(int(knn_top_n), int(flat.size)))
+                for value in flat[:pair_k]:
+                    global_pairs.append((float(value), int(target_owner)))
+
+            if not person_scores:
+                continue
+            person_scores.sort(key=lambda item: item[1])
+            best_owner, best_score, best_dist, best_score_k = person_scores[0]
+            second_score = float(person_scores[1][1]) if len(person_scores) >= 2 else float("inf")
+            margin = second_score - best_score if second_score != float("inf") else float("inf")
+
+            global_pairs.sort(key=lambda item: item[0])
+            top_global_pairs = global_pairs[: max(1, int(knn_top_n))]
+            votes = Counter(label for _, label in top_global_pairs)
+            best_votes = int(votes.get(best_owner, 0))
+
+            if best_votes < int(min_votes):
+                continue
+            if best_score > float(distance_threshold):
+                continue
+            if margin < float(margin_threshold):
+                continue
+
+            owner_by_cluster[cluster_label] = int(best_owner)
+            moved_count += 1
+            moved_in_round += 1
+            events.append(
                 {
-                    "cluster_key": str(cluster.get("cluster_key", "")),
-                    "cluster_label": int(cluster.get("cluster_label", -1)),
-                    "member_count": len(cluster_members),
-                    "members": cluster_members,
+                    "round": int(round_idx),
+                    "cluster_label": int(cluster_label),
+                    "cluster_size": len(clusters_by_label[cluster_label].get("members", [])),
+                    "from_person_label_before_reindex": int(current_owner),
+                    "to_person_label_before_reindex": int(best_owner),
+                    "best_topk_mean_distance": float(best_score),
+                    "best_top1_distance": float(best_dist),
+                    "best_score_k": int(best_score_k),
+                    "second_best_topk_mean_distance": None if second_score == float("inf") else float(second_score),
+                    "margin": None if margin == float("inf") else float(margin),
+                    "best_votes": int(best_votes),
+                    "knn_top_n": int(knn_top_n),
+                    "min_votes": int(min_votes),
                 }
             )
-        merged_persons.append(
-            {
-                "source_person_label": int(source_label),
-                "clusters": cluster_refs,
-                "person_face_count": person_face_count,
-                "person_cluster_count": len(sorted_clusters),
-                "min_cluster_label": min(item["cluster_label"] for item in cluster_refs),
-            }
-        )
 
-    merged_persons.sort(
-        key=lambda row: (
-            -int(row.get("person_face_count", 0)),
-            -int(row.get("person_cluster_count", 0)),
-            int(row.get("min_cluster_label", 0)),
-        )
-    )
+        if moved_in_round <= 0:
+            break
 
-    for idx, person in enumerate(merged_persons):
-        person["person_label"] = idx
-        person["person_key"] = f"person_{idx}"
-        person.pop("min_cluster_label", None)
-        person.pop("source_person_label", None)
-
-    return merged_persons
+    rebuilt_buckets: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for cluster_label, owner in owner_by_cluster.items():
+        rebuilt_buckets[int(owner)].append(clusters_by_label[cluster_label])
+    return _materialize_persons_from_cluster_buckets(rebuilt_buckets), events, moved_count
 
 
 def _render_face_cards(members: list[dict[str, Any]]) -> str:
@@ -1377,6 +1695,12 @@ def _make_context(image: Image.Image, bbox: tuple[int, int, int, int], max_side:
     return canvas
 
 
+def _init_detection_model(insightface_root: Path, detector_model_name: str, det_size: int) -> FaceAnalysis:
+    detector = FaceAnalysis(name=detector_model_name, root=str(insightface_root), allowed_modules=["detection"])
+    detector.prepare(ctx_id=-1, det_size=(det_size, det_size))
+    return detector
+
+
 def _cluster_with_hdbscan(
     embeddings: list[list[float]],
     min_cluster_size: int,
@@ -1428,6 +1752,9 @@ def run_detection_stage(
     preview_max_side: int,
     max_images: int | None,
     reset_output: bool,
+    detect_restart_interval: int = 300,
+    detect_skip_existing: bool = True,
+    detect_max_images_per_run: int | None = None,
 ) -> dict[str, Any]:
     dirs = _ensure_dirs(output_dir, reset_output=reset_output)
     conn = open_pipeline_db(dirs["db"])
@@ -1446,14 +1773,65 @@ def run_detection_stage(
     set_meta(conn, "last_detection_at", datetime.now().isoformat(timespec="seconds"))
 
     print("阶段 detect：检测 + 预处理")
-    detector = FaceAnalysis(name=detector_model_name, root=str(insightface_root), allowed_modules=["detection"])
-    detector.prepare(ctx_id=-1, det_size=(det_size, det_size))
+    safe_restart_interval = max(1, int(detect_restart_interval))
+    safe_max_images_per_run = (
+        max(1, int(detect_max_images_per_run))
+        if detect_max_images_per_run is not None and int(detect_max_images_per_run) > 0
+        else None
+    )
+    effective_restart_interval = safe_restart_interval
+    if safe_max_images_per_run is not None:
+        # 分批模式会通过子进程重启来回收内存，避免在同一进程内反复重建 detector。
+        effective_restart_interval = max(effective_restart_interval, safe_max_images_per_run + 1)
+    detector: FaceAnalysis | None = None
+    last_restart_idx = 0
+
+    processed_relpaths: set[str] = set()
+    if detect_skip_existing:
+        processed_relpaths.update(
+            str(row["photo_relpath"])
+            for row in conn.execute("SELECT photo_relpath FROM processed_images").fetchall()
+        )
+        # 兼容旧输出目录：尚未有 processed_images 表时，仍可利用已有检测结果做跳过。
+        processed_relpaths.update(
+            str(row["photo_relpath"])
+            for row in conn.execute("SELECT DISTINCT photo_relpath FROM detected_faces").fetchall()
+        )
+        processed_relpaths.update(str(row["photo_relpath"]) for row in conn.execute("SELECT photo_relpath FROM failed_images").fetchall())
+
+    skipped_count = 0
+    processed_count = 0
 
     total = len(image_paths)
     for idx, image_path in enumerate(image_paths, start=1):
         relpath = image_path.relative_to(source_dir).as_posix()
+        if detect_skip_existing and relpath in processed_relpaths:
+            skipped_count += 1
+            print(f"[det {idx}/{total}] 跳过已处理 {relpath}")
+            continue
+
+        if detector is None or (idx - last_restart_idx) >= effective_restart_interval:
+            if detector is not None:
+                del detector
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            detector = _init_detection_model(
+                insightface_root=insightface_root,
+                detector_model_name=detector_model_name,
+                det_size=det_size,
+            )
+            last_restart_idx = idx
+
         print(f"[det {idx}/{total}] 处理 {relpath}")
 
+        rgb_image: Image.Image | None = None
+        rgb_arr: np.ndarray | None = None
+        bgr_arr: np.ndarray | None = None
+        faces = None
+        crop_img: Image.Image | None = None
+        context_img: Image.Image | None = None
+        aligned_bgr: np.ndarray | None = None
         try:
             rgb_image = _load_rgb_image(image_path)
             rgb_arr = np.asarray(rgb_image)
@@ -1481,12 +1859,15 @@ def run_detection_stage(
 
                 crop_img = _make_crop(image=rgb_image, bbox=bbox)
                 crop_img.save(dirs["crop"] / crop_name, format="JPEG", quality=92)
+                crop_img = None
 
                 context_img = _make_context(image=rgb_image, bbox=bbox, max_side=preview_max_side)
                 context_img.save(dirs["context"] / context_name, format="JPEG", quality=88)
+                context_img = None
 
                 aligned_bgr = face_align.norm_crop(bgr_arr, face.kps, image_size=112)
                 cv2.imwrite(str(dirs["aligned"] / aligned_name), aligned_bgr)
+                aligned_bgr = None
 
                 upsert_detected_face(
                     conn,
@@ -1502,16 +1883,36 @@ def run_detection_stage(
                         "face_area_ratio": area_ratio,
                     },
                 )
+            upsert_processed_image(conn, relpath, status="ok", face_count=len(faces))
+            processed_relpaths.add(relpath)
+            processed_count += 1
         except Exception as exc:  # pragma: no cover
             upsert_failed_image(conn, relpath, str(exc))
+            upsert_processed_image(conn, relpath, status="error", face_count=0, error=str(exc))
+            processed_relpaths.add(relpath)
+            processed_count += 1
+        finally:
+            del rgb_image, rgb_arr, bgr_arr, faces, crop_img, context_img, aligned_bgr
+            if idx % 20 == 0:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
 
-    del detector
+        if safe_max_images_per_run is not None and processed_count >= safe_max_images_per_run:
+            print(f"[det] 达到单次处理上限 {safe_max_images_per_run}，提前结束本轮 detect")
+            break
+
+    if detector is not None:
+        del detector
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     summary = {
         "image_count": len(image_paths),
+        "skipped_image_count": skipped_count,
+        "processed_image_count": processed_count,
+        "remaining_image_count": len([path for path in image_paths if path.relative_to(source_dir).as_posix() not in processed_relpaths]),
         "detected_face_count": count_all_faces(conn),
         "pending_face_count": count_pending_faces(conn),
         "failed_image_count": len(list_failed_images(conn)),
@@ -1586,6 +1987,27 @@ def run_embedding_stage(
     return summary
 
 
+def _observation_to_face_row(obs: FaceObservation, include_embedding: bool = True) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "face_id": obs.face_id,
+        "photo_relpath": obs.photo_relpath,
+        "crop_relpath": obs.crop_relpath,
+        "context_relpath": obs.context_relpath,
+        "bbox": list(obs.bbox),
+        "detector_confidence": obs.detector_confidence,
+        "face_area_ratio": obs.face_area_ratio,
+        "magface_quality": obs.magface_quality,
+        "quality_score": obs.quality_score,
+        "cluster_label": obs.cluster_label,
+        "cluster_probability": obs.cluster_probability,
+        "cluster_assignment_source": obs.cluster_assignment_source,
+        "quality_gate_excluded": obs.quality_gate_excluded,
+    }
+    if include_embedding:
+        row["embedding"] = obs.embedding
+    return row
+
+
 def run_cluster_stage(
     source_dir: Path,
     output_dir: Path,
@@ -1606,6 +2028,15 @@ def run_cluster_stage(
     low_quality_micro_cluster_max_size: int = 3,
     low_quality_micro_cluster_top2_weight: float = 0.5,
     low_quality_micro_cluster_min_quality_evidence: float | None = None,
+    face_min_quality_for_assignment: float | None = None,
+    person_cluster_recall_distance_threshold: float | None = None,
+    person_cluster_recall_margin_threshold: float = 0.04,
+    person_cluster_recall_top_n: int = 5,
+    person_cluster_recall_min_votes: int = 3,
+    person_cluster_recall_source_max_cluster_size: int = 3,
+    person_cluster_recall_source_max_person_faces: int = 8,
+    person_cluster_recall_target_min_person_faces: int = 40,
+    person_cluster_recall_max_rounds: int = 2,
 ) -> dict[str, Any]:
     dirs = _ensure_dirs(output_dir, reset_output=False)
     conn = open_pipeline_db(dirs["db"])
@@ -1638,6 +2069,17 @@ def run_cluster_stage(
         min_samples=min_samples,
     )
 
+    face_quality_excluded_flags = [False for _ in observations]
+    face_quality_excluded_count = 0
+    labels, probabilities, face_quality_excluded_flags, face_quality_excluded_count = exclude_low_quality_faces_from_assignment(
+        faces=[{"quality_score": obs.quality_score} for obs in observations],
+        labels=labels,
+        probabilities=probabilities,
+        min_quality_score=face_min_quality_for_assignment,
+    )
+    for obs, excluded in zip(observations, face_quality_excluded_flags, strict=True):
+        obs.quality_gate_excluded = bool(excluded)
+
     low_quality_micro_cluster_demoted_cluster_count = 0
     low_quality_micro_cluster_demoted_face_count = 0
     if low_quality_micro_cluster_min_quality_evidence is not None and low_quality_micro_cluster_min_quality_evidence > 0:
@@ -1657,14 +2099,10 @@ def run_cluster_stage(
     if person_consensus_distance_threshold is not None and person_consensus_distance_threshold > 0:
         preliminary_faces = []
         for obs, label, probability in zip(observations, labels, probabilities, strict=True):
-            preliminary_faces.append(
-                {
-                    **asdict(obs),
-                    "bbox": list(obs.bbox),
-                    "cluster_label": int(label),
-                    "cluster_probability": None if probability is None else float(probability),
-                }
-            )
+            row = _observation_to_face_row(obs, include_embedding=True)
+            row["cluster_label"] = int(label)
+            row["cluster_probability"] = None if probability is None else float(probability)
+            preliminary_faces.append(row)
         preliminary_clusters = group_faces_by_cluster(
             faces=preliminary_faces,
             labels=[int(label) for label in labels],
@@ -1681,7 +2119,7 @@ def run_cluster_stage(
             enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
         )
 
-        attach_faces = [{**asdict(obs), "bbox": list(obs.bbox)} for obs in observations]
+        attach_faces = [_observation_to_face_row(obs, include_embedding=True) for obs in observations]
         labels, probabilities, person_consensus_attach_count = attach_noise_faces_to_person_consensus(
             faces=attach_faces,
             labels=labels,
@@ -1696,7 +2134,7 @@ def run_cluster_stage(
         obs.cluster_label = int(label)
         obs.cluster_probability = None if probability is None else float(probability)
         if int(label) == -1:
-            assignment_source = "noise"
+            assignment_source = "low_quality_ignored" if obs.quality_gate_excluded else "noise"
         elif probability is None:
             assignment_source = "person_consensus"
         else:
@@ -1704,7 +2142,7 @@ def run_cluster_stage(
         obs.cluster_assignment_source = assignment_source
         update_cluster_result(conn, obs.face_id, int(label), probability, assignment_source)
 
-    face_rows = [{**asdict(obs), "bbox": list(obs.bbox)} for obs in observations]
+    face_rows = [_observation_to_face_row(obs, include_embedding=True) for obs in observations]
     face_rows.sort(key=lambda row: (1 if row.get("cluster_label") == -1 else 0, -(row.get("quality_score") or 0.0)))
 
     grouped_clusters = group_faces_by_cluster(
@@ -1722,6 +2160,25 @@ def run_cluster_stage(
         knn_k=person_knn_k,
         linkage=person_linkage,
         enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
+    )
+    person_cluster_recall_events: list[dict[str, Any]] = []
+    person_cluster_recall_attach_count = 0
+    if person_cluster_recall_distance_threshold is not None and person_cluster_recall_distance_threshold > 0:
+        persons, person_cluster_recall_events, person_cluster_recall_attach_count = attach_micro_clusters_to_existing_persons(
+            persons=persons,
+            source_max_cluster_size=int(person_cluster_recall_source_max_cluster_size),
+            source_max_person_face_count=int(person_cluster_recall_source_max_person_faces),
+            target_min_person_face_count=int(person_cluster_recall_target_min_person_faces),
+            knn_top_n=int(person_cluster_recall_top_n),
+            min_votes=int(person_cluster_recall_min_votes),
+            distance_threshold=float(person_cluster_recall_distance_threshold),
+            margin_threshold=float(person_cluster_recall_margin_threshold),
+            max_rounds=int(person_cluster_recall_max_rounds),
+        )
+    person_cluster_recall_round_count = (
+        max((int(event.get("round", 0)) for event in person_cluster_recall_events), default=0)
+        if person_cluster_recall_events
+        else 0
     )
     # embedding 仅用于二阶段聚合，不写入最终清单，避免 manifest 体积膨胀。
     for row in face_rows:
@@ -1756,6 +2213,18 @@ def run_cluster_stage(
             "low_quality_micro_cluster_min_quality_evidence": low_quality_micro_cluster_min_quality_evidence,
             "low_quality_micro_cluster_demoted_cluster_count": low_quality_micro_cluster_demoted_cluster_count,
             "low_quality_micro_cluster_demoted_face_count": low_quality_micro_cluster_demoted_face_count,
+            "face_min_quality_for_assignment": face_min_quality_for_assignment,
+            "face_quality_excluded_count": face_quality_excluded_count,
+            "person_cluster_recall_distance_threshold": person_cluster_recall_distance_threshold,
+            "person_cluster_recall_margin_threshold": person_cluster_recall_margin_threshold,
+            "person_cluster_recall_top_n": person_cluster_recall_top_n,
+            "person_cluster_recall_min_votes": person_cluster_recall_min_votes,
+            "person_cluster_recall_source_max_cluster_size": person_cluster_recall_source_max_cluster_size,
+            "person_cluster_recall_source_max_person_faces": person_cluster_recall_source_max_person_faces,
+            "person_cluster_recall_target_min_person_faces": person_cluster_recall_target_min_person_faces,
+            "person_cluster_recall_max_rounds": person_cluster_recall_max_rounds,
+            "person_cluster_recall_attach_count": person_cluster_recall_attach_count,
+            "person_cluster_recall_round_count": person_cluster_recall_round_count,
             "person_count": len(persons),
             "person_clusterer": "AHC",
             "person_linkage": person_linkage,
@@ -1771,6 +2240,7 @@ def run_cluster_stage(
         "failed_faces": failed_faces,
         "persons": persons,
         "clusters": grouped_clusters,
+        "person_cluster_recall_events": person_cluster_recall_events,
     }
 
     (output_dir / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1787,6 +2257,9 @@ def run_pipeline(
     insightface_root: Path,
     detector_model_name: str,
     det_size: int,
+    detect_restart_interval: int,
+    detect_skip_existing: bool,
+    detect_max_images_per_run: int | None,
     min_cluster_size: int,
     min_samples: int,
     person_merge_threshold: float,
@@ -1801,6 +2274,15 @@ def run_pipeline(
     low_quality_micro_cluster_max_size: int,
     low_quality_micro_cluster_top2_weight: float,
     low_quality_micro_cluster_min_quality_evidence: float | None,
+    face_min_quality_for_assignment: float | None,
+    person_cluster_recall_distance_threshold: float | None,
+    person_cluster_recall_margin_threshold: float,
+    person_cluster_recall_top_n: int,
+    person_cluster_recall_min_votes: int,
+    person_cluster_recall_source_max_cluster_size: int,
+    person_cluster_recall_source_max_person_faces: int,
+    person_cluster_recall_target_min_person_faces: int,
+    person_cluster_recall_max_rounds: int,
     max_images: int | None,
     stage: str,
     reset_output: bool,
@@ -1821,6 +2303,9 @@ def run_pipeline(
             preview_max_side=preview_max_side,
             max_images=max_images,
             reset_output=reset_output,
+            detect_restart_interval=detect_restart_interval,
+            detect_skip_existing=detect_skip_existing,
+            detect_max_images_per_run=detect_max_images_per_run,
         )
         return {"meta": {"stage": "detect", **summary}}
 
@@ -1852,6 +2337,15 @@ def run_pipeline(
             low_quality_micro_cluster_max_size=low_quality_micro_cluster_max_size,
             low_quality_micro_cluster_top2_weight=low_quality_micro_cluster_top2_weight,
             low_quality_micro_cluster_min_quality_evidence=low_quality_micro_cluster_min_quality_evidence,
+            face_min_quality_for_assignment=face_min_quality_for_assignment,
+            person_cluster_recall_distance_threshold=person_cluster_recall_distance_threshold,
+            person_cluster_recall_margin_threshold=person_cluster_recall_margin_threshold,
+            person_cluster_recall_top_n=person_cluster_recall_top_n,
+            person_cluster_recall_min_votes=person_cluster_recall_min_votes,
+            person_cluster_recall_source_max_cluster_size=person_cluster_recall_source_max_cluster_size,
+            person_cluster_recall_source_max_person_faces=person_cluster_recall_source_max_person_faces,
+            person_cluster_recall_target_min_person_faces=person_cluster_recall_target_min_person_faces,
+            person_cluster_recall_max_rounds=person_cluster_recall_max_rounds,
         )
 
     # all 阶段通过子进程串行执行，确保每个阶段释放内存。
@@ -1872,6 +2366,8 @@ def run_pipeline(
         detector_model_name,
         "--det-size",
         str(det_size),
+        "--detect-restart-interval",
+        str(detect_restart_interval),
         "--min-cluster-size",
         str(min_cluster_size),
         "--min-samples",
@@ -1909,15 +2405,83 @@ def run_pipeline(
                 str(low_quality_micro_cluster_min_quality_evidence),
             ]
         )
+    if face_min_quality_for_assignment is not None:
+        base_cmd.extend(
+            [
+                "--face-min-quality-for-assignment",
+                str(face_min_quality_for_assignment),
+            ]
+        )
+    if person_cluster_recall_distance_threshold is not None:
+        base_cmd.extend(
+            [
+                "--person-cluster-recall-distance-threshold",
+                str(person_cluster_recall_distance_threshold),
+                "--person-cluster-recall-margin-threshold",
+                str(person_cluster_recall_margin_threshold),
+                "--person-cluster-recall-top-n",
+                str(person_cluster_recall_top_n),
+                "--person-cluster-recall-min-votes",
+                str(person_cluster_recall_min_votes),
+                "--person-cluster-recall-source-max-cluster-size",
+                str(person_cluster_recall_source_max_cluster_size),
+                "--person-cluster-recall-source-max-person-faces",
+                str(person_cluster_recall_source_max_person_faces),
+                "--person-cluster-recall-target-min-person-faces",
+                str(person_cluster_recall_target_min_person_faces),
+                "--person-cluster-recall-max-rounds",
+                str(person_cluster_recall_max_rounds),
+            ]
+        )
     if person_enable_same_photo_cannot_link:
         base_cmd.append("--person-enable-same-photo-cannot-link")
     if max_images is not None:
         base_cmd.extend(["--max-images", str(max_images)])
-
+    if not detect_skip_existing:
+        base_cmd.append("--detect-no-skip-existing")
     detect_cmd = base_cmd + ["--stage", "detect"]
     if reset_output:
         detect_cmd.append("--reset-output")
-    subprocess.run(detect_cmd, check=True)
+
+    total_image_count = len(iter_image_files(source_dir))
+    expected_total, _, detect_batch_size = compute_detect_workset_stats(
+        total_images=total_image_count,
+        max_images=max_images,
+        processed_count=0,
+        detect_max_images_per_run=detect_max_images_per_run,
+    )
+    if detect_max_images_per_run is None:
+        print(f"all 模式：未指定 detect 单次处理上限，使用默认分批大小 {detect_batch_size}")
+
+    detect_cmd.extend(["--detect-max-images-per-run", str(int(detect_batch_size))])
+    while True:
+        subprocess.run(detect_cmd, check=True)
+        db_conn = open_pipeline_db(output_dir / "cache" / "pipeline.db")
+        processed_count = int(
+            db_conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM (
+                    SELECT photo_relpath FROM processed_images
+                    UNION
+                    SELECT DISTINCT photo_relpath FROM detected_faces
+                    UNION
+                    SELECT photo_relpath FROM failed_images
+                ) AS merged
+                """
+            ).fetchone()["c"]
+        )
+        db_conn.close()
+
+        expected_total, remaining, _ = compute_detect_workset_stats(
+            total_images=total_image_count,
+            max_images=max_images,
+            processed_count=processed_count,
+            detect_max_images_per_run=detect_batch_size,
+        )
+        print(f"detect 分批进度：processed={processed_count} / total={expected_total} / remaining={remaining}")
+        if remaining <= 0:
+            break
     subprocess.run(base_cmd + ["--stage", "embed"], check=True)
     subprocess.run(base_cmd + ["--stage", "cluster"], check=True)
 
@@ -1940,6 +2504,26 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--insightface-root", type=Path, default=Path(".cache/insightface"), help="insightface 模型缓存目录")
     parser.add_argument("--detector-model-name", type=str, default="buffalo_l", help="insightface detector model")
     parser.add_argument("--det-size", type=int, default=640, help="检测分辨率")
+    parser.add_argument(
+        "--detect-restart-interval",
+        type=int,
+        default=300,
+        help="detect 阶段每处理 N 张图后重启一次 detector，抑制长跑内存增长",
+    )
+    parser.add_argument(
+        "--detect-no-skip-existing",
+        action="store_true",
+        help="detect 阶段不跳过已有检测结果（默认会跳过 detected_faces/failed_images 中已处理图片）",
+    )
+    parser.add_argument(
+        "--detect-max-images-per-run",
+        type=int,
+        default=None,
+        help=(
+            "detect 阶段单进程最多处理的图片数；"
+            "stage=all 时不传会使用默认分批大小，stage=detect 时不传则单次跑完"
+        ),
+    )
     parser.add_argument("--min-cluster-size", type=int, default=3, help="HDBSCAN min_cluster_size")
     parser.add_argument("--min-samples", type=int, default=2, help="HDBSCAN min_samples")
     parser.add_argument("--person-merge-threshold", type=float, default=0.24, help="二阶段 AHC 合并阈值（余弦距离）")
@@ -1994,6 +2578,60 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="低质量微簇回退阈值；不传则关闭（证据分低于阈值的微簇整体回退到 noise）",
     )
+    parser.add_argument(
+        "--face-min-quality-for-assignment",
+        type=float,
+        default=None,
+        help="face 级质量硬排除阈值；低于该阈值的样本直接标记 low_quality_ignored，不参与自动归属",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-distance-threshold",
+        type=float,
+        default=None,
+        help="非-noise 微簇归属召回阈值（top-k 平均余弦距离）；不传则关闭该通道",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-margin-threshold",
+        type=float,
+        default=0.04,
+        help="非-noise 微簇归属召回时最佳/次佳候选间最小距离差距",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-top-n",
+        type=int,
+        default=5,
+        help="非-noise 微簇归属召回投票时采用的全局最近邻数",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-min-votes",
+        type=int,
+        default=3,
+        help="非-noise 微簇归属召回最少票数",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-source-max-cluster-size",
+        type=int,
+        default=3,
+        help="非-noise 微簇归属召回中，允许移动的最大微簇大小",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-source-max-person-faces",
+        type=int,
+        default=8,
+        help="非-noise 微簇归属召回中，允许作为来源的人物最大样本数",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-target-min-person-faces",
+        type=int,
+        default=40,
+        help="非-noise 微簇归属召回中，允许作为目标人物的最小样本数",
+    )
+    parser.add_argument(
+        "--person-cluster-recall-max-rounds",
+        type=int,
+        default=2,
+        help="非-noise 微簇归属召回最大迭代轮数",
+    )
     parser.add_argument("--max-images", type=int, default=None, help="仅处理前 N 张图片（调试）")
     parser.add_argument("--stage", choices=["all", "detect", "embed", "cluster"], default="all", help="分阶段执行")
     parser.add_argument("--reset-output", action="store_true", help="执行 detect 时先清空输出目录与数据库")
@@ -2009,6 +2647,9 @@ def main() -> int:
         insightface_root=args.insightface_root,
         detector_model_name=args.detector_model_name,
         det_size=args.det_size,
+        detect_restart_interval=args.detect_restart_interval,
+        detect_skip_existing=not args.detect_no_skip_existing,
+        detect_max_images_per_run=args.detect_max_images_per_run,
         min_cluster_size=args.min_cluster_size,
         min_samples=args.min_samples,
         person_merge_threshold=args.person_merge_threshold,
@@ -2023,6 +2664,15 @@ def main() -> int:
         low_quality_micro_cluster_max_size=args.low_quality_micro_cluster_max_size,
         low_quality_micro_cluster_top2_weight=args.low_quality_micro_cluster_top2_weight,
         low_quality_micro_cluster_min_quality_evidence=args.low_quality_micro_cluster_min_quality_evidence,
+        face_min_quality_for_assignment=args.face_min_quality_for_assignment,
+        person_cluster_recall_distance_threshold=args.person_cluster_recall_distance_threshold,
+        person_cluster_recall_margin_threshold=args.person_cluster_recall_margin_threshold,
+        person_cluster_recall_top_n=args.person_cluster_recall_top_n,
+        person_cluster_recall_min_votes=args.person_cluster_recall_min_votes,
+        person_cluster_recall_source_max_cluster_size=args.person_cluster_recall_source_max_cluster_size,
+        person_cluster_recall_source_max_person_faces=args.person_cluster_recall_source_max_person_faces,
+        person_cluster_recall_target_min_person_faces=args.person_cluster_recall_target_min_person_faces,
+        person_cluster_recall_max_rounds=args.person_cluster_recall_max_rounds,
         max_images=args.max_images,
         stage=args.stage,
         reset_output=args.reset_output,

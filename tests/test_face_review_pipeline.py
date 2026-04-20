@@ -1,7 +1,13 @@
 from pathlib import Path
 
+from PIL import Image
+
 from hikbox_pictures.face_review_pipeline import (
+    DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE,
+    attach_micro_clusters_to_existing_persons,
     attach_noise_faces_to_person_consensus,
+    compute_detect_workset_stats,
+    exclude_low_quality_faces_from_assignment,
     group_faces_by_cluster,
     iter_embedded_faces,
     iter_faces_pending_embedding,
@@ -11,6 +17,7 @@ from hikbox_pictures.face_review_pipeline import (
     open_pipeline_db,
     render_review_html,
     run_cluster_stage,
+    run_detection_stage,
     set_meta,
     upsert_detected_face,
 )
@@ -30,6 +37,50 @@ def test_iter_image_files_filters_hidden_and_non_images(tmp_path: Path) -> None:
     results = [p.relative_to(src).as_posix() for p in iter_image_files(src)]
 
     assert results == ["A.JPG", "b.heic", "c.png", "sub/e.JPEG"]
+
+
+def test_run_detection_stage_batch_mode_avoids_detector_restarts(tmp_path: Path, monkeypatch) -> None:
+    source_dir = tmp_path / "album"
+    source_dir.mkdir()
+    for idx in range(3):
+        Image.new("RGB", (16, 16), (idx, idx, idx)).save(source_dir / f"img_{idx}.jpg")
+
+    output_dir = tmp_path / "out"
+    init_calls: list[int] = []
+
+    class _FakeDetector:
+        def get(self, _image_bgr):  # noqa: ANN001
+            return []
+
+    monkeypatch.setattr(
+        "hikbox_pictures.face_review_pipeline._init_detection_model",
+        lambda **kwargs: (init_calls.append(1), _FakeDetector())[1],  # noqa: ARG005
+    )
+
+    summary = run_detection_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        insightface_root=tmp_path / "insightface",
+        detector_model_name="buffalo_l",
+        det_size=640,
+        preview_max_side=480,
+        max_images=None,
+        reset_output=True,
+        detect_restart_interval=1,
+        detect_skip_existing=False,
+        detect_max_images_per_run=3,
+    )
+
+    assert summary["processed_image_count"] == 3
+    assert summary["remaining_image_count"] == 0
+    assert len(init_calls) == 1
+
+
+def test_compute_detect_workset_stats_uses_default_batch_in_all_stage() -> None:
+    assert DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE == 120
+    assert compute_detect_workset_stats(total_images=500, max_images=None, processed_count=0) == (500, 500, 120)
+    assert compute_detect_workset_stats(total_images=500, max_images=80, processed_count=40) == (80, 40, 120)
+    assert compute_detect_workset_stats(total_images=500, max_images=80, processed_count=90) == (80, 0, 120)
 
 
 def test_group_faces_by_cluster_keeps_noise_separate() -> None:
@@ -282,6 +333,215 @@ def test_attach_noise_faces_to_person_consensus_keeps_cross_person_ambiguous_noi
     assert attached_count == 0
     assert attached_labels == labels
     assert attached_probabilities == probabilities
+
+
+def test_exclude_low_quality_faces_from_assignment_marks_noise_with_counts() -> None:
+    faces = [
+        {"face_id": "h0", "quality_score": 0.95},
+        {"face_id": "l0", "quality_score": 0.22},
+        {"face_id": "l1", "quality_score": 0.19},
+        {"face_id": "n0", "quality_score": 0.30},
+    ]
+    labels = [0, 1, -1, -1]
+    probabilities = [0.99, 0.98, 0.0, 0.0]
+
+    updated_labels, updated_probabilities, excluded_flags, excluded_count = exclude_low_quality_faces_from_assignment(
+        faces=faces,
+        labels=labels,
+        probabilities=probabilities,
+        min_quality_score=0.25,
+    )
+
+    assert excluded_count == 2
+    assert updated_labels == [0, -1, -1, -1]
+    assert updated_probabilities == [0.99, 0.0, 0.0, 0.0]
+    assert excluded_flags == [False, True, True, False]
+
+
+def test_attach_micro_clusters_to_existing_persons_moves_small_cluster_to_anchor_person() -> None:
+    def _member(face_id: str, emb: list[float], quality: float = 1.0) -> dict:
+        return {
+            "face_id": face_id,
+            "embedding": emb,
+            "quality_score": quality,
+            "photo_relpath": f"album/{face_id}.jpg",
+            "crop_relpath": f"assets/crops/{face_id}.jpg",
+            "context_relpath": f"assets/context/{face_id}.jpg",
+            "cluster_probability": 0.99,
+            "cluster_assignment_source": "hdbscan",
+            "bbox": [1, 2, 3, 4],
+        }
+
+    persons = [
+        {
+            "person_label": 0,
+            "person_key": "person_0",
+            "person_face_count": 10,
+            "person_cluster_count": 2,
+            "clusters": [
+                {
+                    "cluster_key": "cluster_0",
+                    "cluster_label": 0,
+                    "member_count": 5,
+                    "members": [
+                        _member("p0_a0", [1.0, 0.0]),
+                        _member("p0_a1", [0.998, 0.060]),
+                        _member("p0_a2", [0.996, 0.089]),
+                        _member("p0_a3", [0.992, 0.123]),
+                        _member("p0_a4", [0.989, 0.145]),
+                    ],
+                },
+                {
+                    "cluster_key": "cluster_1",
+                    "cluster_label": 1,
+                    "member_count": 5,
+                    "members": [
+                        _member("p0_b0", [0.984, 0.177]),
+                        _member("p0_b1", [0.978, 0.208]),
+                        _member("p0_b2", [0.971, 0.239]),
+                        _member("p0_b3", [0.965, 0.262]),
+                        _member("p0_b4", [0.957, 0.289]),
+                    ],
+                },
+            ],
+        },
+        {
+            "person_label": 1,
+            "person_key": "person_1",
+            "person_face_count": 2,
+            "person_cluster_count": 1,
+            "clusters": [
+                {
+                    "cluster_key": "cluster_2",
+                    "cluster_label": 2,
+                    "member_count": 2,
+                    "members": [
+                        _member("cand_0", [0.993, 0.118]),
+                        _member("cand_1", [0.988, 0.154]),
+                    ],
+                }
+            ],
+        },
+    ]
+
+    updated_persons, events, moved_count = attach_micro_clusters_to_existing_persons(
+        persons=persons,
+        source_max_cluster_size=3,
+        source_max_person_face_count=8,
+        target_min_person_face_count=8,
+        knn_top_n=5,
+        min_votes=3,
+        distance_threshold=0.30,
+        margin_threshold=0.04,
+        max_rounds=2,
+    )
+
+    assert moved_count == 1
+    assert len(events) == 1
+    assert events[0]["cluster_label"] == 2
+    assert events[0]["to_person_label_before_reindex"] == 0
+    merged_person = updated_persons[0]
+    assert merged_person["person_face_count"] == 12
+    assert {cluster["cluster_label"] for cluster in merged_person["clusters"]} == {0, 1, 2}
+
+
+def test_attach_micro_clusters_to_existing_persons_keeps_ambiguous_cluster_unmoved() -> None:
+    def _member(face_id: str, emb: list[float], quality: float = 1.0) -> dict:
+        return {
+            "face_id": face_id,
+            "embedding": emb,
+            "quality_score": quality,
+            "photo_relpath": f"album/{face_id}.jpg",
+            "crop_relpath": f"assets/crops/{face_id}.jpg",
+            "context_relpath": f"assets/context/{face_id}.jpg",
+            "cluster_probability": 0.99,
+            "cluster_assignment_source": "hdbscan",
+            "bbox": [1, 2, 3, 4],
+        }
+
+    persons = [
+        {
+            "person_label": 0,
+            "person_key": "person_0",
+            "person_face_count": 8,
+            "person_cluster_count": 1,
+            "clusters": [
+                {
+                    "cluster_key": "cluster_0",
+                    "cluster_label": 0,
+                    "member_count": 8,
+                    "members": [
+                        _member("p0_0", [1.0, 0.0]),
+                        _member("p0_1", [0.998, 0.055]),
+                        _member("p0_2", [0.995, 0.098]),
+                        _member("p0_3", [0.989, 0.145]),
+                        _member("p0_4", [0.978, 0.208]),
+                        _member("p0_5", [0.971, 0.239]),
+                        _member("p0_6", [0.965, 0.262]),
+                        _member("p0_7", [0.957, 0.289]),
+                    ],
+                }
+            ],
+        },
+        {
+            "person_label": 1,
+            "person_key": "person_1",
+            "person_face_count": 8,
+            "person_cluster_count": 1,
+            "clusters": [
+                {
+                    "cluster_key": "cluster_1",
+                    "cluster_label": 1,
+                    "member_count": 8,
+                    "members": [
+                        _member("p1_0", [0.0, 1.0]),
+                        _member("p1_1", [0.055, 0.998]),
+                        _member("p1_2", [0.098, 0.995]),
+                        _member("p1_3", [0.145, 0.989]),
+                        _member("p1_4", [0.208, 0.978]),
+                        _member("p1_5", [0.239, 0.971]),
+                        _member("p1_6", [0.262, 0.965]),
+                        _member("p1_7", [0.289, 0.957]),
+                    ],
+                }
+            ],
+        },
+        {
+            "person_label": 2,
+            "person_key": "person_2",
+            "person_face_count": 2,
+            "person_cluster_count": 1,
+            "clusters": [
+                {
+                    "cluster_key": "cluster_2",
+                    "cluster_label": 2,
+                    "member_count": 2,
+                    "members": [
+                        _member("cand_0", [0.706, 0.708]),
+                        _member("cand_1", [0.707, 0.707]),
+                    ],
+                }
+            ],
+        },
+    ]
+
+    updated_persons, events, moved_count = attach_micro_clusters_to_existing_persons(
+        persons=persons,
+        source_max_cluster_size=3,
+        source_max_person_face_count=8,
+        target_min_person_face_count=8,
+        knn_top_n=5,
+        min_votes=3,
+        distance_threshold=0.35,
+        margin_threshold=0.04,
+        max_rounds=2,
+    )
+
+    assert moved_count == 0
+    assert events == []
+    assert len(updated_persons) == 3
+    trailing_person = next(person for person in updated_persons if any(c["cluster_label"] == 2 for c in person["clusters"]))
+    assert trailing_person["person_face_count"] == 2
 
 
 def test_render_review_html_has_two_stage_collapsible_sections() -> None:
@@ -676,6 +936,182 @@ def test_run_cluster_stage_can_demote_low_quality_micro_clusters_to_noise(tmp_pa
     for member in noise_cluster["members"]:
         if member["face_id"] in {"l_000", "l_001"}:
             assert member["cluster_assignment_source"] == "noise"
+
+
+def test_run_cluster_stage_can_reassign_non_noise_micro_cluster_to_anchor_person(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "out"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "dummy.jpg").write_bytes(b"x")
+
+    db_path = output_dir / "cache" / "pipeline.db"
+    conn = open_pipeline_db(db_path)
+    rows = [
+        {
+            "face_id": "a_000",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_000.jpg",
+            "context_relpath": "assets/context/a_000.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_000.png",
+            "bbox": [1, 2, 3, 4],
+            "detector_confidence": 0.95,
+            "face_area_ratio": 0.032,
+        },
+        {
+            "face_id": "a_001",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_001.jpg",
+            "context_relpath": "assets/context/a_001.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_001.png",
+            "bbox": [5, 6, 7, 8],
+            "detector_confidence": 0.94,
+            "face_area_ratio": 0.030,
+        },
+        {
+            "face_id": "a_002",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_002.jpg",
+            "context_relpath": "assets/context/a_002.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_002.png",
+            "bbox": [9, 10, 11, 12],
+            "detector_confidence": 0.93,
+            "face_area_ratio": 0.028,
+        },
+        {
+            "face_id": "a_003",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_003.jpg",
+            "context_relpath": "assets/context/a_003.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_003.png",
+            "bbox": [13, 14, 15, 16],
+            "detector_confidence": 0.92,
+            "face_area_ratio": 0.027,
+        },
+        {
+            "face_id": "b_000",
+            "photo_relpath": "album/b.jpg",
+            "crop_relpath": "assets/crops/b_000.jpg",
+            "context_relpath": "assets/context/b_000.jpg",
+            "preview_relpath": "assets/preview/b.jpg",
+            "aligned_relpath": "assets/aligned/b_000.png",
+            "bbox": [17, 18, 19, 20],
+            "detector_confidence": 0.91,
+            "face_area_ratio": 0.026,
+        },
+        {
+            "face_id": "b_001",
+            "photo_relpath": "album/b.jpg",
+            "crop_relpath": "assets/crops/b_001.jpg",
+            "context_relpath": "assets/context/b_001.jpg",
+            "preview_relpath": "assets/preview/b.jpg",
+            "aligned_relpath": "assets/aligned/b_001.png",
+            "bbox": [21, 22, 23, 24],
+            "detector_confidence": 0.90,
+            "face_area_ratio": 0.025,
+        },
+        {
+            "face_id": "b_002",
+            "photo_relpath": "album/b.jpg",
+            "crop_relpath": "assets/crops/b_002.jpg",
+            "context_relpath": "assets/context/b_002.jpg",
+            "preview_relpath": "assets/preview/b.jpg",
+            "aligned_relpath": "assets/aligned/b_002.png",
+            "bbox": [25, 26, 27, 28],
+            "detector_confidence": 0.89,
+            "face_area_ratio": 0.024,
+        },
+        {
+            "face_id": "b_003",
+            "photo_relpath": "album/b.jpg",
+            "crop_relpath": "assets/crops/b_003.jpg",
+            "context_relpath": "assets/context/b_003.jpg",
+            "preview_relpath": "assets/preview/b.jpg",
+            "aligned_relpath": "assets/aligned/b_003.png",
+            "bbox": [29, 30, 31, 32],
+            "detector_confidence": 0.88,
+            "face_area_ratio": 0.023,
+        },
+        {
+            "face_id": "c_000",
+            "photo_relpath": "album/c.jpg",
+            "crop_relpath": "assets/crops/c_000.jpg",
+            "context_relpath": "assets/context/c_000.jpg",
+            "preview_relpath": "assets/preview/c.jpg",
+            "aligned_relpath": "assets/aligned/c_000.png",
+            "bbox": [33, 34, 35, 36],
+            "detector_confidence": 0.93,
+            "face_area_ratio": 0.026,
+        },
+        {
+            "face_id": "c_001",
+            "photo_relpath": "album/c.jpg",
+            "crop_relpath": "assets/crops/c_001.jpg",
+            "context_relpath": "assets/context/c_001.jpg",
+            "preview_relpath": "assets/preview/c.jpg",
+            "aligned_relpath": "assets/aligned/c_001.png",
+            "bbox": [37, 38, 39, 40],
+            "detector_confidence": 0.92,
+            "face_area_ratio": 0.025,
+        },
+    ]
+    for row in rows:
+        upsert_detected_face(conn, row)
+
+    mark_face_embedded(conn, "a_000", embedding=[1.0, 0.0], magface_quality=12.3, quality_score=0.95)
+    mark_face_embedded(conn, "a_001", embedding=[0.998, 0.060], magface_quality=12.0, quality_score=0.93)
+    mark_face_embedded(conn, "a_002", embedding=[0.996, 0.089], magface_quality=11.9, quality_score=0.92)
+    mark_face_embedded(conn, "a_003", embedding=[0.992, 0.123], magface_quality=11.8, quality_score=0.90)
+
+    mark_face_embedded(conn, "b_000", embedding=[0.989, 0.145], magface_quality=11.7, quality_score=0.89)
+    mark_face_embedded(conn, "b_001", embedding=[0.984, 0.177], magface_quality=11.6, quality_score=0.88)
+    mark_face_embedded(conn, "b_002", embedding=[0.978, 0.208], magface_quality=11.5, quality_score=0.87)
+    mark_face_embedded(conn, "b_003", embedding=[0.971, 0.239], magface_quality=11.4, quality_score=0.86)
+
+    mark_face_embedded(conn, "c_000", embedding=[0.865, 0.502], magface_quality=11.9, quality_score=0.91)
+    mark_face_embedded(conn, "c_001", embedding=[0.842, 0.539], magface_quality=11.8, quality_score=0.90)
+    set_meta(conn, "max_images", 1)
+    conn.close()
+
+    def fake_cluster(embeddings, min_cluster_size, min_samples):
+        assert len(embeddings) == 10
+        return [0, 0, 0, 0, 1, 1, 1, 1, 2, 2], [0.99] * 10
+
+    monkeypatch.setattr("hikbox_pictures.face_review_pipeline._cluster_with_hdbscan", fake_cluster)
+
+    payload = run_cluster_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        detector_model_name="buffalo_l",
+        det_size=640,
+        min_cluster_size=2,
+        min_samples=1,
+        person_merge_threshold=0.03,
+        person_rep_top_k=2,
+        person_knn_k=2,
+        person_linkage="average",
+        person_enable_same_photo_cannot_link=False,
+        preview_max_side=480,
+        magface_checkpoint=Path(".cache/magface/magface_iresnet100_ms1mv2.pth"),
+        person_cluster_recall_distance_threshold=0.30,
+        person_cluster_recall_margin_threshold=0.04,
+        person_cluster_recall_top_n=5,
+        person_cluster_recall_min_votes=3,
+        person_cluster_recall_source_max_cluster_size=3,
+        person_cluster_recall_source_max_person_faces=8,
+        person_cluster_recall_target_min_person_faces=8,
+        person_cluster_recall_max_rounds=2,
+    )
+
+    assert payload["meta"]["person_cluster_recall_attach_count"] == 1
+    assert payload["meta"]["person_cluster_recall_round_count"] >= 1
+    assert len(payload["person_cluster_recall_events"]) == 1
+    assert payload["person_cluster_recall_events"][0]["cluster_label"] == 2
+    assert payload["persons"][0]["person_face_count"] == 10
+    assert {cluster["cluster_label"] for cluster in payload["persons"][0]["clusters"]} == {0, 1, 2}
 
 
 def test_sqlite_roundtrip_for_two_phase_pipeline(tmp_path: Path) -> None:
