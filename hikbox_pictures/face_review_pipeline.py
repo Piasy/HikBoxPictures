@@ -601,6 +601,59 @@ def attach_noise_faces_to_person_consensus(
     return updated_labels, updated_probabilities, attached_count
 
 
+def demote_low_quality_micro_clusters(
+    faces: list[dict[str, Any]],
+    labels: list[int],
+    probabilities: list[float | None],
+    max_cluster_size: int,
+    top2_weight: float,
+    min_quality_evidence: float,
+) -> tuple[list[int], list[float | None], int, int]:
+    if len(faces) != len(labels) or len(faces) != len(probabilities):
+        raise ValueError("faces、labels、probabilities 数量不一致")
+
+    if int(max_cluster_size) <= 0 or float(min_quality_evidence) <= 0:
+        return list(labels), list(probabilities), 0, 0
+
+    safe_top2_weight = max(0.0, float(top2_weight))
+    updated_labels = list(labels)
+    updated_probabilities = list(probabilities)
+    demoted_cluster_count = 0
+    demoted_face_count = 0
+
+    cluster_to_indices: dict[int, list[int]] = defaultdict(list)
+    for idx, label in enumerate(labels):
+        cluster_label = int(label)
+        if cluster_label == -1:
+            continue
+        cluster_to_indices[cluster_label].append(idx)
+
+    for indices in cluster_to_indices.values():
+        if len(indices) > int(max_cluster_size):
+            continue
+
+        quality_values = sorted(
+            [float(faces[idx].get("quality_score") or 0.0) for idx in indices],
+            reverse=True,
+        )
+        if not quality_values:
+            continue
+
+        top1 = quality_values[0]
+        top2 = quality_values[1] if len(quality_values) >= 2 else 0.0
+        quality_evidence = top1 + safe_top2_weight * top2
+        if quality_evidence >= float(min_quality_evidence):
+            continue
+
+        demoted_cluster_count += 1
+        demoted_face_count += len(indices)
+        for idx in indices:
+            updated_labels[idx] = -1
+            updated_probabilities[idx] = 0.0
+
+    return updated_labels, updated_probabilities, demoted_cluster_count, demoted_face_count
+
+
 def _pairwise_cosine_distance(vectors: np.ndarray) -> np.ndarray:
     sims = np.clip(vectors @ vectors.T, -1.0, 1.0)
     dist = 1.0 - sims
@@ -1076,6 +1129,12 @@ def render_review_html(payload: dict[str, Any]) -> str:
       justify-content: flex-end;
       margin-bottom: 8px;
     }}
+    .stage-actions {{
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 10px;
+    }}
+    .person-toggle-all,
     .person-cluster-toggle {{
       border: 1px solid #c7d7fb;
       background: #eef4ff;
@@ -1086,6 +1145,7 @@ def render_review_html(payload: dict[str, Any]) -> str:
       font-weight: 600;
       cursor: pointer;
     }}
+    .person-toggle-all:hover,
     .person-cluster-toggle:hover {{
       background: #e3edff;
     }}
@@ -1172,6 +1232,9 @@ def render_review_html(payload: dict[str, Any]) -> str:
         <span class=\"stage-meta\">persons={person_count}</span>
       </summary>
       <div class=\"stage-body\">
+        <div class=\"stage-actions\">
+          <button type=\"button\" class=\"person-toggle-all\" data-person-toggle-all>展开全部 person</button>
+        </div>
         {''.join(person_blocks)}
       </div>
     </details>
@@ -1187,7 +1250,7 @@ def render_review_html(payload: dict[str, Any]) -> str:
   </main>
   <script>
     (() => {{
-      const updateButtonText = (button, clusterDetailsList) => {{
+      const updatePersonClusterButtonText = (button, clusterDetailsList) => {{
         if (clusterDetailsList.length === 0) {{
           button.disabled = true;
           button.textContent = "无可展开 cluster";
@@ -1197,13 +1260,43 @@ def render_review_html(payload: dict[str, Any]) -> str:
         button.textContent = allOpen ? "折叠全部 cluster" : "展开全部 cluster";
       }};
 
+      const personDetailsList = Array.from(document.querySelectorAll("details.person"));
+      const personToggleAllButton = document.querySelector("[data-person-toggle-all]");
+      const updatePersonToggleAllButtonText = () => {{
+        if (!personToggleAllButton) {{
+          return;
+        }}
+        if (personDetailsList.length === 0) {{
+          personToggleAllButton.disabled = true;
+          personToggleAllButton.textContent = "无可展开 person";
+          return;
+        }}
+        const allOpen = personDetailsList.every((node) => node.open);
+        personToggleAllButton.textContent = allOpen ? "折叠全部 person" : "展开全部 person";
+      }};
+
+      if (personToggleAllButton) {{
+        personToggleAllButton.addEventListener("click", () => {{
+          const allOpen = personDetailsList.every((node) => node.open);
+          personDetailsList.forEach((node) => {{
+            node.open = !allOpen;
+          }});
+          updatePersonToggleAllButtonText();
+        }});
+      }}
+
+      personDetailsList.forEach((personDetails) => {{
+        personDetails.addEventListener("toggle", updatePersonToggleAllButtonText);
+      }});
+      updatePersonToggleAllButtonText();
+
       document.querySelectorAll("[data-person-cluster-toggle]").forEach((button) => {{
         const personDetails = button.closest("details.person");
         if (!personDetails) {{
           return;
         }}
         const clusterDetailsList = Array.from(personDetails.querySelectorAll("details.person-cluster"));
-        updateButtonText(button, clusterDetailsList);
+        updatePersonClusterButtonText(button, clusterDetailsList);
 
         personDetails.addEventListener("toggle", () => {{
           if (!personDetails.open) {{
@@ -1212,7 +1305,7 @@ def render_review_html(payload: dict[str, Any]) -> str:
           clusterDetailsList.forEach((node) => {{
             node.open = true;
           }});
-          updateButtonText(button, clusterDetailsList);
+          updatePersonClusterButtonText(button, clusterDetailsList);
         }});
 
         button.addEventListener("click", () => {{
@@ -1220,12 +1313,12 @@ def render_review_html(payload: dict[str, Any]) -> str:
           clusterDetailsList.forEach((node) => {{
             node.open = !allOpen;
           }});
-          updateButtonText(button, clusterDetailsList);
+          updatePersonClusterButtonText(button, clusterDetailsList);
         }});
 
         clusterDetailsList.forEach((node) => {{
           node.addEventListener("toggle", () => {{
-            updateButtonText(button, clusterDetailsList);
+            updatePersonClusterButtonText(button, clusterDetailsList);
           }});
         }});
       }});
@@ -1510,6 +1603,9 @@ def run_cluster_stage(
     person_consensus_distance_threshold: float | None = None,
     person_consensus_margin_threshold: float = 0.04,
     person_consensus_rep_top_k: int = 3,
+    low_quality_micro_cluster_max_size: int = 3,
+    low_quality_micro_cluster_top2_weight: float = 0.5,
+    low_quality_micro_cluster_min_quality_evidence: float | None = None,
 ) -> dict[str, Any]:
     dirs = _ensure_dirs(output_dir, reset_output=False)
     conn = open_pipeline_db(dirs["db"])
@@ -1541,6 +1637,21 @@ def run_cluster_stage(
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
     )
+
+    low_quality_micro_cluster_demoted_cluster_count = 0
+    low_quality_micro_cluster_demoted_face_count = 0
+    if low_quality_micro_cluster_min_quality_evidence is not None and low_quality_micro_cluster_min_quality_evidence > 0:
+        quality_faces = [{"quality_score": obs.quality_score} for obs in observations]
+        labels, probabilities, low_quality_micro_cluster_demoted_cluster_count, low_quality_micro_cluster_demoted_face_count = (
+            demote_low_quality_micro_clusters(
+                faces=quality_faces,
+                labels=labels,
+                probabilities=probabilities,
+                max_cluster_size=int(low_quality_micro_cluster_max_size),
+                top2_weight=float(low_quality_micro_cluster_top2_weight),
+                min_quality_evidence=float(low_quality_micro_cluster_min_quality_evidence),
+            )
+        )
 
     person_consensus_attach_count = 0
     if person_consensus_distance_threshold is not None and person_consensus_distance_threshold > 0:
@@ -1640,6 +1751,11 @@ def run_cluster_stage(
             "person_consensus_margin_threshold": person_consensus_margin_threshold,
             "person_consensus_rep_top_k": person_consensus_rep_top_k,
             "person_consensus_attach_count": person_consensus_attach_count,
+            "low_quality_micro_cluster_max_size": low_quality_micro_cluster_max_size,
+            "low_quality_micro_cluster_top2_weight": low_quality_micro_cluster_top2_weight,
+            "low_quality_micro_cluster_min_quality_evidence": low_quality_micro_cluster_min_quality_evidence,
+            "low_quality_micro_cluster_demoted_cluster_count": low_quality_micro_cluster_demoted_cluster_count,
+            "low_quality_micro_cluster_demoted_face_count": low_quality_micro_cluster_demoted_face_count,
             "person_count": len(persons),
             "person_clusterer": "AHC",
             "person_linkage": person_linkage,
@@ -1682,6 +1798,9 @@ def run_pipeline(
     person_consensus_distance_threshold: float | None,
     person_consensus_margin_threshold: float,
     person_consensus_rep_top_k: int,
+    low_quality_micro_cluster_max_size: int,
+    low_quality_micro_cluster_top2_weight: float,
+    low_quality_micro_cluster_min_quality_evidence: float | None,
     max_images: int | None,
     stage: str,
     reset_output: bool,
@@ -1730,6 +1849,9 @@ def run_pipeline(
             person_consensus_distance_threshold=person_consensus_distance_threshold,
             person_consensus_margin_threshold=person_consensus_margin_threshold,
             person_consensus_rep_top_k=person_consensus_rep_top_k,
+            low_quality_micro_cluster_max_size=low_quality_micro_cluster_max_size,
+            low_quality_micro_cluster_top2_weight=low_quality_micro_cluster_top2_weight,
+            low_quality_micro_cluster_min_quality_evidence=low_quality_micro_cluster_min_quality_evidence,
         )
 
     # all 阶段通过子进程串行执行，确保每个阶段释放内存。
@@ -1774,6 +1896,17 @@ def run_pipeline(
                 str(person_consensus_margin_threshold),
                 "--person-consensus-rep-top-k",
                 str(person_consensus_rep_top_k),
+            ]
+        )
+    if low_quality_micro_cluster_min_quality_evidence is not None:
+        base_cmd.extend(
+            [
+                "--low-quality-micro-cluster-max-size",
+                str(low_quality_micro_cluster_max_size),
+                "--low-quality-micro-cluster-top2-weight",
+                str(low_quality_micro_cluster_top2_weight),
+                "--low-quality-micro-cluster-min-quality-evidence",
+                str(low_quality_micro_cluster_min_quality_evidence),
             ]
         )
     if person_enable_same_photo_cannot_link:
@@ -1843,6 +1976,24 @@ def _parse_args() -> argparse.Namespace:
         default=3,
         help="person-consensus 回挂构建微簇代表向量时使用的高质量样本数",
     )
+    parser.add_argument(
+        "--low-quality-micro-cluster-max-size",
+        type=int,
+        default=3,
+        help="低质量微簇回退规则的最大簇大小（仅对 <= 该值的微簇生效）",
+    )
+    parser.add_argument(
+        "--low-quality-micro-cluster-top2-weight",
+        type=float,
+        default=0.5,
+        help="低质量微簇回退规则中第二高质量样本权重（证据分=top1+weight*top2）",
+    )
+    parser.add_argument(
+        "--low-quality-micro-cluster-min-quality-evidence",
+        type=float,
+        default=None,
+        help="低质量微簇回退阈值；不传则关闭（证据分低于阈值的微簇整体回退到 noise）",
+    )
     parser.add_argument("--max-images", type=int, default=None, help="仅处理前 N 张图片（调试）")
     parser.add_argument("--stage", choices=["all", "detect", "embed", "cluster"], default="all", help="分阶段执行")
     parser.add_argument("--reset-output", action="store_true", help="执行 detect 时先清空输出目录与数据库")
@@ -1869,6 +2020,9 @@ def main() -> int:
         person_consensus_distance_threshold=args.person_consensus_distance_threshold,
         person_consensus_margin_threshold=args.person_consensus_margin_threshold,
         person_consensus_rep_top_k=args.person_consensus_rep_top_k,
+        low_quality_micro_cluster_max_size=args.low_quality_micro_cluster_max_size,
+        low_quality_micro_cluster_top2_weight=args.low_quality_micro_cluster_top2_weight,
+        low_quality_micro_cluster_min_quality_evidence=args.low_quality_micro_cluster_min_quality_evidence,
         max_images=args.max_images,
         stage=args.stage,
         reset_output=args.reset_output,

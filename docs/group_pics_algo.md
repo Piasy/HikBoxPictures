@@ -1,4 +1,4 @@
-# 群照人物算法演进总结（v1~v4）
+# 群照人物算法演进总结（v1~v5）
 
 这篇文档用于对外分享我们的相册图库人物系统演进，不追踪细节调参，只讲主导思路如何一步步变化。
 
@@ -248,6 +248,79 @@ v4 的价值在于，它把调研结论落成了可持续工程路径：
 - 这里的 `person0 / person1` 指当前 review 页里按 `person_face_count / person_cluster_count / min_cluster_label` 排序后的临时编号，只用于描述这轮实验结果，不是稳定人物 ID。
 - 这轮优化的本质是：先用更宽松的一阶段参数释放可成簇样本，再把一部分“已经明显接近已有 person 的噪声脸”挂回已有微簇，从而在基本不伤 precision 的前提下提升 recall。
 
+#### 追加实验 A：`min_cluster_size=2` 放开 pair 微簇（方案 3）
+
+为了进一步清理高质量噪声，做过一轮更激进实验：把第一阶段最小成簇规模从 `3` 放宽到 `2`，允许 pair 直接成微簇。
+
+- 实验目录：`.tmp/magface_hdbscan_review_min_cluster_2_min_samples_1_person_consensus_024`
+- 参数：
+  - `min_cluster_size = 2`
+  - `min_samples = 1`
+  - `person_consensus_distance_threshold = 0.24`
+  - `person_consensus_margin_threshold = 0.04`
+  - `person_consensus_rep_top_k = 3`
+  - `person_merge_threshold = 0.26`
+
+结果（相对 `magface_hdbscan_review_min_samples_1_person_consensus_024`）：
+
+- `noise_count: 746 -> 521`（再降 `225`）
+- `cluster_count: 272 -> 523`（增加 `251`）
+- `person_count: 113 -> 246`（增加 `133`）
+- 剩余噪声中：
+  - `Q>=0.55: 446 -> 305`
+  - `Q>=1.0: 283 -> 193`
+  - `Q>=2.0: 119 -> 89`
+
+副作用也很明显：
+
+- 出现 `235` 个 `size=2` 微簇。
+- 其中 `141` 个是“基线两张都在 noise、现在变成 pair 微簇”。
+- `person_consensus_attach_count` 从 `147` 降到 `112`，说明提升主要来自“一阶段放开成簇”，不是“更多挂回已有 person”。
+- `person0/person1` 的 face 数仅小幅变化（`613 -> 638`、`459 -> 464`）。
+
+结论：  
+方案 3 的确显著降低了 noise，但主要收益来自“新生小簇变多”，结果会更碎，后续必须补一个“低质量小簇回退”闸门。
+
+#### 追加实验 B：低质量微簇回退闸门（本轮代码补丁）
+
+在方案 3 的 review 中，`cluster_63 / cluster_83 / cluster_88` 这类“超小脸 + 低质量分”样本被错误留在微簇里。  
+为抑制这类回捞，在 HDBSCAN 之后、person-consensus 之前新增了“低质量微簇回退”规则：
+
+- 仅检查小微簇：`cluster_size <= low_quality_micro_cluster_max_size`
+- 计算簇质量证据分：  
+  `quality_evidence = top1_quality + low_quality_micro_cluster_top2_weight * top2_quality`
+- 若 `quality_evidence < low_quality_micro_cluster_min_quality_evidence`，则整簇回退到 `noise`
+
+新增参数（默认关闭，不影响旧流程）：
+
+- `--low-quality-micro-cluster-max-size`（默认 `3`）
+- `--low-quality-micro-cluster-top2-weight`（默认 `0.5`）
+- `--low-quality-micro-cluster-min-quality-evidence`（默认 `None`，不传即关闭）
+
+本轮验证使用参数：
+
+- `max_size=3`
+- `top2_weight=0.5`
+- `min_quality_evidence=0.65`
+
+验证目录：`.tmp/magface_hdbscan_review_min_cluster_2_min_samples_1_person_consensus_024_quality_gate`
+
+与方案 3 对比结果：
+
+- `cluster_count: 523 -> 449`
+- `noise_count: 521 -> 683`
+- `person_count: 246 -> 175`
+- 回退统计：`demoted_clusters=74`、`demoted_faces=164`
+- noise 内 `Q` 分布（回退前 -> 回退后）：
+  - `Q>=0.55: 305 -> 305`
+  - `Q>=1.0: 193 -> 193`
+  - `Q>=2.0: 89 -> 89`
+  - `Q<0.55: 216 -> 378`
+- `cluster_63 / 83 / 88` 均被回退到 `noise`
+- `person0/person1` face 数保持不变（`638 / 464`）
+
+这说明该闸门主要清理的是低质量小簇，不会明显伤到你当前重点关注人物的主干召回。
+
 ### v4 TODO
 
 1. 两个聚类阶段，都是 precesion 较高，但召回率仍有较大提升空间。
@@ -262,3 +335,258 @@ v4 的价值在于，它把调研结论落成了可持续工程路径：
      min_cluster_label 重排，再重新生成 person_{idx}，所以人物 ID 同样是一次运行内的临时编号，不能直接支撑后续命名或人工纠错沉淀。
 
 3. det_size 太小了，现在绝大部分都是很高清的图，改成 1280 试试，检测速度不是大问题
+
+## v5：统一证据图驱动的全局人物归属（主流程设计）
+
+### 核心目标
+
+v5 的目标不是在 v4 上继续“局部补丁式提召回”，而是把整条人物归属流程统一成一个全局优化问题，在同一套求解里同时处理：
+
+- `noise` 样本归属
+- `非-noise 微簇 -> 已有人物` 归属
+- 已有人物之间的可合并关系
+- 低置信候选的新人物发现
+
+核心优化方向是：
+
+1. 在不牺牲主干 precision 的前提下显著提升 recall。
+2. 解决“微簇已形成但没归到正确人物”的结构性问题。
+3. 把规则与阈值从“分散在多个阶段的局部决策”升级为“可学习、可审计、可迭代的全局决策”。
+
+### 设计原则
+
+1. 保留 v4 的“两阶段骨架”：先形成高纯微簇，再做人物级归并。
+2. 取消“仅 noise 可回挂”的单点特例，把所有微簇统一纳入人物归属决策。
+3. 先高召回再全局裁决：第一阶段允许更高召回，第二阶段用强约束和全局目标控制误并。
+4. 人物归属以 face-level 多样本证据为主，簇代表向量只作为一类特征，不再是唯一证据。
+5. 全流程强审计：每次自动归属都能追溯证据、阈值、模型分数和冲突约束。
+
+### v5 主流程
+
+#### 0. 数据模型与稳定 ID 初始化
+
+在 `detect/embed/cluster` 前统一数据约定：
+
+- `face_id`：单张人脸 observation 唯一键（已有）。
+- `cluster_id`：一次运行中的微簇键（已有）。
+- `person_uuid`：跨运行稳定人物 ID（新增），不再以 `person_{idx}` 作为长期标识。
+- `assignment_run_id`：每轮全量求解的版本号（新增），支持回滚和对比。
+
+输出要求：
+
+- 每个 `cluster_id` 保留完整 face 列表，不允许后续步骤把一个微簇拆成多个人物（簇完整性约束）。
+
+#### 1. 检测、对齐与多视角 embedding
+
+在人脸表示阶段引入多视角表征，降低“单姿态 embedding”对归属的随机性：
+
+1. 原对齐图 embedding（主向量）。
+2. 水平翻转 embedding（鲁棒向量）。
+3. 可选上下文裁剪 embedding（弱监督辅助向量）。
+
+每张脸保留：
+
+- `embedding_main`
+- `embedding_flip`
+- `embedding_context`（可选）
+- `magface_quality`
+- `det_confidence`
+- `face_area_ratio`
+- `quality_score`
+
+#### 2. 第一阶段高召回微簇（HDBSCAN）
+
+v5 中第一阶段职责明确为“高召回候选生成”，而不是在这一阶段完成最终人物判定。
+
+建议默认：
+
+- `min_cluster_size = 2`
+- `min_samples = 1`
+
+并把 `noise` 样本转成“单点微簇”进入后续统一归属，不再在流程里单独分叉。
+
+#### 3. 质量门控前置层（硬排除）
+
+在进入统一候选图前，先执行质量门控，避免“极低质量样本”污染后续归属：
+
+1. face 级硬排除：
+
+- 当 face 质量低于硬阈值时，直接标记 `low_quality_ignored`，不进入身份归属图。
+- 这类样本仅用于留档与后续人工抽检，不参与自动归属与自动合并。
+
+2. 微簇级硬排除（沿用 v4 经验并升级）：
+
+- 对小微簇计算簇质量证据分：  
+  `quality_evidence = top1_quality + w * top2_quality`。
+- 若 `quality_evidence` 低于硬阈值，则该微簇禁止自动归属到任何已有 person。
+- 该微簇仅允许进入“待复核”或“证据待积累”队列，不参与自动并入。
+
+这一步与 v4 的“低质量微簇回退闸门”保持连续，但在 v5 中从实验补丁升级为主流程硬约束入口。
+
+#### 4. 微簇多原型建模
+
+每个微簇构建多原型而非单一 centroid：
+
+1. 高质量加权中心原型 `r_center`。
+2. 高质量 medoid 原型 `r_medoid`。
+3. top-N exemplar 原型集 `r_exemplar[1..N]`（按质量和多样性选取）。
+
+这一步用于解决“离 centroid 远，但离同人具体样本近”的漏召回问题。
+
+#### 5. 统一候选图构建（cluster-person / person-person）
+
+构建统一证据图，节点包含微簇与人物，边包含两类：
+
+1. `cluster -> person` 候选边：表示“该微簇可归入该人物”的候选关系。
+2. `person -> person` 候选边：表示“两个人物应合并”的候选关系。
+
+`cluster -> person` 边特征至少包含：
+
+- face-level kNN 投票（top-k 中同一人物票数）
+- top1/top3/top5 距离统计（主向量与多视角向量）
+- 原型相似度（center/medoid/exemplar 的最优匹配）
+- 与第二候选人物的 margin
+- 同图冲突惩罚（若存在）
+- 质量证据（簇内 top1/top2 质量）
+
+`person -> person` 边特征至少包含：
+
+- 跨簇最小距离、分位点距离
+- 双向 top-k 近邻覆盖率
+- 同图冲突计数
+- 时间/设备分布相似性（可选）
+
+#### 6. 学习型边打分器
+
+用历史 review 结果训练边打分器，输出概率而非硬规则：
+
+- `P(cluster 属于 person)`
+- `P(personA 与 personB 应合并)`
+
+模型建议优先使用可解释模型（如 LightGBM），并保留特征贡献输出，方便错误归因。
+
+#### 7. 全局约束优化求解（核心）
+
+把归属问题建模为带约束的全局优化：
+
+- 变量：
+  - `x_{c,p} ∈ {0,1}`：微簇 `c` 是否归属人物 `p`
+  - `y_{c,new} ∈ {0,1}`：微簇 `c` 是否创建新人物
+  - `m_{p,q} ∈ {0,1}`：人物 `p,q` 是否合并
+
+- 目标（示意）：
+  - 最大化 `Σ x_{c,p} * score(c,p) + λ * Σ m_{p,q} * score(p,q) - penalty`
+
+- 关键约束：
+  1. 每个微簇必须且仅能归属一个去向：已有人物或新人物。
+  2. 同图冲突为硬约束：冲突样本不得落到同一人物。
+  3. 簇完整性约束：单个微簇不得拆分到多人。
+  4. 低质量硬排除约束：被前置质量门控标记为硬排除的 face/cluster，不得进入自动归属变量。
+  5. 低质量保护约束：低证据微簇不可自动归入高置信人物，只能进待复核或新人物候选。
+
+这一步里，`非-noise 微簇 -> 已有人物` 是内生变量 `x_{c,p}`，不再是流程外特判动作。
+
+#### 8. 三档输出策略
+
+按优化后分数和不确定性分三档：
+
+1. 自动通过：高置信、无冲突。
+2. 待复核：分差小、证据不足或触发软冲突。
+3. 保持独立：生成新人物候选，等待后续积累证据。
+
+质量门控映射关系：
+
+1. face 级硬排除：直接进入“忽略池”，不进三档。
+2. 微簇级硬排除：只能进入“待复核”或“保持独立”。
+3. 未触发硬排除的样本：按全局优化分数进入三档。
+
+#### 9. 迭代收敛（EM 风格）
+
+执行 2~4 轮迭代：
+
+1. 以上一轮人物集合更新原型。
+2. 重算候选边与边分数。
+3. 重跑全局优化。
+
+收敛判据：
+
+- 人物划分变化率低于阈值（如 `<0.5%`）或达到最大轮次。
+
+#### 10. 稳定人物 ID 对齐与增量并入
+
+每轮求解后，把本轮人物与历史 `person_uuid` 做最大匹配对齐（匈牙利算法或最大权匹配）：
+
+- 匹配成功：复用旧 `person_uuid`。
+- 匹配失败：创建新 `person_uuid`。
+
+这样可支持命名沉淀、人工纠错累积和增量入库的一致性。
+
+#### 11. 审计与回放产物
+
+每轮输出必须包含：
+
+- `assignment_events`：每个微簇归属决策的证据明细。
+- `merge_events`：人物合并依据与冲突检查结果。
+- `uncertain_queue`：待复核样本清单和触发原因。
+- `run_metrics`：precision/recall/F1、误并率、拆分率、人工负载指标。
+
+### 关键变化：与 v4 的关系
+
+v5 保留了 v4 “先微簇、后人物”的主路径，但做了三处根本升级：
+
+1. 第二阶段从“单一 AHC 阈值切树”升级为“学习打分 + 约束优化”。
+2. `noise` 与 `非-noise` 微簇在人物归属上统一建模，不再流程分叉。
+3. 人物 ID 从运行内临时编号升级为跨运行稳定标识。
+
+并新增一处主流程级加强：
+
+4. v4 的低质量微簇回退策略升级为 v5 的前置硬门控，不再是可有可无的后处理补丁。
+
+### v5 质量门控建议参数（首版）
+
+以下建议用于首版离线实验，不是最终固定值：
+
+1. face 级硬排除：
+
+- `face_min_quality_for_assignment`：低于该值的 face 不进入自动归属图。
+- 建议先用分位点初始化（如全库质量分的 `p5~p10`），再按误并案例回调。
+
+2. 微簇级硬排除：
+
+- `low_quality_micro_cluster_max_size`：仅在小微簇上启用硬排除（建议 `<=3`）。
+- `low_quality_micro_cluster_top2_weight`：沿用 v4（建议起始 `0.5`）。
+- `low_quality_micro_cluster_min_quality_evidence`：建议从 v4 验证有效值起步（如 `0.65`），再做网格搜索。
+
+3. 软约束层：
+
+- 对未硬排除但质量偏低的样本施加分数惩罚，不直接禁止归属。
+- 建议将惩罚项与 `magface_quality / det_confidence / face_area_ratio` 联动，而非单一阈值。
+
+执行原则：
+
+1. 硬排除只负责“兜底 precision”，阈值宁严勿宽。
+2. recall 主要由“软约束 + 全局优化”提升，避免用放宽硬阈值来换召回。
+
+### 评测协议（准确率与召回率并重）
+
+v5 的离线评测至少包含：
+
+1. face-level pairwise precision / recall / F1。
+2. BCubed precision / recall / F1。
+3. 主人物召回指标（例如当前关注人物 0/1 的召回与误并率）。
+4. “自动通过”样本的 precision 下限（作为上线闸门）。
+5. 待复核队列规模（人工负载）。
+
+上线闸门建议：
+
+1. 自动通过 precision 不低于 v4 基线。
+2. 召回率显著高于 v4（目标增益阈值由实验集确定）。
+3. 待复核规模可控，不出现数量级膨胀。
+
+### 落地步骤（建议）
+
+1. 第一步：补齐 `person_uuid`、决策审计数据结构，不改当前判定逻辑。
+2. 第二步：接入统一候选图与边特征抽取，先做 shadow 打分，不影响线上结果。
+3. 第三步：上线 `cluster -> person` 全局优化（先不启用 `person -> person` 合并变量）。
+4. 第四步：接入 `person -> person` 全局合并与 EM 迭代，替换当前 AHC 主判定。
+5. 第五步：用持续 review 数据做周期性重训，进入稳定迭代阶段。

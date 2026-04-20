@@ -343,8 +343,12 @@ def test_render_review_html_has_two_stage_collapsible_sections() -> None:
     assert "person_0" in html
     assert "cluster_0" in html
     assert 'class="person-cluster panel-subitem" open' in html
+    assert 'class="person-toggle-all"' in html
+    assert "data-person-toggle-all" in html
     assert 'class="person-cluster-toggle"' in html
     assert 'data-person-cluster-toggle' in html
+    assert "展开全部 person" in html
+    assert "折叠全部 person" in html
 
 
 def test_run_cluster_stage_can_merge_split_micro_clusters(tmp_path: Path, monkeypatch) -> None:
@@ -554,6 +558,124 @@ def test_run_cluster_stage_can_attach_noise_face_by_person_consensus(tmp_path: P
     assert payload["clusters"][0]["members"][-1]["cluster_assignment_source"] == "person_consensus"
     assert payload["clusters"][0]["members"][0]["cluster_assignment_source"] == "hdbscan"
     assert all(member["cluster_assignment_source"] == "hdbscan" for member in payload["clusters"][1]["members"])
+
+
+def test_run_cluster_stage_can_demote_low_quality_micro_clusters_to_noise(tmp_path: Path, monkeypatch) -> None:
+    output_dir = tmp_path / "out"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    (source_dir / "dummy.jpg").write_bytes(b"x")
+
+    db_path = output_dir / "cache" / "pipeline.db"
+    conn = open_pipeline_db(db_path)
+    rows = [
+        {
+            "face_id": "a_000",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_000.jpg",
+            "context_relpath": "assets/context/a_000.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_000.png",
+            "bbox": [1, 2, 3, 4],
+            "detector_confidence": 0.95,
+            "face_area_ratio": 0.032,
+        },
+        {
+            "face_id": "a_001",
+            "photo_relpath": "album/a.jpg",
+            "crop_relpath": "assets/crops/a_001.jpg",
+            "context_relpath": "assets/context/a_001.jpg",
+            "preview_relpath": "assets/preview/a.jpg",
+            "aligned_relpath": "assets/aligned/a_001.png",
+            "bbox": [5, 6, 7, 8],
+            "detector_confidence": 0.94,
+            "face_area_ratio": 0.030,
+        },
+        {
+            "face_id": "l_000",
+            "photo_relpath": "album/l.jpg",
+            "crop_relpath": "assets/crops/l_000.jpg",
+            "context_relpath": "assets/context/l_000.jpg",
+            "preview_relpath": "assets/preview/l.jpg",
+            "aligned_relpath": "assets/aligned/l_000.png",
+            "bbox": [9, 10, 11, 12],
+            "detector_confidence": 0.62,
+            "face_area_ratio": 0.001,
+        },
+        {
+            "face_id": "l_001",
+            "photo_relpath": "album/l.jpg",
+            "crop_relpath": "assets/crops/l_001.jpg",
+            "context_relpath": "assets/context/l_001.jpg",
+            "preview_relpath": "assets/preview/l.jpg",
+            "aligned_relpath": "assets/aligned/l_001.png",
+            "bbox": [13, 14, 15, 16],
+            "detector_confidence": 0.58,
+            "face_area_ratio": 0.001,
+        },
+        {
+            "face_id": "n_000",
+            "photo_relpath": "album/n.jpg",
+            "crop_relpath": "assets/crops/n_000.jpg",
+            "context_relpath": "assets/context/n_000.jpg",
+            "preview_relpath": "assets/preview/n.jpg",
+            "aligned_relpath": "assets/aligned/n_000.png",
+            "bbox": [17, 18, 19, 20],
+            "detector_confidence": 0.90,
+            "face_area_ratio": 0.020,
+        },
+    ]
+    for row in rows:
+        upsert_detected_face(conn, row)
+
+    mark_face_embedded(conn, "a_000", embedding=[1.0, 0.0], magface_quality=12.3, quality_score=0.95)
+    mark_face_embedded(conn, "a_001", embedding=[0.997, 0.077], magface_quality=12.0, quality_score=0.88)
+    mark_face_embedded(conn, "l_000", embedding=[-1.0, 0.0], magface_quality=11.8, quality_score=0.26)
+    mark_face_embedded(conn, "l_001", embedding=[-0.981, -0.194], magface_quality=11.5, quality_score=0.18)
+    mark_face_embedded(conn, "n_000", embedding=[0.0, 1.0], magface_quality=11.7, quality_score=0.90)
+    set_meta(conn, "max_images", 1)
+    conn.close()
+
+    def fake_cluster(embeddings, min_cluster_size, min_samples):
+        assert len(embeddings) == 5
+        return [0, 0, 1, 1, -1], [0.99, 0.98, 0.97, 0.96, 0.0]
+
+    monkeypatch.setattr("hikbox_pictures.face_review_pipeline._cluster_with_hdbscan", fake_cluster)
+
+    payload = run_cluster_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        detector_model_name="buffalo_l",
+        det_size=640,
+        min_cluster_size=2,
+        min_samples=1,
+        person_merge_threshold=0.03,
+        person_rep_top_k=2,
+        person_knn_k=2,
+        person_linkage="average",
+        person_enable_same_photo_cannot_link=False,
+        preview_max_side=480,
+        magface_checkpoint=Path(".cache/magface/magface_iresnet100_ms1mv2.pth"),
+        low_quality_micro_cluster_max_size=3,
+        low_quality_micro_cluster_top2_weight=0.5,
+        low_quality_micro_cluster_min_quality_evidence=0.65,
+    )
+
+    assert payload["meta"]["cluster_count"] == 1
+    assert payload["meta"]["noise_count"] == 3
+    assert payload["meta"]["person_count"] == 1
+    assert payload["meta"]["low_quality_micro_cluster_max_size"] == 3
+    assert payload["meta"]["low_quality_micro_cluster_top2_weight"] == 0.5
+    assert payload["meta"]["low_quality_micro_cluster_min_quality_evidence"] == 0.65
+    assert payload["meta"]["low_quality_micro_cluster_demoted_cluster_count"] == 1
+    assert payload["meta"]["low_quality_micro_cluster_demoted_face_count"] == 2
+
+    noise_cluster = next(cluster for cluster in payload["clusters"] if cluster["cluster_label"] == -1)
+    noise_face_ids = {member["face_id"] for member in noise_cluster["members"]}
+    assert {"l_000", "l_001", "n_000"}.issubset(noise_face_ids)
+    for member in noise_cluster["members"]:
+        if member["face_id"] in {"l_000", "l_001"}:
+            assert member["cluster_assignment_source"] == "noise"
 
 
 def test_sqlite_roundtrip_for_two_phase_pipeline(tmp_path: Path) -> None:
