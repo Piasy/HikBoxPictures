@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from hikbox_pictures.face_review_pipeline import (
-    attach_noise_faces_to_clusters,
+    attach_noise_faces_to_person_consensus,
     group_faces_by_cluster,
     iter_embedded_faces,
     iter_faces_pending_embedding,
@@ -210,48 +210,72 @@ def test_merge_clusters_to_persons_same_photo_cannot_link_is_optional() -> None:
     assert all(item["person_cluster_count"] == 1 for item in persons_enabled)
 
 
-def test_attach_noise_faces_to_clusters_attaches_clear_nearest_cluster() -> None:
+def test_attach_noise_faces_to_person_consensus_attaches_when_sibling_micro_clusters_share_person() -> None:
     faces = [
         {"face_id": "a0", "embedding": [1.0, 0.0], "quality_score": 0.95},
         {"face_id": "a1", "embedding": [0.998, 0.06], "quality_score": 0.90},
-        {"face_id": "b0", "embedding": [0.0, 1.0], "quality_score": 0.94},
-        {"face_id": "b1", "embedding": [0.06, 0.998], "quality_score": 0.91},
-        {"face_id": "n0", "embedding": [0.989, 0.147], "quality_score": 0.88},
+        {"face_id": "b0", "embedding": [0.978, 0.208], "quality_score": 0.94},
+        {"face_id": "b1", "embedding": [0.965, 0.262], "quality_score": 0.91},
+        {"face_id": "c0", "embedding": [0.0, 1.0], "quality_score": 0.93},
+        {"face_id": "c1", "embedding": [0.06, 0.998], "quality_score": 0.89},
+        {"face_id": "n0", "embedding": [0.992, 0.122], "quality_score": 0.88},
     ]
-    labels = [0, 0, 1, 1, -1]
-    probabilities = [0.99, 0.98, 0.97, 0.96, 0.0]
+    labels = [0, 0, 1, 1, 2, 2, -1]
+    probabilities = [0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.0]
+    clusters = group_faces_by_cluster(faces=faces, labels=labels)
+    persons = merge_clusters_to_persons(
+        clusters=clusters,
+        distance_threshold=0.03,
+        rep_top_k=2,
+        knn_k=2,
+        linkage="average",
+    )
 
-    attached_labels, attached_probabilities, attached_count = attach_noise_faces_to_clusters(
+    attached_labels, attached_probabilities, attached_count = attach_noise_faces_to_person_consensus(
         faces=faces,
         labels=labels,
         probabilities=probabilities,
+        persons=persons,
         rep_top_k=2,
         distance_threshold=0.20,
         margin_threshold=0.04,
     )
 
     assert attached_count == 1
-    assert attached_labels == [0, 0, 1, 1, 0]
+    assert attached_labels == [0, 0, 1, 1, 2, 2, 0]
     assert attached_probabilities[-1] is None
 
 
-def test_attach_noise_faces_to_clusters_keeps_ambiguous_noise_unassigned() -> None:
+def test_attach_noise_faces_to_person_consensus_keeps_cross_person_ambiguous_noise_unassigned() -> None:
     faces = [
         {"face_id": "a0", "embedding": [1.0, 0.0], "quality_score": 0.95},
         {"face_id": "a1", "embedding": [0.998, 0.06], "quality_score": 0.90},
-        {"face_id": "b0", "embedding": [0.0, 1.0], "quality_score": 0.94},
-        {"face_id": "b1", "embedding": [0.06, 0.998], "quality_score": 0.91},
-        {"face_id": "n0", "embedding": [0.72, 0.69], "quality_score": 0.88},
+        {"face_id": "b0", "embedding": [0.978, 0.208], "quality_score": 0.94},
+        {"face_id": "b1", "embedding": [0.965, 0.262], "quality_score": 0.91},
+        {"face_id": "c0", "embedding": [0.906, 0.423], "quality_score": 0.93},
+        {"face_id": "c1", "embedding": [0.879, 0.476], "quality_score": 0.89},
+        {"face_id": "d0", "embedding": [0.0, 1.0], "quality_score": 0.92},
+        {"face_id": "d1", "embedding": [0.06, 0.998], "quality_score": 0.88},
+        {"face_id": "n0", "embedding": [0.944, 0.331], "quality_score": 0.88},
     ]
-    labels = [0, 0, 1, 1, -1]
-    probabilities = [0.99, 0.98, 0.97, 0.96, 0.0]
+    labels = [0, 0, 1, 1, 2, 2, 3, 3, -1]
+    probabilities = [0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93, 0.92, 0.0]
+    clusters = group_faces_by_cluster(faces=faces, labels=labels)
+    persons = merge_clusters_to_persons(
+        clusters=clusters,
+        distance_threshold=0.03,
+        rep_top_k=2,
+        knn_k=3,
+        linkage="average",
+    )
 
-    attached_labels, attached_probabilities, attached_count = attach_noise_faces_to_clusters(
+    attached_labels, attached_probabilities, attached_count = attach_noise_faces_to_person_consensus(
         faces=faces,
         labels=labels,
         probabilities=probabilities,
+        persons=persons,
         rep_top_k=2,
-        distance_threshold=0.40,
+        distance_threshold=0.20,
         margin_threshold=0.04,
     )
 
@@ -416,9 +440,10 @@ def test_run_cluster_stage_can_merge_split_micro_clusters(tmp_path: Path, monkey
     for cluster in payload["persons"][0]["clusters"]:
         for member in cluster["members"]:
             assert "embedding" not in member
+            assert member["cluster_assignment_source"] == "hdbscan"
 
 
-def test_run_cluster_stage_can_attach_noise_face_after_hdbscan(tmp_path: Path, monkeypatch) -> None:
+def test_run_cluster_stage_can_attach_noise_face_by_person_consensus(tmp_path: Path, monkeypatch) -> None:
     output_dir = tmp_path / "out"
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -450,6 +475,28 @@ def test_run_cluster_stage_can_attach_noise_face_after_hdbscan(tmp_path: Path, m
             "face_area_ratio": 0.030,
         },
         {
+            "face_id": "b_000",
+            "photo_relpath": "album/b.jpg",
+            "crop_relpath": "assets/crops/b_000.jpg",
+            "context_relpath": "assets/context/b_000.jpg",
+            "preview_relpath": "assets/preview/b.jpg",
+            "aligned_relpath": "assets/aligned/b_000.png",
+            "bbox": [9, 10, 11, 12],
+            "detector_confidence": 0.93,
+            "face_area_ratio": 0.029,
+        },
+        {
+            "face_id": "b_001",
+            "photo_relpath": "album/b.jpg",
+            "crop_relpath": "assets/crops/b_001.jpg",
+            "context_relpath": "assets/context/b_001.jpg",
+            "preview_relpath": "assets/preview/b.jpg",
+            "aligned_relpath": "assets/aligned/b_001.png",
+            "bbox": [13, 14, 15, 16],
+            "detector_confidence": 0.92,
+            "face_area_ratio": 0.028,
+        },
+        {
             "face_id": "n_000",
             "photo_relpath": "album/n.jpg",
             "crop_relpath": "assets/crops/n_000.jpg",
@@ -466,13 +513,15 @@ def test_run_cluster_stage_can_attach_noise_face_after_hdbscan(tmp_path: Path, m
 
     mark_face_embedded(conn, "a_000", embedding=[1.0, 0.0], magface_quality=12.3, quality_score=0.95)
     mark_face_embedded(conn, "a_001", embedding=[0.997, 0.077], magface_quality=12.0, quality_score=0.92)
-    mark_face_embedded(conn, "n_000", embedding=[0.989, 0.147], magface_quality=11.8, quality_score=0.90)
+    mark_face_embedded(conn, "b_000", embedding=[0.978, 0.208], magface_quality=11.9, quality_score=0.91)
+    mark_face_embedded(conn, "b_001", embedding=[0.965, 0.262], magface_quality=11.7, quality_score=0.89)
+    mark_face_embedded(conn, "n_000", embedding=[0.992, 0.122], magface_quality=11.8, quality_score=0.90)
     set_meta(conn, "max_images", 1)
     conn.close()
 
     def fake_cluster(embeddings, min_cluster_size, min_samples):
-        assert len(embeddings) == 3
-        return [0, 0, -1], [0.99, 0.98, 0.0]
+        assert len(embeddings) == 5
+        return [0, 0, 1, 1, -1], [0.99, 0.98, 0.97, 0.96, 0.0]
 
     monkeypatch.setattr("hikbox_pictures.face_review_pipeline._cluster_with_hdbscan", fake_cluster)
 
@@ -490,18 +539,21 @@ def test_run_cluster_stage_can_attach_noise_face_after_hdbscan(tmp_path: Path, m
         person_enable_same_photo_cannot_link=False,
         preview_max_side=480,
         magface_checkpoint=Path(".cache/magface/magface_iresnet100_ms1mv2.pth"),
-        noise_attach_distance_threshold=0.20,
-        noise_attach_margin_threshold=0.04,
-        noise_attach_rep_top_k=2,
+        person_consensus_distance_threshold=0.20,
+        person_consensus_margin_threshold=0.04,
+        person_consensus_rep_top_k=2,
     )
 
     assert payload["meta"]["noise_count"] == 0
-    assert payload["meta"]["noise_attach_count"] == 1
-    assert payload["meta"]["noise_attach_distance_threshold"] == 0.20
+    assert payload["meta"]["person_consensus_attach_count"] == 1
+    assert payload["meta"]["person_consensus_distance_threshold"] == 0.20
     assert payload["clusters"][0]["cluster_label"] == 0
     assert len(payload["clusters"][0]["members"]) == 3
-    assert payload["clusters"][0]["members"][2]["face_id"] == "n_000"
-    assert payload["clusters"][0]["members"][2]["cluster_probability"] is None
+    assert payload["clusters"][0]["members"][-1]["face_id"] == "n_000"
+    assert payload["clusters"][0]["members"][-1]["cluster_probability"] is None
+    assert payload["clusters"][0]["members"][-1]["cluster_assignment_source"] == "person_consensus"
+    assert payload["clusters"][0]["members"][0]["cluster_assignment_source"] == "hdbscan"
+    assert all(member["cluster_assignment_source"] == "hdbscan" for member in payload["clusters"][1]["members"])
 
 
 def test_sqlite_roundtrip_for_two_phase_pipeline(tmp_path: Path) -> None:
@@ -545,6 +597,57 @@ def test_sqlite_roundtrip_for_two_phase_pipeline(tmp_path: Path) -> None:
     assert len(embedded) == 2
     assert embedded[0]["bbox"] == [1, 2, 3, 4]
     assert embedded[0]["embedding"] == [0.1, 0.2]
+    assert embedded[0]["cluster_assignment_source"] is None
     assert embedded[1]["embedding"] == [0.3, 0.4]
+    assert embedded[1]["cluster_assignment_source"] is None
 
     conn.close()
+
+
+def test_open_pipeline_db_migrates_cluster_assignment_source_column(tmp_path: Path) -> None:
+    db_path = tmp_path / "pipeline.db"
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE detected_faces (
+            face_id TEXT PRIMARY KEY,
+            photo_relpath TEXT NOT NULL,
+            crop_relpath TEXT NOT NULL,
+            context_relpath TEXT NOT NULL,
+            preview_relpath TEXT NOT NULL,
+            aligned_relpath TEXT NOT NULL,
+            bbox_json TEXT NOT NULL,
+            detector_confidence REAL NOT NULL,
+            face_area_ratio REAL NOT NULL,
+            embedding_json TEXT,
+            magface_quality REAL,
+            quality_score REAL,
+            cluster_label INTEGER,
+            cluster_probability REAL,
+            face_error TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE failed_images (
+            photo_relpath TEXT PRIMARY KEY,
+            error TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE pipeline_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = open_pipeline_db(db_path)
+    columns = [row[1] for row in migrated.execute("PRAGMA table_info(detected_faces)").fetchall()]
+    migrated.close()
+
+    assert "cluster_assignment_source" in columns

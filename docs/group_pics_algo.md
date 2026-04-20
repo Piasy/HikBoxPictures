@@ -193,6 +193,61 @@ v4 的价值在于，它把调研结论落成了可持续工程路径：
 整体上，v4 不是终点，但它把系统推进到了一个可长期迭代的阶段：  
 可以在统一框架下持续优化“纯度-召回”平衡，而不再回到单阶段方案反复拉扯。
 
+### v4 优化记录：`min_samples=1 + person-consensus` 噪声回挂
+
+这一节只记录当前实现上的一轮召回优化结果，不改上面的 v4 主流程描述。  
+这轮优化聚焦第一阶段微簇召回，不讨论第二阶段人物归并阈值的进一步调整。
+
+#### 调整内容
+
+1. 第一阶段 HDBSCAN 继续保持 `min_cluster_size = 3`，仅把 `min_samples` 从 `2` 下调到 `1`。
+
+    - 目标是放宽核心点密度要求，让一批“小而干净、但在 `min_samples = 2` 下被判成噪声”的样本先成微簇。
+
+2. 在第一阶段 HDBSCAN 之后，增加 `person-consensus` 噪声回挂。
+
+    - 先基于当前微簇做一轮 preliminary person 归并。
+    - 仅对 `cluster_label = -1` 的噪声样本执行回挂。
+    - 先为每个已有微簇构建代表向量，再按 person 收集候选微簇。
+    - 若噪声脸到某个 person 内最佳微簇代表的余弦距离足够近，且相对第二候选有足够 margin，则把该脸挂回这个已有微簇。
+    - 回挂不会生成新的 cluster，只会把噪声样本改挂到已有的 HDBSCAN 微簇 label 上。
+
+#### 本轮参数
+
+- 第一阶段微簇：
+  - `min_cluster_size = 3`
+  - `min_samples = 1`
+- `person-consensus` 噪声回挂：
+  - `person_consensus_distance_threshold = 0.24`
+  - `person_consensus_margin_threshold = 0.04`
+  - `person_consensus_rep_top_k = 3`
+
+#### 本轮效果
+
+- 基线目录：`.tmp/magface_hdbscan_review`
+  - `noise_count = 1056`
+  - `person_count = 96`
+  - `person0 = 489`
+  - `person1 = 340`
+- 优化后目录：`.tmp/magface_hdbscan_review_min_samples_1_person_consensus_024`
+  - `noise_count = 746`
+  - `person_count = 113`
+  - `person0 = 613`
+  - `person1 = 459`
+  - `person_consensus_attach_count = 147`
+
+核心收益：
+
+- 噪声数：`1056 -> 746`
+- `person0`：`+124`
+- `person1`：`+119`
+- 多轮 diff review 结果显示，precision 基本未受影响
+
+补充说明：
+
+- 这里的 `person0 / person1` 指当前 review 页里按 `person_face_count / person_cluster_count / min_cluster_label` 排序后的临时编号，只用于描述这轮实验结果，不是稳定人物 ID。
+- 这轮优化的本质是：先用更宽松的一阶段参数释放可成簇样本，再把一部分“已经明显接近已有 person 的噪声脸”挂回已有微簇，从而在基本不伤 precision 的前提下提升 recall。
+
 ### v4 TODO
 
 1. 两个聚类阶段，都是 precesion 较高，但召回率仍有较大提升空间。

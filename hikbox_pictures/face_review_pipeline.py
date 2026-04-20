@@ -45,6 +45,31 @@ class FaceObservation:
     quality_score: float
     cluster_label: int | None = None
     cluster_probability: float | None = None
+    cluster_assignment_source: str | None = None
+
+
+def _ensure_detected_faces_schema(conn: sqlite3.Connection) -> None:
+    columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(detected_faces)").fetchall()
+    }
+    if "cluster_assignment_source" not in columns:
+        conn.execute("ALTER TABLE detected_faces ADD COLUMN cluster_assignment_source TEXT")
+        conn.commit()
+
+    conn.execute(
+        """
+        UPDATE detected_faces
+        SET cluster_assignment_source = CASE
+            WHEN cluster_label IS NULL THEN NULL
+            WHEN cluster_label = -1 THEN 'noise'
+            WHEN cluster_probability IS NULL THEN 'person_consensus'
+            ELSE 'hdbscan'
+        END
+        WHERE cluster_assignment_source IS NULL
+        """
+    )
+    conn.commit()
 
 
 def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
@@ -70,6 +95,7 @@ def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
             quality_score REAL,
             cluster_label INTEGER,
             cluster_probability REAL,
+            cluster_assignment_source TEXT,
             face_error TEXT,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
@@ -90,6 +116,7 @@ def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
         ON detected_faces(embedding_json, face_error);
         """
     )
+    _ensure_detected_faces_schema(conn)
     conn.commit()
     return conn
 
@@ -128,9 +155,9 @@ def upsert_detected_face(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             face_id, photo_relpath, crop_relpath, context_relpath, preview_relpath,
             aligned_relpath, bbox_json, detector_confidence, face_area_ratio,
             embedding_json, magface_quality, quality_score,
-            cluster_label, cluster_probability, face_error, updated_at
+            cluster_label, cluster_probability, cluster_assignment_source, face_error, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP)
         ON CONFLICT(face_id) DO UPDATE SET
             photo_relpath=excluded.photo_relpath,
             crop_relpath=excluded.crop_relpath,
@@ -145,6 +172,7 @@ def upsert_detected_face(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             quality_score=NULL,
             cluster_label=NULL,
             cluster_probability=NULL,
+            cluster_assignment_source=NULL,
             face_error=NULL,
             updated_at=CURRENT_TIMESTAMP
         """,
@@ -223,7 +251,7 @@ def iter_embedded_faces(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
         SELECT face_id, photo_relpath, crop_relpath, context_relpath, preview_relpath,
                bbox_json, detector_confidence, face_area_ratio,
                embedding_json, magface_quality, quality_score,
-               cluster_label, cluster_probability
+               cluster_label, cluster_probability, cluster_assignment_source
         FROM detected_faces
         WHERE embedding_json IS NOT NULL AND face_error IS NULL
         ORDER BY face_id
@@ -244,6 +272,7 @@ def iter_embedded_faces(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
             "quality_score": float(row["quality_score"]),
             "cluster_label": row["cluster_label"],
             "cluster_probability": row["cluster_probability"],
+            "cluster_assignment_source": row["cluster_assignment_source"],
         }
 
 
@@ -290,14 +319,25 @@ def count_pending_faces(conn: sqlite3.Connection) -> int:
     return int(row["c"])
 
 
-def update_cluster_result(conn: sqlite3.Connection, face_id: str, label: int, probability: float | None) -> None:
+def update_cluster_result(
+    conn: sqlite3.Connection,
+    face_id: str,
+    label: int,
+    probability: float | None,
+    assignment_source: str | None,
+) -> None:
     conn.execute(
         """
         UPDATE detected_faces
-        SET cluster_label=?, cluster_probability=?, updated_at=CURRENT_TIMESTAMP
+        SET cluster_label=?, cluster_probability=?, cluster_assignment_source=?, updated_at=CURRENT_TIMESTAMP
         WHERE face_id=?
         """,
-        (int(label), None if probability is None else float(probability), face_id),
+        (
+            int(label),
+            None if probability is None else float(probability),
+            assignment_source,
+            face_id,
+        ),
     )
     conn.commit()
 
@@ -463,10 +503,11 @@ def _build_cluster_representative(cluster: dict[str, Any], rep_top_k: int) -> np
     return _normalize_embedding(weighted_sum)
 
 
-def attach_noise_faces_to_clusters(
+def attach_noise_faces_to_person_consensus(
     faces: list[dict[str, Any]],
     labels: list[int],
     probabilities: list[float | None],
+    persons: list[dict[str, Any]],
     rep_top_k: int,
     distance_threshold: float,
     margin_threshold: float,
@@ -477,24 +518,37 @@ def attach_noise_faces_to_clusters(
     if distance_threshold <= 0:
         return list(labels), list(probabilities), 0
 
+    if not persons:
+        return list(labels), list(probabilities), 0
+
     grouped_clusters = group_faces_by_cluster(faces=faces, labels=labels)
     normal_clusters = [cluster for cluster in grouped_clusters if int(cluster.get("cluster_label", -1)) != -1]
     if not normal_clusters:
         return list(labels), list(probabilities), 0
 
-    representatives: list[np.ndarray] = []
-    representative_labels: list[int] = []
+    cluster_representatives: dict[int, np.ndarray] = {}
     for cluster in normal_clusters:
         representative = _build_cluster_representative(cluster, rep_top_k=rep_top_k)
         if representative is None:
             continue
-        representatives.append(representative)
-        representative_labels.append(int(cluster.get("cluster_label", -1)))
+        cluster_representatives[int(cluster.get("cluster_label", -1))] = representative
 
-    if not representatives:
+    if not cluster_representatives:
         return list(labels), list(probabilities), 0
 
-    rep_matrix = np.stack(representatives, axis=0)
+    person_cluster_labels: list[list[int]] = []
+    for person in persons:
+        candidate_labels: list[int] = []
+        for cluster_ref in person.get("clusters", []):
+            label = int(cluster_ref.get("cluster_label", -1))
+            if label in cluster_representatives:
+                candidate_labels.append(label)
+        if candidate_labels:
+            person_cluster_labels.append(candidate_labels)
+
+    if not person_cluster_labels:
+        return list(labels), list(probabilities), 0
+
     updated_labels = list(labels)
     updated_probabilities = list(probabilities)
     attached_count = 0
@@ -512,18 +566,26 @@ def attach_noise_faces_to_clusters(
             continue
         vector = _normalize_embedding(vector)
 
-        sims = np.clip(rep_matrix @ vector, -1.0, 1.0)
-        if sims.size <= 0:
+        person_candidates: list[tuple[float, float, int]] = []
+        for cluster_labels in person_cluster_labels:
+            best_label: int | None = None
+            best_sim: float | None = None
+            for cluster_label in cluster_labels:
+                representative = cluster_representatives[cluster_label]
+                sim = float(np.clip(np.dot(representative, vector), -1.0, 1.0))
+                if best_sim is None or sim > best_sim:
+                    best_sim = sim
+                    best_label = cluster_label
+            if best_label is None or best_sim is None:
+                continue
+            person_candidates.append((1.0 - best_sim, best_sim, best_label))
+
+        if not person_candidates:
             continue
+        person_candidates.sort(key=lambda item: item[0])
 
-        best_idx = int(np.argmax(sims))
-        best_sim = float(sims[best_idx])
-        best_dist = 1.0 - best_sim
-
-        if sims.size >= 2:
-            second_sim = float(np.partition(sims, -2)[-2])
-        else:
-            second_sim = -1.0
+        best_dist, best_sim, best_label = person_candidates[0]
+        second_sim = person_candidates[1][1] if len(person_candidates) >= 2 else -1.0
         margin = best_sim - second_sim
 
         if best_dist > float(distance_threshold):
@@ -531,7 +593,7 @@ def attach_noise_faces_to_clusters(
         if margin < float(margin_threshold):
             continue
 
-        updated_labels[idx] = representative_labels[best_idx]
+        updated_labels[idx] = best_label
         # 这里的回挂置信不是 HDBSCAN 原生 probability，review 中留空避免误解。
         updated_probabilities[idx] = None
         attached_count += 1
@@ -1445,9 +1507,9 @@ def run_cluster_stage(
     person_enable_same_photo_cannot_link: bool,
     preview_max_side: int,
     magface_checkpoint: Path,
-    noise_attach_distance_threshold: float | None = None,
-    noise_attach_margin_threshold: float = 0.04,
-    noise_attach_rep_top_k: int = 3,
+    person_consensus_distance_threshold: float | None = None,
+    person_consensus_margin_threshold: float = 0.04,
+    person_consensus_rep_top_k: int = 3,
 ) -> dict[str, Any]:
     dirs = _ensure_dirs(output_dir, reset_output=False)
     conn = open_pipeline_db(dirs["db"])
@@ -1470,6 +1532,7 @@ def run_cluster_stage(
                 face_area_ratio=float(row["face_area_ratio"]),
                 magface_quality=float(row["magface_quality"]),
                 quality_score=float(row["quality_score"]),
+                cluster_assignment_source=row.get("cluster_assignment_source"),
             )
         )
 
@@ -1479,22 +1542,56 @@ def run_cluster_stage(
         min_samples=min_samples,
     )
 
-    noise_attach_count = 0
-    if noise_attach_distance_threshold is not None and noise_attach_distance_threshold > 0:
+    person_consensus_attach_count = 0
+    if person_consensus_distance_threshold is not None and person_consensus_distance_threshold > 0:
+        preliminary_faces = []
+        for obs, label, probability in zip(observations, labels, probabilities, strict=True):
+            preliminary_faces.append(
+                {
+                    **asdict(obs),
+                    "bbox": list(obs.bbox),
+                    "cluster_label": int(label),
+                    "cluster_probability": None if probability is None else float(probability),
+                }
+            )
+        preliminary_clusters = group_faces_by_cluster(
+            faces=preliminary_faces,
+            labels=[int(label) for label in labels],
+        )
+        for cluster in preliminary_clusters:
+            cluster["members"].sort(key=lambda row: -(row.get("quality_score") or 0.0))
+
+        preliminary_persons = merge_clusters_to_persons(
+            clusters=preliminary_clusters,
+            distance_threshold=person_merge_threshold,
+            rep_top_k=person_rep_top_k,
+            knn_k=person_knn_k,
+            linkage=person_linkage,
+            enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
+        )
+
         attach_faces = [{**asdict(obs), "bbox": list(obs.bbox)} for obs in observations]
-        labels, probabilities, noise_attach_count = attach_noise_faces_to_clusters(
+        labels, probabilities, person_consensus_attach_count = attach_noise_faces_to_person_consensus(
             faces=attach_faces,
             labels=labels,
             probabilities=probabilities,
-            rep_top_k=noise_attach_rep_top_k,
-            distance_threshold=float(noise_attach_distance_threshold),
-            margin_threshold=float(noise_attach_margin_threshold),
+            persons=preliminary_persons,
+            rep_top_k=person_consensus_rep_top_k,
+            distance_threshold=float(person_consensus_distance_threshold),
+            margin_threshold=float(person_consensus_margin_threshold),
         )
 
     for obs, label, probability in zip(observations, labels, probabilities, strict=True):
         obs.cluster_label = int(label)
         obs.cluster_probability = None if probability is None else float(probability)
-        update_cluster_result(conn, obs.face_id, int(label), probability)
+        if int(label) == -1:
+            assignment_source = "noise"
+        elif probability is None:
+            assignment_source = "person_consensus"
+        else:
+            assignment_source = "hdbscan"
+        obs.cluster_assignment_source = assignment_source
+        update_cluster_result(conn, obs.face_id, int(label), probability, assignment_source)
 
     face_rows = [{**asdict(obs), "bbox": list(obs.bbox)} for obs in observations]
     face_rows.sort(key=lambda row: (1 if row.get("cluster_label") == -1 else 0, -(row.get("quality_score") or 0.0)))
@@ -1539,10 +1636,10 @@ def run_cluster_stage(
             "noise_count": len(next((c["members"] for c in grouped_clusters if c["cluster_key"] == "noise"), [])),
             "min_cluster_size": min_cluster_size,
             "min_samples": min_samples,
-            "noise_attach_distance_threshold": noise_attach_distance_threshold,
-            "noise_attach_margin_threshold": noise_attach_margin_threshold,
-            "noise_attach_rep_top_k": noise_attach_rep_top_k,
-            "noise_attach_count": noise_attach_count,
+            "person_consensus_distance_threshold": person_consensus_distance_threshold,
+            "person_consensus_margin_threshold": person_consensus_margin_threshold,
+            "person_consensus_rep_top_k": person_consensus_rep_top_k,
+            "person_consensus_attach_count": person_consensus_attach_count,
             "person_count": len(persons),
             "person_clusterer": "AHC",
             "person_linkage": person_linkage,
@@ -1582,9 +1679,9 @@ def run_pipeline(
     person_linkage: str,
     person_enable_same_photo_cannot_link: bool,
     preview_max_side: int,
-    noise_attach_distance_threshold: float | None,
-    noise_attach_margin_threshold: float,
-    noise_attach_rep_top_k: int,
+    person_consensus_distance_threshold: float | None,
+    person_consensus_margin_threshold: float,
+    person_consensus_rep_top_k: int,
     max_images: int | None,
     stage: str,
     reset_output: bool,
@@ -1630,9 +1727,9 @@ def run_pipeline(
             person_enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
             preview_max_side=preview_max_side,
             magface_checkpoint=magface_checkpoint,
-            noise_attach_distance_threshold=noise_attach_distance_threshold,
-            noise_attach_margin_threshold=noise_attach_margin_threshold,
-            noise_attach_rep_top_k=noise_attach_rep_top_k,
+            person_consensus_distance_threshold=person_consensus_distance_threshold,
+            person_consensus_margin_threshold=person_consensus_margin_threshold,
+            person_consensus_rep_top_k=person_consensus_rep_top_k,
         )
 
     # all 阶段通过子进程串行执行，确保每个阶段释放内存。
@@ -1668,15 +1765,15 @@ def run_pipeline(
         "--preview-max-side",
         str(preview_max_side),
     ]
-    if noise_attach_distance_threshold is not None:
+    if person_consensus_distance_threshold is not None:
         base_cmd.extend(
             [
-                "--noise-attach-distance-threshold",
-                str(noise_attach_distance_threshold),
-                "--noise-attach-margin-threshold",
-                str(noise_attach_margin_threshold),
-                "--noise-attach-rep-top-k",
-                str(noise_attach_rep_top_k),
+                "--person-consensus-distance-threshold",
+                str(person_consensus_distance_threshold),
+                "--person-consensus-margin-threshold",
+                str(person_consensus_margin_threshold),
+                "--person-consensus-rep-top-k",
+                str(person_consensus_rep_top_k),
             ]
         )
     if person_enable_same_photo_cannot_link:
@@ -1729,22 +1826,22 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--preview-max-side", type=int, default=480, help="预览图最长边")
     parser.add_argument(
-        "--noise-attach-distance-threshold",
+        "--person-consensus-distance-threshold",
         type=float,
         default=None,
-        help="一阶段噪声回挂的最大余弦距离；不传则关闭",
+        help="基于 person-consensus 的一阶段噪声回挂最大余弦距离；不传则关闭",
     )
     parser.add_argument(
-        "--noise-attach-margin-threshold",
+        "--person-consensus-margin-threshold",
         type=float,
         default=0.04,
-        help="一阶段噪声回挂时 top1-top2 最小相似度间隔",
+        help="基于 person-consensus 的一阶段噪声回挂时 top1-top2 最小相似度间隔",
     )
     parser.add_argument(
-        "--noise-attach-rep-top-k",
+        "--person-consensus-rep-top-k",
         type=int,
         default=3,
-        help="一阶段噪声回挂构建微簇代表向量时使用的高质量样本数",
+        help="person-consensus 回挂构建微簇代表向量时使用的高质量样本数",
     )
     parser.add_argument("--max-images", type=int, default=None, help="仅处理前 N 张图片（调试）")
     parser.add_argument("--stage", choices=["all", "detect", "embed", "cluster"], default="all", help="分阶段执行")
@@ -1769,9 +1866,9 @@ def main() -> int:
         person_linkage=args.person_linkage,
         person_enable_same_photo_cannot_link=args.person_enable_same_photo_cannot_link,
         preview_max_side=args.preview_max_side,
-        noise_attach_distance_threshold=args.noise_attach_distance_threshold,
-        noise_attach_margin_threshold=args.noise_attach_margin_threshold,
-        noise_attach_rep_top_k=args.noise_attach_rep_top_k,
+        person_consensus_distance_threshold=args.person_consensus_distance_threshold,
+        person_consensus_margin_threshold=args.person_consensus_margin_threshold,
+        person_consensus_rep_top_k=args.person_consensus_rep_top_k,
         max_images=args.max_images,
         stage=args.stage,
         reset_output=args.reset_output,
