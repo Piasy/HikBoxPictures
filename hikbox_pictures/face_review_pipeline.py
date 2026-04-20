@@ -37,8 +37,8 @@ class FaceObservation:
     photo_relpath: str
     crop_relpath: str
     context_relpath: str
-    preview_relpath: str
     bbox: tuple[int, int, int, int]
+    embedding: list[float]
     detector_confidence: float
     face_area_ratio: float
     magface_quality: float
@@ -420,56 +420,361 @@ def group_faces_by_cluster(faces: list[dict[str, Any]], labels: list[int]) -> li
     return grouped
 
 
+def _normalize_embedding(vector: np.ndarray) -> np.ndarray:
+    norm = float(np.linalg.norm(vector))
+    if norm <= 1e-9:
+        return vector.astype(np.float32)
+    return (vector / norm).astype(np.float32)
+
+
+def _build_cluster_representative(cluster: dict[str, Any], rep_top_k: int) -> np.ndarray | None:
+    members = list(cluster.get("members", []))
+    if not members:
+        return None
+
+    sorted_members = sorted(members, key=lambda row: -(row.get("quality_score") or 0.0))
+    top_k = max(1, int(rep_top_k))
+
+    vectors: list[np.ndarray] = []
+    weights: list[float] = []
+    dim: int | None = None
+    for member in sorted_members:
+        raw_embedding = member.get("embedding")
+        if not isinstance(raw_embedding, list) or not raw_embedding:
+            continue
+        vector = np.asarray(raw_embedding, dtype=np.float32)
+        if vector.ndim != 1:
+            continue
+        if dim is None:
+            dim = int(vector.shape[0])
+        if int(vector.shape[0]) != dim:
+            continue
+        vectors.append(_normalize_embedding(vector))
+        weights.append(max(float(member.get("quality_score") or 0.0), 1e-3))
+        if len(vectors) >= top_k:
+            break
+
+    if not vectors:
+        return None
+
+    vectors_np = np.stack(vectors, axis=0)
+    weights_np = np.asarray(weights, dtype=np.float32)
+    weighted_sum = np.sum(vectors_np * weights_np[:, None], axis=0)
+    return _normalize_embedding(weighted_sum)
+
+
+def _pairwise_cosine_distance(vectors: np.ndarray) -> np.ndarray:
+    sims = np.clip(vectors @ vectors.T, -1.0, 1.0)
+    dist = 1.0 - sims
+    dist = np.maximum(dist, 0.0)
+    np.fill_diagonal(dist, 0.0)
+    return dist.astype(np.float32)
+
+
+def _build_cluster_knn_mask(dist_matrix: np.ndarray, knn_k: int) -> np.ndarray:
+    size = int(dist_matrix.shape[0])
+    mask = np.zeros((size, size), dtype=bool)
+    if size <= 0:
+        return mask
+
+    np.fill_diagonal(mask, True)
+    if size == 1:
+        return mask
+
+    effective_k = max(1, min(int(knn_k), size - 1))
+    for row_idx in range(size):
+        order = np.argsort(dist_matrix[row_idx]).tolist()
+        neighbors = [col for col in order if col != row_idx][:effective_k]
+        for col_idx in neighbors:
+            mask[row_idx, col_idx] = True
+
+    return np.logical_or(mask, mask.T)
+
+
+def _build_cluster_cannot_link_mask(clusters: list[dict[str, Any]]) -> np.ndarray:
+    size = len(clusters)
+    mask = np.zeros((size, size), dtype=bool)
+    if size <= 1:
+        return mask
+
+    photo_sets: list[set[str]] = []
+    for cluster in clusters:
+        photos: set[str] = set()
+        for member in cluster.get("members", []):
+            photo_relpath = str(member.get("photo_relpath", ""))
+            if photo_relpath:
+                photos.add(photo_relpath)
+        photo_sets.append(photos)
+
+    for row_idx in range(size):
+        row_photos = photo_sets[row_idx]
+        if not row_photos:
+            continue
+        for col_idx in range(row_idx + 1, size):
+            if row_photos.intersection(photo_sets[col_idx]):
+                mask[row_idx, col_idx] = True
+                mask[col_idx, row_idx] = True
+
+    return mask
+
+
+def _cluster_by_ahc_distance_matrix(
+    dist_matrix: np.ndarray,
+    distance_threshold: float,
+    linkage: str,
+) -> list[int]:
+    if dist_matrix.shape[0] <= 1:
+        return [0]
+
+    from sklearn.cluster import AgglomerativeClustering
+
+    if linkage not in {"average", "single", "complete"}:
+        raise ValueError(f"不支持的人物合并 linkage: {linkage}")
+
+    # sklearn 在不同版本里参数名从 affinity 演进到 metric，这里做兼容。
+    try:
+        model = AgglomerativeClustering(
+            n_clusters=None,
+            metric="precomputed",
+            linkage=linkage,
+            distance_threshold=float(distance_threshold),
+        )
+    except TypeError:
+        model = AgglomerativeClustering(
+            n_clusters=None,
+            affinity="precomputed",
+            linkage=linkage,
+            distance_threshold=float(distance_threshold),
+        )
+    return model.fit_predict(dist_matrix).astype(int).tolist()
+
+
+def merge_clusters_to_persons(
+    clusters: list[dict[str, Any]],
+    distance_threshold: float,
+    rep_top_k: int,
+    knn_k: int,
+    linkage: str = "average",
+    enable_same_photo_cannot_link: bool = False,
+) -> list[dict[str, Any]]:
+    normal_clusters = [cluster for cluster in clusters if int(cluster.get("cluster_label", -1)) != -1]
+    if not normal_clusters:
+        return []
+
+    indexed_clusters: list[dict[str, Any]] = []
+    representatives: list[np.ndarray] = []
+    fallback_clusters: list[dict[str, Any]] = []
+    for cluster in normal_clusters:
+        representative = _build_cluster_representative(cluster, rep_top_k=rep_top_k)
+        if representative is None:
+            fallback_clusters.append(cluster)
+            continue
+        indexed_clusters.append(cluster)
+        representatives.append(representative)
+
+    if indexed_clusters:
+        if len(indexed_clusters) == 1:
+            ahc_labels = [0]
+        else:
+            vector_matrix = np.stack(representatives, axis=0)
+            dist_matrix = _pairwise_cosine_distance(vector_matrix)
+            mask = _build_cluster_knn_mask(dist_matrix, knn_k=knn_k)
+            large_distance = max(float(distance_threshold) + 1.0, 2.0)
+            constrained_dist = dist_matrix.copy()
+            constrained_dist[~mask] = large_distance
+            if enable_same_photo_cannot_link:
+                cannot_link_mask = _build_cluster_cannot_link_mask(indexed_clusters)
+                constrained_dist[cannot_link_mask] = large_distance
+            np.fill_diagonal(constrained_dist, 0.0)
+            ahc_labels = _cluster_by_ahc_distance_matrix(
+                constrained_dist,
+                distance_threshold=distance_threshold,
+                linkage=linkage,
+            )
+    else:
+        ahc_labels = []
+
+    buckets: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for cluster, label in zip(indexed_clusters, ahc_labels, strict=True):
+        buckets[int(label)].append(cluster)
+
+    next_label = (max(buckets.keys()) + 1) if buckets else 0
+    for cluster in fallback_clusters:
+        buckets[next_label].append(cluster)
+        next_label += 1
+
+    merged_persons: list[dict[str, Any]] = []
+    for source_label, person_clusters in buckets.items():
+        sorted_clusters = sorted(
+            person_clusters,
+            key=lambda row: (-len(row.get("members", [])), int(row.get("cluster_label", 0))),
+        )
+        cluster_refs: list[dict[str, Any]] = []
+        person_face_count = 0
+        for cluster in sorted_clusters:
+            cluster_members = sorted(
+                list(cluster.get("members", [])),
+                key=lambda row: -(row.get("quality_score") or 0.0),
+            )
+            person_face_count += len(cluster_members)
+            cluster_refs.append(
+                {
+                    "cluster_key": str(cluster.get("cluster_key", "")),
+                    "cluster_label": int(cluster.get("cluster_label", -1)),
+                    "member_count": len(cluster_members),
+                    "members": cluster_members,
+                }
+            )
+        merged_persons.append(
+            {
+                "source_person_label": int(source_label),
+                "clusters": cluster_refs,
+                "person_face_count": person_face_count,
+                "person_cluster_count": len(sorted_clusters),
+                "min_cluster_label": min(item["cluster_label"] for item in cluster_refs),
+            }
+        )
+
+    merged_persons.sort(
+        key=lambda row: (
+            -int(row.get("person_face_count", 0)),
+            -int(row.get("person_cluster_count", 0)),
+            int(row.get("min_cluster_label", 0)),
+        )
+    )
+
+    for idx, person in enumerate(merged_persons):
+        person["person_label"] = idx
+        person["person_key"] = f"person_{idx}"
+        person.pop("min_cluster_label", None)
+        person.pop("source_person_label", None)
+
+    return merged_persons
+
+
+def _render_face_cards(members: list[dict[str, Any]]) -> str:
+    cards: list[str] = []
+    for member in members:
+        face_id = html.escape(str(member.get("face_id", "")))
+        crop_relpath = html.escape(str(member.get("crop_relpath", "")))
+        context_relpath = html.escape(str(member.get("context_relpath", "")))
+        quality_score = float(member.get("quality_score", 0.0))
+        magface_quality = float(member.get("magface_quality", 0.0))
+        prob = member.get("cluster_probability")
+        prob_text = "-" if prob is None else f"{float(prob):.3f}"
+
+        cards.append(
+            f"""
+            <article class=\"face-card\">
+              <header>
+                <strong>{face_id}</strong>
+                <span>Q={quality_score:.3f} · M={magface_quality:.2f} · P={prob_text}</span>
+              </header>
+              <div class=\"thumb-grid\">
+                <a href=\"{crop_relpath}\" target=\"_blank\"><img src=\"{crop_relpath}\" alt=\"crop {face_id}\"></a>
+                <a href=\"{context_relpath}\" target=\"_blank\"><img src=\"{context_relpath}\" alt=\"context {face_id}\"></a>
+              </div>
+            </article>
+            """
+        )
+    return "".join(cards)
+
+
 def render_review_html(payload: dict[str, Any]) -> str:
     meta = payload.get("meta", {})
+    persons = sorted(
+        payload.get("persons", []),
+        key=lambda person: int(person.get("person_face_count", 0)),
+        reverse=True,
+    )
     clusters = sorted(
         payload.get("clusters", []),
         key=lambda cluster: len(cluster.get("members", [])),
         reverse=True,
     )
 
-    blocks: list[str] = []
-    for cluster in clusters:
-        members = cluster.get("members", [])
-        member_cards: list[str] = []
-        for member in members:
-            face_id = html.escape(str(member.get("face_id", "")))
-            crop_relpath = html.escape(str(member.get("crop_relpath", "")))
-            context_relpath = html.escape(str(member.get("context_relpath", "")))
-            preview_relpath = html.escape(str(member.get("preview_relpath", "")))
-            quality_score = float(member.get("quality_score", 0.0))
-            magface_quality = float(member.get("magface_quality", 0.0))
-            prob = member.get("cluster_probability")
-            prob_text = "-" if prob is None else f"{float(prob):.3f}"
+    person_blocks: list[str] = []
+    for person in persons:
+        person_key = html.escape(str(person.get("person_key", "")))
+        cluster_refs = list(person.get("clusters", []))
+        person_cluster_count = int(person.get("person_cluster_count", len(cluster_refs)))
+        person_face_count = int(
+            person.get(
+                "person_face_count",
+                sum(int(cluster.get("member_count", len(cluster.get("members", [])))) for cluster in cluster_refs),
+            )
+        )
+        cluster_chips = "".join(
+            [
+                (
+                    f"<span class=\"cluster-chip\">"
+                    f"{html.escape(str(cluster.get('cluster_key', '')))}"
+                    f" · {int(cluster.get('member_count', 0))}"
+                    "</span>"
+                )
+                for cluster in cluster_refs
+            ]
+        )
 
-            member_cards.append(
+        nested_cluster_blocks: list[str] = []
+        for cluster in cluster_refs:
+            cluster_key = html.escape(str(cluster.get("cluster_key", "")))
+            cluster_label = cluster.get("cluster_label")
+            cluster_members = list(cluster.get("members", []))
+            cluster_size = int(cluster.get("member_count", len(cluster_members)))
+            nested_cluster_blocks.append(
                 f"""
-                <article class=\"face-card\">
-                  <header>
-                    <strong>{face_id}</strong>
-                    <span>Q={quality_score:.3f} · M={magface_quality:.2f} · P={prob_text}</span>
-                  </header>
-                  <div class=\"thumb-grid\">
-                    <a href=\"{crop_relpath}\" target=\"_blank\"><img src=\"{crop_relpath}\" alt=\"crop {face_id}\"></a>
-                    <a href=\"{context_relpath}\" target=\"_blank\"><img src=\"{context_relpath}\" alt=\"context {face_id}\"></a>
-                    <a href=\"{preview_relpath}\" target=\"_blank\"><img src=\"{preview_relpath}\" alt=\"preview {face_id}\"></a>
+                <details class=\"person-cluster panel-subitem\" open>
+                  <summary class=\"subitem-title\">
+                    <h4>{cluster_key}</h4>
+                    <span class=\"item-meta\">label={cluster_label} · members={cluster_size}</span>
+                  </summary>
+                  <div class=\"subitem-body\">
+                    <div class=\"face-grid\">
+                      {_render_face_cards(cluster_members)}
+                    </div>
                   </div>
-                </article>
+                </details>
                 """
             )
 
+        person_blocks.append(
+            f"""
+            <details class=\"person panel-item\" data-person-key=\"{person_key}\">
+              <summary class=\"item-title\">
+                <h3>{person_key}</h3>
+                <span class=\"item-meta\">clusters={person_cluster_count} · members={person_face_count}</span>
+              </summary>
+              <div class=\"item-body\">
+                <div class=\"person-actions\">
+                  <button type=\"button\" class=\"person-cluster-toggle\" data-person-cluster-toggle>展开全部 cluster</button>
+                </div>
+                <div class=\"cluster-chip-list\">{cluster_chips}</div>
+                <div class=\"subitem-list\">
+                  {''.join(nested_cluster_blocks)}
+                </div>
+              </div>
+            </details>
+            """
+        )
+
+    cluster_blocks: list[str] = []
+    for cluster in clusters:
+        members = list(cluster.get("members", []))
         cluster_key = html.escape(str(cluster.get("cluster_key", "")))
         cluster_label = cluster.get("cluster_label")
         cluster_size = len(members)
-        blocks.append(
+        cluster_blocks.append(
             f"""
-            <details class=\"cluster panel\">
-              <summary class=\"cluster-title\">
+            <details class=\"cluster panel-item\">
+              <summary class=\"item-title\">
                 <h3>{cluster_key}</h3>
-                <span class=\"cluster-meta\">label={cluster_label} · members={cluster_size}</span>
+                <span class=\"item-meta\">label={cluster_label} · members={cluster_size}</span>
               </summary>
-              <div class=\"face-grid\">
-                {''.join(member_cards)}
+              <div class=\"item-body\">
+                <div class=\"face-grid\">
+                  {_render_face_cards(members)}
+                </div>
               </div>
             </details>
             """
@@ -477,11 +782,15 @@ def render_review_html(payload: dict[str, Any]) -> str:
 
     model = html.escape(str(meta.get("model", "MagFace")))
     clusterer = html.escape(str(meta.get("clusterer", "HDBSCAN")))
+    person_clusterer = html.escape(str(meta.get("person_clusterer", "AHC")))
+    person_linkage = html.escape(str(meta.get("person_linkage", "average")))
+    person_same_photo_cannot_link = bool(meta.get("person_enable_same_photo_cannot_link", False))
     source = html.escape(str(meta.get("source", "")))
     image_count = int(meta.get("image_count", 0))
     face_count = int(meta.get("face_count", 0))
     cluster_count = int(meta.get("cluster_count", 0))
     noise_count = int(meta.get("noise_count", 0))
+    person_count = int(meta.get("person_count", len(persons)))
 
     return f"""<!DOCTYPE html>
 <html lang=\"zh-CN\">
@@ -542,7 +851,11 @@ def render_review_html(payload: dict[str, Any]) -> str:
     }}
     .summary-grid dt {{ margin: 0 0 6px; color: var(--sub); font-size: 12px; }}
     .summary-grid dd {{ margin: 0; font-weight: 600; }}
-    .cluster-title {{
+    details.panel-block {{
+      padding: 0;
+      overflow: hidden;
+    }}
+    .stage-title {{
       display: flex;
       justify-content: space-between;
       align-items: baseline;
@@ -552,26 +865,110 @@ def render_review_html(payload: dict[str, Any]) -> str:
       cursor: pointer;
       user-select: none;
     }}
-    .cluster-title h3 {{ margin: 0; }}
-    .cluster-meta {{ color: var(--sub); font-size: 13px; }}
-    details.cluster > summary::-webkit-details-marker {{ display: none; }}
-    details.cluster > summary::after {{
+    .stage-title h2 {{ margin: 0; font-size: 18px; }}
+    .stage-meta {{ color: var(--sub); font-size: 13px; }}
+    .item-title {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 12px;
+      margin: 0;
+      padding: 12px 14px;
+      cursor: pointer;
+      user-select: none;
+    }}
+    .item-title h3 {{ margin: 0; font-size: 16px; }}
+    .item-meta {{ color: var(--sub); font-size: 13px; }}
+    details > summary::-webkit-details-marker {{ display: none; }}
+    details > summary::after {{
       content: "展开";
       margin-left: 10px;
       color: var(--brand);
       font-size: 12px;
       font-weight: 600;
     }}
-    details.cluster[open] > summary {{
+    details[open] > summary {{
       border-bottom: 1px dashed var(--line);
       margin-bottom: 12px;
     }}
-    details.cluster[open] > summary::after {{ content: "收起"; }}
+    details[open] > summary::after {{ content: "收起"; }}
+    .stage-body {{
+      padding: 0 10px 10px;
+    }}
+    .panel-item {{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      margin: 0 0 10px;
+      box-shadow: 0 3px 10px rgba(35, 60, 130, 0.04);
+    }}
+    .item-body {{
+      padding: 0 14px 14px;
+    }}
+    .subitem-list {{
+      display: grid;
+      gap: 10px;
+    }}
+    .panel-subitem {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfdff;
+      overflow: hidden;
+    }}
+    .subitem-title {{
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+      margin: 0;
+      padding: 10px 12px;
+      cursor: pointer;
+      user-select: none;
+    }}
+    .subitem-title h4 {{
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+    }}
+    .subitem-body {{
+      padding: 0 12px 12px;
+    }}
+    .person-actions {{
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 8px;
+    }}
+    .person-cluster-toggle {{
+      border: 1px solid #c7d7fb;
+      background: #eef4ff;
+      color: #21448f;
+      border-radius: 8px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }}
+    .person-cluster-toggle:hover {{
+      background: #e3edff;
+    }}
+    .cluster-chip-list {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 10px;
+    }}
+    .cluster-chip {{
+      font-size: 12px;
+      color: #2f3f57;
+      background: #edf3ff;
+      border: 1px solid #cfddfb;
+      border-radius: 999px;
+      padding: 4px 8px;
+    }}
     .face-grid {{
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
       gap: 10px;
-      padding: 0 14px 14px;
     }}
     .face-card {{
       border: 1px solid var(--line);
@@ -588,7 +985,7 @@ def render_review_html(payload: dict[str, Any]) -> str:
     }}
     .thumb-grid {{
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 6px;
     }}
     .thumb-grid a {{
@@ -622,14 +1019,80 @@ def render_review_html(payload: dict[str, Any]) -> str:
       <dl class=\"summary-grid\">
         <div><dt>Embedding 模型</dt><dd>{model}</dd></div>
         <div><dt>聚类算法</dt><dd>{clusterer}</dd></div>
+        <div><dt>人物合并</dt><dd>{person_clusterer} · {person_linkage}</dd></div>
+        <div><dt>同图冲突约束</dt><dd>{"开启" if person_same_photo_cannot_link else "关闭"}</dd></div>
         <div><dt>图片数</dt><dd>{image_count}</dd></div>
         <div><dt>人脸数</dt><dd>{face_count}</dd></div>
         <div><dt>簇数</dt><dd>{cluster_count}</dd></div>
+        <div><dt>人物数</dt><dd>{person_count}</dd></div>
         <div><dt>噪声数</dt><dd>{noise_count}</dd></div>
       </dl>
     </section>
-    {''.join(blocks)}
+    <details class=\"panel panel-block\" open>
+      <summary class=\"stage-title\">
+        <h2>第二阶段 人物聚合（{person_clusterer}）</h2>
+        <span class=\"stage-meta\">persons={person_count}</span>
+      </summary>
+      <div class=\"stage-body\">
+        {''.join(person_blocks)}
+      </div>
+    </details>
+    <details class=\"panel panel-block\">
+      <summary class=\"stage-title\">
+        <h2>第一阶段 微簇（{clusterer}）</h2>
+        <span class=\"stage-meta\">clusters={cluster_count} · noise={noise_count}</span>
+      </summary>
+      <div class=\"stage-body\">
+        {''.join(cluster_blocks)}
+      </div>
+    </details>
   </main>
+  <script>
+    (() => {{
+      const updateButtonText = (button, clusterDetailsList) => {{
+        if (clusterDetailsList.length === 0) {{
+          button.disabled = true;
+          button.textContent = "无可展开 cluster";
+          return;
+        }}
+        const allOpen = clusterDetailsList.every((node) => node.open);
+        button.textContent = allOpen ? "折叠全部 cluster" : "展开全部 cluster";
+      }};
+
+      document.querySelectorAll("[data-person-cluster-toggle]").forEach((button) => {{
+        const personDetails = button.closest("details.person");
+        if (!personDetails) {{
+          return;
+        }}
+        const clusterDetailsList = Array.from(personDetails.querySelectorAll("details.person-cluster"));
+        updateButtonText(button, clusterDetailsList);
+
+        personDetails.addEventListener("toggle", () => {{
+          if (!personDetails.open) {{
+            return;
+          }}
+          clusterDetailsList.forEach((node) => {{
+            node.open = true;
+          }});
+          updateButtonText(button, clusterDetailsList);
+        }});
+
+        button.addEventListener("click", () => {{
+          const allOpen = clusterDetailsList.every((node) => node.open);
+          clusterDetailsList.forEach((node) => {{
+            node.open = !allOpen;
+          }});
+          updateButtonText(button, clusterDetailsList);
+        }});
+
+        clusterDetailsList.forEach((node) => {{
+          node.addEventListener("toggle", () => {{
+            updateButtonText(button, clusterDetailsList);
+          }});
+        }});
+      }});
+    }})();
+  </script>
 </body>
 </html>
 """
@@ -650,15 +1113,6 @@ def _load_rgb_image(path: Path) -> Image.Image:
         return normalized.convert("RGB")
 
 
-def _make_preview(image: Image.Image, max_side: int) -> tuple[Image.Image, float]:
-    width, height = image.size
-    scale = min(1.0, float(max_side) / float(max(width, height)))
-    if scale >= 1.0:
-        return image.copy(), 1.0
-    resized = image.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
-    return resized, scale
-
-
 def _make_crop(image: Image.Image, bbox: tuple[int, int, int, int], pad_ratio: float = 0.25) -> Image.Image:
     x1, y1, x2, y2 = bbox
     width, height = image.size
@@ -674,13 +1128,19 @@ def _make_crop(image: Image.Image, bbox: tuple[int, int, int, int], pad_ratio: f
     return ImageOps.fit(crop, (256, 256), Image.Resampling.LANCZOS)
 
 
-def _make_context(preview: Image.Image, bbox: tuple[int, int, int, int], scale: float) -> Image.Image:
+def _make_context(image: Image.Image, bbox: tuple[int, int, int, int], max_side: int) -> Image.Image:
+    width, height = image.size
+    scale = min(1.0, float(max_side) / float(max(width, height)))
+    if scale >= 1.0:
+        canvas = image.copy()
+    else:
+        canvas = image.resize((max(1, int(width * scale)), max(1, int(height * scale))), Image.Resampling.LANCZOS)
+
     px1 = int(bbox[0] * scale)
     py1 = int(bbox[1] * scale)
     px2 = int(bbox[2] * scale)
     py2 = int(bbox[3] * scale)
 
-    canvas = preview.copy()
     draw = ImageDraw.Draw(canvas)
     draw.rectangle((px1, py1, px2, py2), outline="#ff3b30", width=3)
     return canvas
@@ -695,7 +1155,7 @@ def _cluster_with_hdbscan(
 
     if not embeddings:
         return [], []
-    if len(embeddings) < max(2, min_cluster_size):
+    if len(embeddings) < max(2, min_cluster_size, min_samples):
         return [-1 for _ in embeddings], [0.0 for _ in embeddings]
 
     vectors = np.asarray(embeddings, dtype=np.float32)
@@ -717,14 +1177,12 @@ def _ensure_dirs(output_dir: Path, reset_output: bool) -> dict[str, Path]:
 
     (output_dir / "assets" / "crops").mkdir(parents=True, exist_ok=True)
     (output_dir / "assets" / "context").mkdir(parents=True, exist_ok=True)
-    (output_dir / "assets" / "preview").mkdir(parents=True, exist_ok=True)
     (output_dir / "assets" / "aligned").mkdir(parents=True, exist_ok=True)
     (output_dir / "cache").mkdir(parents=True, exist_ok=True)
 
     return {
         "crop": output_dir / "assets" / "crops",
         "context": output_dir / "assets" / "context",
-        "preview": output_dir / "assets" / "preview",
         "aligned": output_dir / "assets" / "aligned",
         "db": output_dir / "cache" / "pipeline.db",
     }
@@ -771,11 +1229,7 @@ def run_detection_stage(
             bgr_arr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
             height, width = bgr_arr.shape[:2]
 
-            preview, preview_scale = _make_preview(rgb_image, max_side=preview_max_side)
             photo_key = hashlib.sha1(relpath.encode("utf-8")).hexdigest()[:16]
-            preview_name = f"{photo_key}.jpg"
-            preview_relpath = f"assets/preview/{preview_name}"
-            preview.save(dirs["preview"] / preview_name, format="JPEG", quality=88)
 
             faces = detector.get(bgr_arr)
             clear_failed_image(conn, relpath)
@@ -797,7 +1251,7 @@ def run_detection_stage(
                 crop_img = _make_crop(image=rgb_image, bbox=bbox)
                 crop_img.save(dirs["crop"] / crop_name, format="JPEG", quality=92)
 
-                context_img = _make_context(preview=preview, bbox=bbox, scale=preview_scale)
+                context_img = _make_context(image=rgb_image, bbox=bbox, max_side=preview_max_side)
                 context_img.save(dirs["context"] / context_name, format="JPEG", quality=88)
 
                 aligned_bgr = face_align.norm_crop(bgr_arr, face.kps, image_size=112)
@@ -810,7 +1264,7 @@ def run_detection_stage(
                         "photo_relpath": relpath,
                         "crop_relpath": f"assets/crops/{crop_name}",
                         "context_relpath": f"assets/context/{context_name}",
-                        "preview_relpath": preview_relpath,
+                        "preview_relpath": "",
                         "aligned_relpath": aligned_relpath,
                         "bbox": [x1, y1, x2, y2],
                         "detector_confidence": det_conf,
@@ -908,6 +1362,11 @@ def run_cluster_stage(
     det_size: int,
     min_cluster_size: int,
     min_samples: int,
+    person_merge_threshold: float,
+    person_rep_top_k: int,
+    person_knn_k: int,
+    person_linkage: str,
+    person_enable_same_photo_cannot_link: bool,
     preview_max_side: int,
     magface_checkpoint: Path,
 ) -> dict[str, Any]:
@@ -918,18 +1377,16 @@ def run_cluster_stage(
     failed_faces = list_failed_faces(conn)
 
     observations: list[FaceObservation] = []
-    embeddings: list[list[float]] = []
     for row in iter_embedded_faces(conn):
         bbox_values = [int(v) for v in row["bbox"]]
-        embeddings.append(list(row["embedding"]))
         observations.append(
             FaceObservation(
                 face_id=str(row["face_id"]),
                 photo_relpath=str(row["photo_relpath"]),
                 crop_relpath=str(row["crop_relpath"]),
                 context_relpath=str(row["context_relpath"]),
-                preview_relpath=str(row["preview_relpath"]),
                 bbox=(bbox_values[0], bbox_values[1], bbox_values[2], bbox_values[3]),
+                embedding=list(row["embedding"]),
                 detector_confidence=float(row["detector_confidence"]),
                 face_area_ratio=float(row["face_area_ratio"]),
                 magface_quality=float(row["magface_quality"]),
@@ -938,11 +1395,10 @@ def run_cluster_stage(
         )
 
     labels, probabilities = _cluster_with_hdbscan(
-        embeddings,
+        [list(obs.embedding) for obs in observations],
         min_cluster_size=min_cluster_size,
         min_samples=min_samples,
     )
-    del embeddings
 
     for obs, label, probability in zip(observations, labels, probabilities, strict=True):
         obs.cluster_label = int(label)
@@ -959,6 +1415,18 @@ def run_cluster_stage(
 
     for cluster in grouped_clusters:
         cluster["members"].sort(key=lambda row: -(row.get("quality_score") or 0.0))
+
+    persons = merge_clusters_to_persons(
+        clusters=grouped_clusters,
+        distance_threshold=person_merge_threshold,
+        rep_top_k=person_rep_top_k,
+        knn_k=person_knn_k,
+        linkage=person_linkage,
+        enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
+    )
+    # embedding 仅用于二阶段聚合，不写入最终清单，避免 manifest 体积膨胀。
+    for row in face_rows:
+        row.pop("embedding", None)
 
     image_count = int(get_meta(conn, "max_images", 0) or 0)
     if image_count <= 0:
@@ -980,12 +1448,20 @@ def run_cluster_stage(
             "noise_count": len(next((c["members"] for c in grouped_clusters if c["cluster_key"] == "noise"), [])),
             "min_cluster_size": min_cluster_size,
             "min_samples": min_samples,
+            "person_count": len(persons),
+            "person_clusterer": "AHC",
+            "person_linkage": person_linkage,
+            "person_merge_threshold": person_merge_threshold,
+            "person_rep_top_k": person_rep_top_k,
+            "person_knn_k": person_knn_k,
+            "person_enable_same_photo_cannot_link": person_enable_same_photo_cannot_link,
             "preview_max_side": preview_max_side,
             "magface_checkpoint": str(magface_checkpoint),
             "db_path": str(dirs["db"]),
         },
         "failed_images": failed_images,
         "failed_faces": failed_faces,
+        "persons": persons,
         "clusters": grouped_clusters,
     }
 
@@ -1005,6 +1481,11 @@ def run_pipeline(
     det_size: int,
     min_cluster_size: int,
     min_samples: int,
+    person_merge_threshold: float,
+    person_rep_top_k: int,
+    person_knn_k: int,
+    person_linkage: str,
+    person_enable_same_photo_cannot_link: bool,
     preview_max_side: int,
     max_images: int | None,
     stage: str,
@@ -1044,6 +1525,11 @@ def run_pipeline(
             det_size=det_size,
             min_cluster_size=min_cluster_size,
             min_samples=min_samples,
+            person_merge_threshold=person_merge_threshold,
+            person_rep_top_k=person_rep_top_k,
+            person_knn_k=person_knn_k,
+            person_linkage=person_linkage,
+            person_enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
             preview_max_side=preview_max_side,
             magface_checkpoint=magface_checkpoint,
         )
@@ -1070,9 +1556,19 @@ def run_pipeline(
         str(min_cluster_size),
         "--min-samples",
         str(min_samples),
+        "--person-merge-threshold",
+        str(person_merge_threshold),
+        "--person-rep-top-k",
+        str(person_rep_top_k),
+        "--person-knn-k",
+        str(person_knn_k),
+        "--person-linkage",
+        person_linkage,
         "--preview-max-side",
         str(preview_max_side),
     ]
+    if person_enable_same_photo_cannot_link:
+        base_cmd.append("--person-enable-same-photo-cannot-link")
     if max_images is not None:
         base_cmd.extend(["--max-images", str(max_images)])
 
@@ -1104,6 +1600,21 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--det-size", type=int, default=640, help="检测分辨率")
     parser.add_argument("--min-cluster-size", type=int, default=3, help="HDBSCAN min_cluster_size")
     parser.add_argument("--min-samples", type=int, default=2, help="HDBSCAN min_samples")
+    parser.add_argument("--person-merge-threshold", type=float, default=0.24, help="二阶段 AHC 合并阈值（余弦距离）")
+    parser.add_argument("--person-rep-top-k", type=int, default=3, help="每个微簇用于构建代表向量的高质量样本数")
+    parser.add_argument("--person-knn-k", type=int, default=8, help="二阶段只在每个微簇的前 K 近邻上尝试合并")
+    parser.add_argument(
+        "--person-linkage",
+        type=str,
+        choices=["average", "single", "complete"],
+        default="single",
+        help="二阶段 AHC linkage 策略",
+    )
+    parser.add_argument(
+        "--person-enable-same-photo-cannot-link",
+        action="store_true",
+        help="开启同图冲突硬约束：同一张图出现过的人脸簇禁止在二阶段合并（默认关闭）",
+    )
     parser.add_argument("--preview-max-side", type=int, default=480, help="预览图最长边")
     parser.add_argument("--max-images", type=int, default=None, help="仅处理前 N 张图片（调试）")
     parser.add_argument("--stage", choices=["all", "detect", "embed", "cluster"], default="all", help="分阶段执行")
@@ -1122,6 +1633,11 @@ def main() -> int:
         det_size=args.det_size,
         min_cluster_size=args.min_cluster_size,
         min_samples=args.min_samples,
+        person_merge_threshold=args.person_merge_threshold,
+        person_rep_top_k=args.person_rep_top_k,
+        person_knn_k=args.person_knn_k,
+        person_linkage=args.person_linkage,
+        person_enable_same_photo_cannot_link=args.person_enable_same_photo_cannot_link,
         preview_max_side=args.preview_max_side,
         max_images=args.max_images,
         stage=args.stage,
@@ -1137,6 +1653,7 @@ def main() -> int:
         "完成："
         f"images={meta.get('image_count')} "
         f"faces={meta.get('face_count')} "
+        f"persons={meta.get('person_count')} "
         f"clusters={meta.get('cluster_count')} "
         f"noise={meta.get('noise_count')}"
     )
