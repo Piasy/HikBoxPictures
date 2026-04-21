@@ -410,9 +410,9 @@ v5 相比 v4 的核心升级有四点：
 
 实验口径：
 
-- 基线目录：`.tmp/magface_hdbscan_review_v5_full_20260420_layer1_recall_032_s20_flip_v2`
-- 候选目录：`.tmp/magface_hdbscan_review_v5_full_20260420_layer1_recall_032_s20_flip_v2_face025_lqe072`
-- 对比页面：`.tmp/quality_gate_compare_v2_face025_lqe072/cluster_diff.html`
+- 基线：flip 多视角 embedding 晚融合补充
+- 候选：在基线上叠加 `face_min=0.25` 与 `micro_evidence=0.72`
+- 对比方式：同口径 `cluster diff` + 关键簇人工复核
 
 结果（基线 -> 候选）：
 
@@ -436,7 +436,41 @@ v5 相比 v4 的核心升级有四点：
 - `micro_evidence=0.72` 可稳定压掉这批“低质量混入”微簇，且总体回撤可控。
 - 因此将 `--low-quality-micro-cluster-min-quality-evidence` 默认值更新为 `0.72`，作为当前 v5 默认档位。
 
-当前代码默认档位（2026-04-20）：
+#### 追加实验：`det_size` 从 `640` 提升到 `1280`（全库复测，2026-04-21）
+
+目标：验证高分辨率检测是否能带来有效人物归属收益。
+
+实验口径：
+
+- 基线：`det_size=640`
+- 候选：`det_size=1280`
+- 运行说明：detect 阶段按子进程分批续跑，`--detect-restart-interval=50`
+- 对比方式：同口径 `cluster diff` + 聚焦人物人工复核
+
+全量指标（基线 -> 候选）：
+
+- `face_count: 2380 -> 3441`（`+1061`, `+44.6%`）
+- `person_count: 146 -> 164`（`+18`）
+- `cluster_count: 441 -> 453`（`+12`）
+- `noise_count: 690 -> 1710`（`+1020`）
+- `face_quality_excluded_count: 200 -> 978`（`+778`）
+- `person_consensus_attach_count: 136 -> 131`（`-5`）
+- `person_cluster_recall_attach_count: 25 -> 19`（`-6`）
+
+聚焦人物（`person_0/person_1`）复核：
+
+- 直接计数：`person_0: 748 -> 751`（`+3`），`person_1: 487 -> 478`（`-9`）
+- 为规避 `face_id` 漂移，按“同 `photo_relpath` + `bbox IoU>=0.5` 一对一”做真实匹配：
+  - `person_0`：保留 `723`、流出 `21`、流入 `27`、基线未匹配丢失 `4`、候选未匹配新增 `1`
+  - `person_1`：保留 `477`、流出 `2`、流入 `0`、基线未匹配丢失 `8`、候选未匹配新增 `1`
+
+结论：
+
+- `det_size=1280` 的主要变化是“检测更多人脸”，但没有转化为可接受的归属收益；
+- 噪声与低质量排除显著膨胀，重点人物净增益极小（`+3/-9` 量级）；
+- 该方向在当前 v5 参数与流程下**基本无优化效果**，结论为：**不再考虑将默认 `det_size` 从 `640` 提升到 `1280`**。
+
+### v5 当前代码默认档位（2026-04-21）：
 
 - `min_cluster_size=2`
 - `min_samples=1`
@@ -489,5 +523,5 @@ v5 相比 v4 的核心升级有四点：
 
 ### v5 产品化 TODO
 
-1. 现阶段图片分辨率普遍较高，后续可评估把 `det_size` 从 `640` 提升到 `1280` 的收益。
+1. `det_size 640 -> 1280` 已完成全库评估（2026-04-21）：当前口径下基本无优化效果，暂不考虑推进。
 2. scan 处理过程并发加速？按 cpu 核数 / 2？
