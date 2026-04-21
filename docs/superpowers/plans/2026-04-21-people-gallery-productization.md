@@ -117,7 +117,7 @@
 - Modify: `docs/db_schema.md`
 - Test: `tests/product/test_workspace_init.py`
 
-- [ ] **Step 1: 先写初始化失败用例（库与配置文件不存在时应创建）**
+- [x] **Step 1: 先写初始化失败用例（库与配置文件不存在时应创建）**
 
 ```python
 def test_init_workspace_creates_two_databases_and_config(tmp_path: Path):
@@ -129,12 +129,12 @@ def test_init_workspace_creates_two_databases_and_config(tmp_path: Path):
     assert json.loads((ws / ".hikbox" / "config.json").read_text())["external_root"] == str(external)
 ```
 
-- [ ] **Step 2: 运行单测确认当前缺失实现**
+- [x] **Step 2: 运行单测确认当前缺失实现**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_workspace_init.py::test_init_workspace_creates_two_databases_and_config -v`
 Expected: FAIL，提示 `initialize_workspace` 未定义或 schema 未创建。
 
-- [ ] **Step 3: 实现工作区配置与路径校验**
+- [x] **Step 3: 实现工作区配置与路径校验**
 
 ```python
 @dataclass(frozen=True)
@@ -146,7 +146,7 @@ class WorkspaceLayout:
     config_json: Path
 ```
 
-- [ ] **Step 4: 实现 library/embedding schema bootstrap（含 schema_meta/embedding_meta 固定键）**
+- [x] **Step 4: 实现 library/embedding schema bootstrap（含 schema_meta/embedding_meta 固定键）**
 
 ```sql
 INSERT INTO schema_meta(key, value, updated_at)
@@ -154,12 +154,12 @@ VALUES ('schema_version','1',CURRENT_TIMESTAMP)
 ON CONFLICT(key) DO UPDATE SET value=excluded.value;
 ```
 
-- [ ] **Step 5: 对齐 `docs/db_schema.md` 的实现落地说明（路径、初始化策略、版本键）**
+- [x] **Step 5: 对齐 `docs/db_schema.md` 的实现落地说明（路径、初始化策略、版本键）**
 
 Run: `source .venv/bin/activate && rg -n "schema_version|product_schema_name|vector_dim|vector_dtype" docs/db_schema.md hikbox_pictures/product/db/sql/*.sql`
 Expected: 文档与 SQL 键名一致。
 
-- [ ] **Step 6: 复跑单测并补充已有库复用用例**
+- [x] **Step 6: 复跑单测并补充已有库复用用例**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_workspace_init.py -v`
 Expected: PASS。
