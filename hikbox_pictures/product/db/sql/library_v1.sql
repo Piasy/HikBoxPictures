@@ -44,3 +44,43 @@ CREATE INDEX IF NOT EXISTS idx_scan_session_created_at ON scan_session(created_a
 CREATE UNIQUE INDEX IF NOT EXISTS uq_scan_session_single_active
 ON scan_session((1))
 WHERE status IN ('running', 'aborting');
+
+CREATE TABLE IF NOT EXISTS scan_session_source (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_session_id INTEGER NOT NULL REFERENCES scan_session(id),
+  library_source_id INTEGER NOT NULL REFERENCES library_source(id),
+  stage_status_json TEXT NOT NULL,
+  processed_assets INTEGER NOT NULL DEFAULT 0,
+  failed_assets INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  UNIQUE(scan_session_id, library_source_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_session_source_session
+ON scan_session_source(scan_session_id);
+
+CREATE TABLE IF NOT EXISTS photo_asset (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  library_source_id INTEGER NOT NULL REFERENCES library_source(id),
+  primary_path TEXT NOT NULL,
+  primary_fingerprint TEXT NOT NULL,
+  fingerprint_algo TEXT NOT NULL CHECK (fingerprint_algo='sha256'),
+  file_size INTEGER NOT NULL,
+  mtime_ns INTEGER NOT NULL,
+  capture_datetime TEXT,
+  capture_month TEXT,
+  is_live_photo INTEGER NOT NULL DEFAULT 0 CHECK (is_live_photo IN (0, 1)),
+  live_mov_path TEXT,
+  live_mov_size INTEGER,
+  live_mov_mtime_ns INTEGER,
+  asset_status TEXT NOT NULL DEFAULT 'active' CHECK (asset_status IN ('active', 'deleted', 'missing')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(library_source_id, primary_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_photo_asset_fingerprint
+ON photo_asset(primary_fingerprint);
+
+CREATE INDEX IF NOT EXISTS idx_photo_asset_capture_month
+ON photo_asset(capture_month);
