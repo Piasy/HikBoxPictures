@@ -87,6 +87,7 @@
 | `root_path` | `TEXT` | `NOT NULL UNIQUE` | 源目录绝对路径 |
 | `label` | `TEXT` | `NOT NULL` | 展示名 |
 | `enabled` | `INTEGER` | `NOT NULL DEFAULT 1 CHECK (enabled IN (0,1))` | 是否启用 |
+| `status` | `TEXT` | `NOT NULL DEFAULT 'active' CHECK (status IN ('active','deleted'))` | 软删除状态 |
 | `last_discovered_at` | `TEXT` |  | 最近 discover 完成时间 |
 | `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
 | `updated_at` | `TEXT` | `NOT NULL` | 更新时间 |
@@ -94,6 +95,11 @@
 索引：
 
 - `idx_library_source_enabled(enabled)`
+- `idx_library_source_status(status)`
+
+规则：
+
+- `root_path` 全局唯一；软删除后仍保留历史记录，不允许复用同一路径创建新 source。
 
 #### `scan_session`
 
@@ -114,10 +120,12 @@
 
 - `idx_scan_session_status(status)`
 - `idx_scan_session_created_at(created_at)`
+- `uq_scan_session_single_active`（`UNIQUE INDEX ON (1) WHERE status IN ('running','aborting')`）
 
 规则：
 
 - `pending_reassign` 不对应独立 `reassign` 会话类型；其处理并入常规 `scan_*` 会话。
+- 任意时刻最多只允许 1 条 active 扫描会话（`running` 或 `aborting`）；并发写入由 DB 唯一索引硬约束兜底。
 
 #### `scan_session_source`
 
