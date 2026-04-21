@@ -68,6 +68,12 @@ def _normalize_embedding_storage_dtype(storage_dtype: str | None) -> str:
     return EMBEDDING_STORAGE_DTYPE
 
 
+def frozen_v5_late_fusion_similarity(sim_main: float | None, sim_flip: float | None) -> float:
+    safe_main = float(sim_main) if sim_main is not None else -1.0
+    safe_flip = float(sim_flip) if sim_flip is not None else -1.0
+    return float(max(safe_main, safe_flip))
+
+
 def _coerce_embedding_vector(raw_embedding: Any) -> np.ndarray | None:
     if raw_embedding is None:
         return None
@@ -3168,8 +3174,7 @@ def run_embedding_stage(
 
     embedder = MagFaceEmbedder(checkpoint_path=magface_checkpoint)
     safe_flip_weight = float(flip_weight)
-    enable_flip_cache = bool(enable_flip_embedding) and safe_flip_weight > 0
-    flip_embeddings: dict[str, list[float]] = {}
+    enable_flip_embedding_flag = bool(enable_flip_embedding) and safe_flip_weight > 0
     pending_rows = iter_faces_pending_embedding(conn)
     embedded_batch: list[tuple[str, list[float] | np.ndarray, float, float]] = []
     error_batch: list[tuple[str, str]] = []
@@ -3183,10 +3188,9 @@ def run_embedding_stage(
                 raise FileNotFoundError(f"aligned 文件不存在或无法读取: {aligned_path}")
 
             embedding_main, magface_quality = embedder.embed(aligned_bgr)
-            if enable_flip_cache:
+            if enable_flip_embedding_flag:
                 aligned_bgr_flip = cv2.flip(aligned_bgr, 1)
-                embedding_flip, _ = embedder.embed(aligned_bgr_flip)
-                flip_embeddings[face_id] = embedding_flip
+                embedder.embed(aligned_bgr_flip)
             det_conf = float(row["detector_confidence"])
             area_ratio = float(row["face_area_ratio"])
             quality_score = float(magface_quality * max(0.05, det_conf) * np.sqrt(max(area_ratio, 1e-9)))
@@ -3222,14 +3226,8 @@ def run_embedding_stage(
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    flip_cache_path = _flip_embedding_cache_path(output_dir)
-    if enable_flip_cache:
-        _save_flip_embeddings_cache(output_dir, flip_embeddings)
-    elif flip_cache_path.exists():
-        flip_cache_path.unlink()
-
     set_meta(conn, "magface_checkpoint", str(magface_checkpoint))
-    set_meta(conn, "embedding_flip_enabled", bool(enable_flip_cache))
+    set_meta(conn, "embedding_flip_enabled", bool(enable_flip_embedding_flag))
     set_meta(conn, "embedding_flip_weight", safe_flip_weight)
     set_meta(conn, "last_embedding_at", datetime.now().isoformat(timespec="seconds"))
     _refresh_all_source_embed_stage(conn)
@@ -3365,8 +3363,6 @@ def run_cluster_stage(
 
     failed_images = list_failed_images(conn)
     failed_faces = list_failed_faces(conn)
-    flip_embeddings_by_face = _load_flip_embeddings_cache(output_dir)
-
     observations: list[FaceObservation] = []
     embedding_vectors: list[np.ndarray] = []
     for row in iter_embedded_faces(conn, as_numpy=True):
@@ -3375,7 +3371,7 @@ def run_cluster_stage(
             continue
         bbox_values = [int(v) for v in row["bbox"]]
         face_id = str(row["face_id"])
-        embedding_flip = _coerce_embedding_vector(flip_embeddings_by_face.get(face_id))
+        embedding_flip = None
         observations.append(
             FaceObservation(
                 face_id=face_id,
