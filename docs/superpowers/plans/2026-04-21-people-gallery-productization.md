@@ -190,7 +190,7 @@ Expected: PASS。
 - Test: `tests/product/test_scan_session_service.py`
 - Test: `tests/product/test_source_service.py`
 
-- [ ] **Step 1: 写状态机与 source 行为失败用例（含 start-or-resume 恢复 interrupted、start-new 的 interrupted -> abandoned）**
+- [x] **Step 1: 写状态机与 source 行为失败用例（含 start-or-resume 恢复 interrupted、start-new 的 interrupted -> abandoned）**
 
 ```python
 def test_start_new_conflicts_when_active_session_exists(repo):
@@ -226,12 +226,12 @@ def test_source_add_disable_enable_relabel_and_remove(source_service, tmp_path):
     assert source_service.list_sources() == []
 ```
 
-- [ ] **Step 2: 跑失败用例确认状态机与 source 管理尚未实现**
+- [x] **Step 2: 跑失败用例确认状态机与 source 管理尚未实现**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_scan_session_service.py::test_start_new_conflicts_when_active_session_exists tests/product/test_scan_session_service.py::test_start_or_resume_resumes_latest_interrupted_when_no_active tests/product/test_scan_session_service.py::test_start_new_abandons_interrupted_then_creates_new tests/product/test_source_service.py::test_source_add_disable_enable_relabel_and_remove -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现会话服务（start_or_resume/start_new/abort + run_kind 限定）**
+- [x] **Step 3: 实现会话服务（start_or_resume/start_new/abort + run_kind 限定）**
 
 ```python
 ALLOWED_RUN_KIND = {"scan_full", "scan_incremental", "scan_resume"}
@@ -258,7 +258,7 @@ def start_new(repo):
     return repo.create_session(run_kind="scan_full", status="pending")
 ```
 
-- [ ] **Step 4: 实现独立 source repository/service（绝对路径校验、root_path 唯一、软删除保护）**
+- [x] **Step 4: 实现独立 source repository/service（绝对路径校验、root_path 唯一、软删除保护）**
 
 ```python
 def add_source(root_path: str, label: str | None) -> SourceRecord:
@@ -266,7 +266,7 @@ def add_source(root_path: str, label: str | None) -> SourceRecord:
     return repo.insert_source(root_path=normalized, label=label or Path(normalized).name)
 ```
 
-- [ ] **Step 5: 实现 serve 启动前阻断检查函数**
+- [x] **Step 5: 实现 serve 启动前阻断检查函数**
 
 ```python
 def assert_no_active_scan_for_serve(repo) -> None:
@@ -274,12 +274,12 @@ def assert_no_active_scan_for_serve(repo) -> None:
         raise ServeBlockedByActiveScanError()
 ```
 
-- [ ] **Step 6: 若 SQL 约束调整，更新 `library_v1.sql` 与 `docs/db_schema.md` 同步**
+- [x] **Step 6: 若 SQL 约束调整，更新 `library_v1.sql` 与 `docs/db_schema.md` 同步**
 
 Run: `source .venv/bin/activate && rg -n "scan_session|run_kind|status|library_source|root_path|enabled|label" hikbox_pictures/product/db/sql/library_v1.sql docs/db_schema.md`
 Expected: `scan_session` 与 `library_source` 的约束、索引与文档一致。
 
-- [ ] **Step 7: 跑状态机与 source 服务全量测试**
+- [x] **Step 7: 跑状态机与 source 服务全量测试**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_scan_session_service.py tests/product/test_source_service.py -v`
 Expected: PASS。
