@@ -202,3 +202,55 @@ ON person_face_assignment(person_id, active);
 
 CREATE INDEX IF NOT EXISTS idx_assignment_run
 ON person_face_assignment(assignment_run_id);
+
+CREATE TABLE IF NOT EXISTS person_face_exclusion (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  reason TEXT NOT NULL CHECK (reason='manual_exclude'),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_face_exclusion_active
+ON person_face_exclusion(person_id, face_observation_id)
+WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_exclusion_face
+ON person_face_exclusion(face_observation_id, active);
+
+CREATE TABLE IF NOT EXISTS merge_operation (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  selected_person_ids_json TEXT NOT NULL,
+  winner_person_id INTEGER NOT NULL REFERENCES person(id),
+  winner_person_uuid TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('applied', 'undone')),
+  created_at TEXT NOT NULL,
+  undone_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS merge_operation_person_delta (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES merge_operation(id),
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  before_snapshot_json TEXT NOT NULL,
+  after_snapshot_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS merge_operation_assignment_delta (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES merge_operation(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  before_assignment_json TEXT NOT NULL,
+  after_assignment_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS merge_operation_exclusion_delta (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES merge_operation(id),
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  before_exclusion_json TEXT NOT NULL,
+  after_exclusion_json TEXT NOT NULL
+);
