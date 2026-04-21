@@ -230,7 +230,10 @@
 
 规则：
 
+- discover 阶段按 `library_source_id + primary_path` 做资产登记与增量判断：`file_size` 或 `mtime_ns` 任一变化即视为该资产后续阶段需全量重跑（`should_rerun = old.file_size != new.file_size or old.mtime_ns != new.mtime_ns`）。
+- `capture_datetime` 在 metadata 阶段按“已有可解析时间 > 文件 mtime”优先级解析；`capture_month` 固定由解析结果按 `YYYY-MM` 生成，保证稳定分组。
 - Live Photo 配对在扫描 `metadata` 阶段完成，结果写入 `live_mov_path/live_mov_size/live_mov_mtime_ns`。
+- Live Photo 仅对 HEIC/HEIF 主文件生效，至少支持两种隐藏 MOV 命名：`.IMG_7379.HEIF_<ts>.MOV` 与 `.IMG_7379_<ts>.MOV`。
 - 导出阶段仅消费已落库的 `live_mov_*` 字段，不再做实时目录配对；缺失时静默跳过 `live_mov` 导出。
 
 #### `face_observation`
