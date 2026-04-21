@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>扫描审计摘要</h1>
+<div
+  data-testid="scan-session-state"
+  data-session-id="{{ session.session_id }}"
+  data-status="{{ session.status }}"
+  data-failed-count="{{ session.failed_count }}"
+>
+  当前会话：{{ session.session_id }} / {{ session.status }} / 失败 {{ session.failed_count }}
+</div>
+
+<div
+  data-testid="scan-params"
+  data-det-size="{{ scan_params.det_size }}"
+  data-workers="{{ scan_params.workers }}"
+  data-batch-size="{{ scan_params.batch_size }}"
+>
+  det_size={{ scan_params.det_size }}, workers={{ scan_params.workers }}, batch_size={{ scan_params.batch_size }}
+</div>
+
+<div>
+  <button data-testid="scan-action-resume" data-enabled="{{ action_states.resume_enabled }}">恢复</button>
+  <button data-testid="scan-action-abort" data-enabled="{{ action_states.abort_enabled }}">中止</button>
+  <button data-testid="scan-action-abandon-new" data-enabled="{{ action_states.abandon_new_enabled }}">放弃并新建</button>
+</div>
+
+<table>
+  <thead><tr><th>Source ID</th><th>Processed</th><th>Total</th></tr></thead>
+  <tbody>
+    {% for row in progress_rows %}
+    <tr
+      data-testid="source-progress-row"
+      data-source-id="{{ row.source_id }}"
+      data-processed="{{ row.processed }}"
+      data-total="{{ row.total }}"
+    >
+      <td>{{ row.source_id }}</td>
+      <td>{{ row.processed }}</td>
+      <td>{{ row.total }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="3" class="muted">暂无进度</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

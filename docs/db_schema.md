@@ -420,6 +420,10 @@
 
 - 首版不提供模板删除 API/CLI（`enabled` 字段仅预留，不承诺删除工作流）。
 
+约束与索引：
+
+- `uq_export_template_name(name)`：模板名称全局唯一，创建与更新均禁止与其他模板重名（更新为自身原名允许）。
+
 #### `export_template_person`
 
 | 字段 | 类型 | 约束 | 说明 |

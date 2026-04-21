@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>人物详情</h1>
+<div data-testid="person-detail" data-person-id="{{ person.person_id }}" data-status="{{ person.status }}" data-is-named="{{ 'true' if person.is_named else 'false' }}">
+  <p>名称：{{ person.display_name or '未命名' }}</p>
+  <p>UUID：{{ person.person_uuid or '-' }}</p>
+</div>
+<h2>当前归属样本</h2>
+<ul>
+  {% for face_id in assignment_face_ids %}
+  <li data-testid="person-face-item" data-face-observation-id="{{ face_id }}">face_observation_id={{ face_id }}</li>
+  {% else %}
+  <li class="muted">暂无样本</li>
+  {% endfor %}
+</ul>
+{% endblock %}
