@@ -39,6 +39,7 @@ hikbox-face-review = "hikbox_pictures.face_review_pipeline:main"
 [tool.setuptools.package-data]
 hikbox_pictures = [
   "web/templates/*.html",
+  "web/templates/*",
   "web/static/*",
 ]
 

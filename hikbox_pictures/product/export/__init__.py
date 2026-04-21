@@ -31,6 +31,9 @@ def ensure_export_schema(conn: sqlite3.Connection) -> None:
           updated_at TEXT NOT NULL
         );
 
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_export_template_name
+        ON export_template(name);
+
         CREATE TABLE IF NOT EXISTS export_template_person (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           template_id INTEGER NOT NULL REFERENCES export_template(id),

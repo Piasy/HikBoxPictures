@@ -661,7 +661,7 @@ Expected: PASS，且 schema 文件无需在本任务修改。
 - Test: `tests/web/test_page_render.py`
 - Test: `tests/web/test_route_coverage.py`
 
-- [ ] **Step 1: 写 API 合同失败用例（spec §15.3 全端点，严格断言成功 `data` 字段 + DB 副作用）**
+- [x] **Step 1: 写 API 合同失败用例（spec §15.3 全端点，严格断言成功 `data` 字段 + DB 副作用）**
 
 | 端点 | 失败断言示例 | 成功断言示例（必须断言的 `data` 字段 + DB） |
 | --- | --- | --- |
@@ -682,7 +682,7 @@ Expected: PASS，且 schema 文件无需在本任务修改。
 Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect -v`
 Expected: FAIL。
 
-- [ ] **Step 2: 写页面失败用例（覆盖 spec 15.1 全量页面路由 + spec §12.5/§12.6 关键交互字段）**
+- [x] **Step 2: 写页面失败用例（覆盖 spec 15.1 全量页面路由 + spec §12.5/§12.6 关键交互字段）**
 
 ```python
 audit_resp = client.get(f"/sources/{session_id}/audit")
@@ -728,23 +728,23 @@ assert "导出运行中" in lock_tip.text
 Run: `source .venv/bin/activate && pytest tests/web/test_page_render.py::test_sources_audit_page_binds_session_status_source_progress_failure_stats_and_scan_params tests/web/test_page_render.py::test_sources_audit_page_binds_resume_abort_abandon_new_action_states tests/web/test_page_render.py::test_exports_page_binds_template_list_create_edit_preview_history_and_people_lock_semantics tests/web/test_route_coverage.py::test_home_page_route tests/web/test_route_coverage.py::test_people_detail_page_route tests/web/test_route_coverage.py::test_sources_page_route tests/web/test_route_coverage.py::test_sources_audit_page_route tests/web/test_route_coverage.py::test_exports_page_route tests/web/test_route_coverage.py::test_export_detail_page_route tests/web/test_route_coverage.py::test_logs_page_route -v`
 Expected: FAIL（未绑定真实数据或交互状态时必须失败）。
 
-- [ ] **Step 3: 实现 FastAPI app factory 与页面路由**
+- [x] **Step 3: 实现 FastAPI app factory 与页面路由**
 
 ```python
 def create_app(services: ServiceContainer) -> FastAPI: ...
 ```
 
-- [ ] **Step 4: 实现核心动作 API（scan/people/export/audit）与错误码映射，逐端点保证“字段合同 + DB 副作用”**
+- [x] **Step 4: 实现核心动作 API（scan/people/export/audit）与错误码映射，逐端点保证“字段合同 + DB 副作用”**
 
 Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect -v`
 Expected: PASS，所有成功路径都按 spec §15.3 的字段断言：`{session_id,status,resumed}`、`{session_id,status}`、`{session_id,status:"aborting"}`、`{person_id,display_name,is_named}`、`{person_id,face_observation_id,pending_reassign:1}`、`{person_id,excluded_count}`、`{merge_operation_id,winner_person_id,winner_person_uuid}`、`{merge_operation_id,status:"undone"}`、`{items:[...]}`、`{template_id}`、`{template_id,updated:true}`、`{export_run_id,status:"running"}`、`{items:[...]}`，并逐条联动 DB 查询。
 
-- [ ] **Step 5: 实现导出中禁用人物修改入口、扫描审计摘要展示，并通过 spec 15.1 + spec §12.5/§12.6 页面断言**
+- [x] **Step 5: 实现导出中禁用人物修改入口、扫描审计摘要展示，并通过 spec 15.1 + spec §12.5/§12.6 页面断言**
 
 Run: `source .venv/bin/activate && pytest tests/web/test_page_render.py::test_sources_audit_page_binds_session_status_source_progress_failure_stats_and_scan_params tests/web/test_page_render.py::test_sources_audit_page_binds_resume_abort_abandon_new_action_states tests/web/test_page_render.py::test_exports_page_binds_template_list_create_edit_preview_history_and_people_lock_semantics tests/web/test_route_coverage.py::test_home_page_route tests/web/test_route_coverage.py::test_people_detail_page_route tests/web/test_route_coverage.py::test_sources_page_route tests/web/test_route_coverage.py::test_sources_audit_page_route tests/web/test_route_coverage.py::test_exports_page_route tests/web/test_route_coverage.py::test_export_detail_page_route tests/web/test_route_coverage.py::test_logs_page_route -v`
 Expected: PASS，页面断言必须基于注入测试数据后的 HTML 结构 / `data-*` 字段：扫描页验证会话状态、source 进度、失败统计、`det_size/workers/batch_size` 当前值与恢复/停止/放弃并新建入口状态；导出页验证模板列表、创建/编辑入口、only/group 预览统计与样例、执行历史、导出运行中禁用人物归属/合并入口与提示文案。
 
-- [ ] **Step 6: 校验 package-data 覆盖模板目录**
+- [x] **Step 6: 校验 package-data 覆盖模板目录**
 
 Run: `source .venv/bin/activate && rg -n "web/templates" pyproject.toml`
 Expected: 模板路径仍可被打包。

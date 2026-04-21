@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>运行日志</h1>
+<table>
+  <thead><tr><th>ID</th><th>类型</th><th>级别</th><th>扫描会话</th><th>导出运行</th><th>时间</th></tr></thead>
+  <tbody>
+    {% for event in events %}
+    <tr data-testid="ops-event-row" data-event-id="{{ event.id }}">
+      <td>{{ event.id }}</td>
+      <td>{{ event.event_type }}</td>
+      <td>{{ event.severity }}</td>
+      <td>{{ event.scan_session_id or '-' }}</td>
+      <td>{{ event.export_run_id or '-' }}</td>
+      <td>{{ event.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">暂无事件</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>导出</h1>
+
+<div data-testid="export-template-create" data-enabled="true">创建模板入口</div>
+
+<table>
+  <thead><tr><th>ID</th><th>名称</th><th>输出目录</th><th>启用</th><th>操作</th></tr></thead>
+  <tbody>
+    {% for template in templates %}
+    <tr data-testid="export-template-row" data-template-id="{{ template.template_id }}">
+      <td>{{ template.template_id }}</td>
+      <td>{{ template.name }}</td>
+      <td>{{ template.output_root }}</td>
+      <td>{{ '是' if template.enabled else '否' }}</td>
+      <td>
+        <a href="/exports/{{ template.template_id }}" data-testid="export-template-edit-{{ template.template_id }}" data-enabled="true">编辑</a>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">暂无模板</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<section>
+  <h2>预览</h2>
+  <div data-testid="preview-only-stats" data-candidate-count="{{ preview.only_count }}">only={{ preview.only_count }}</div>
+  <div data-testid="preview-group-stats" data-candidate-count="{{ preview.group_count }}">group={{ preview.group_count }}</div>
+  <ul>
+    {% for sample in preview.samples %}
+    <li
+      data-testid="preview-sample-item"
+      data-photo-asset-id="{{ sample.photo_asset_id }}"
+      data-bucket="{{ sample.bucket }}"
+    >{{ sample.primary_path }} ({{ sample.bucket }})</li>
+    {% else %}
+    <li class="muted">暂无样例</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section>
+  <h2>执行历史</h2>
+  <table>
+    <thead><tr><th>Run ID</th><th>Template ID</th><th>状态</th></tr></thead>
+    <tbody>
+      {% for row in history %}
+      <tr data-testid="export-run-history-row" data-export-run-id="{{ row.export_run_id }}" data-status="{{ row.status }}">
+        <td>{{ row.export_run_id }}</td>
+        <td>{{ row.template_id }}</td>
+        <td>{{ row.status }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="3" class="muted">暂无历史</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<div data-testid="people-assign-action" data-enabled="{{ 'false' if people_locked else 'true' }}">人物归属入口</div>
+<div data-testid="people-merge-action" data-enabled="{{ 'false' if people_locked else 'true' }}">人物合并入口</div>
+<div data-testid="people-write-lock-tip" data-locked="{{ 'true' if people_locked else 'false' }}">
+  {% if people_locked %}
+  导出进行中，暂不可修改
+  {% else %}
+  当前可修改人物归属与合并。
+  {% endif %}
+</div>
+{% endblock %}

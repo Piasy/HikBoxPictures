@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>源目录与扫描</h1>
+<h2>源目录</h2>
+<table>
+  <thead><tr><th>ID</th><th>标签</th><th>路径</th><th>启用</th><th>状态</th></tr></thead>
+  <tbody>
+    {% for source in sources %}
+    <tr data-testid="source-row" data-source-id="{{ source.source_id }}">
+      <td>{{ source.source_id }}</td>
+      <td>{{ source.label }}</td>
+      <td>{{ source.root_path }}</td>
+      <td>{{ '是' if source.enabled else '否' }}</td>
+      <td>{{ source.status }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">暂无源目录</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<h2>扫描会话</h2>
+<ul>
+  {% for session in sessions %}
+  <li data-testid="scan-session-row" data-session-id="{{ session.session_id }}" data-status="{{ session.status }}">
+    <a href="/sources/{{ session.session_id }}/audit">会话 {{ session.session_id }} ({{ session.status }})</a>
+  </li>
+  {% else %}
+  <li class="muted">暂无扫描会话</li>
+  {% endfor %}
+</ul>
+{% endblock %}
