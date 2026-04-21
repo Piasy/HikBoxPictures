@@ -182,7 +182,7 @@
 
 规则：
 
-- `scan_batch` 仅用于 `detect + aligned + crop/context` 产物阶段；其他阶段不走 claim/ack。
+- `scan_batch` 仅用于 `detect` 阶段；其他阶段不走 claim/ack。
 
 #### `scan_batch_item`
 

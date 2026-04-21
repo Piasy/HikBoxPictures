@@ -264,6 +264,94 @@ def test_abort_raises_when_session_not_running(tmp_path: Path) -> None:
         service.abort(session_id)
 
 
+def test_mark_interrupted_allows_running_and_aborting(tmp_path: Path) -> None:
+    db_path = tmp_path / "library.db"
+    bootstrap_library_schema(db_path)
+
+    running_id = _insert_scan_session(
+        db_path,
+        run_kind="scan_full",
+        status="running",
+        created_at="2026-04-22T00:00:00+00:00",
+        updated_at="2026-04-22T00:00:00+00:00",
+        started_at="2026-04-22T00:00:00+00:00",
+    )
+    repo = SQLiteScanSessionRepository(db_path)
+    service = ScanSessionService(repo)
+
+    running_marked = service.mark_interrupted(running_id, last_error="running-stop")
+    assert running_marked.status == "interrupted"
+    assert running_marked.last_error == "running-stop"
+    assert running_marked.finished_at is not None
+
+    aborting_id = _insert_scan_session(
+        db_path,
+        run_kind="scan_incremental",
+        status="aborting",
+        created_at="2026-04-22T00:01:00+00:00",
+        updated_at="2026-04-22T00:01:00+00:00",
+        started_at="2026-04-22T00:01:00+00:00",
+    )
+    aborting_marked = service.mark_interrupted(aborting_id, last_error="aborting-stop")
+    assert aborting_marked.status == "interrupted"
+    assert aborting_marked.last_error == "aborting-stop"
+    assert aborting_marked.finished_at is not None
+
+
+def test_mark_interrupted_rejects_completed_and_failed(tmp_path: Path) -> None:
+    db_path = tmp_path / "library.db"
+    bootstrap_library_schema(db_path)
+    completed_id = _insert_scan_session(
+        db_path,
+        run_kind="scan_full",
+        status="completed",
+        created_at="2026-04-22T00:00:00+00:00",
+        updated_at="2026-04-22T00:00:00+00:00",
+        finished_at="2026-04-22T00:02:00+00:00",
+    )
+    failed_id = _insert_scan_session(
+        db_path,
+        run_kind="scan_incremental",
+        status="failed",
+        created_at="2026-04-22T00:01:00+00:00",
+        updated_at="2026-04-22T00:01:00+00:00",
+        finished_at="2026-04-22T00:03:00+00:00",
+    )
+    repo = SQLiteScanSessionRepository(db_path)
+    service = ScanSessionService(repo)
+
+    with pytest.raises(ScanSessionIllegalStatusError):
+        service.mark_interrupted(completed_id, last_error="nope")
+    with pytest.raises(ScanSessionIllegalStatusError):
+        service.mark_interrupted(failed_id, last_error="nope")
+
+
+def test_mark_interrupted_is_idempotent_when_already_interrupted(tmp_path: Path) -> None:
+    db_path = tmp_path / "library.db"
+    bootstrap_library_schema(db_path)
+    interrupted_id = _insert_scan_session(
+        db_path,
+        run_kind="scan_full",
+        status="interrupted",
+        created_at="2026-04-22T00:00:00+00:00",
+        updated_at="2026-04-22T00:00:00+00:00",
+        finished_at="2026-04-22T00:01:00+00:00",
+    )
+    repo = SQLiteScanSessionRepository(db_path)
+    service = ScanSessionService(repo)
+
+    before = repo.get_session(interrupted_id)
+    assert before is not None
+    again = service.mark_interrupted(interrupted_id, last_error="ignored")
+    after = repo.get_session(interrupted_id)
+    assert after is not None
+
+    assert again.status == "interrupted"
+    assert again.finished_at == before.finished_at
+    assert again.last_error == before.last_error
+    assert after.last_error == before.last_error
+
+
 def test_start_new_converts_db_unique_conflict_to_domain_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = tmp_path / "library.db"
     bootstrap_library_schema(db_path)

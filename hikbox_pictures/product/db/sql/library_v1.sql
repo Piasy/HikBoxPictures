@@ -59,6 +59,40 @@ CREATE TABLE IF NOT EXISTS scan_session_source (
 CREATE INDEX IF NOT EXISTS idx_scan_session_source_session
 ON scan_session_source(scan_session_id);
 
+CREATE TABLE IF NOT EXISTS scan_batch (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_session_id INTEGER NOT NULL REFERENCES scan_session(id),
+  stage TEXT NOT NULL CHECK (stage='detect'),
+  worker_slot INTEGER NOT NULL,
+  claim_token TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('claimed', 'running', 'acked', 'failed')),
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT NOT NULL,
+  started_at TEXT,
+  acked_at TEXT,
+  error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_batch_session
+ON scan_batch(scan_session_id);
+
+CREATE INDEX IF NOT EXISTS idx_scan_batch_status
+ON scan_batch(status);
+
+CREATE TABLE IF NOT EXISTS scan_batch_item (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_batch_id INTEGER NOT NULL REFERENCES scan_batch(id),
+  photo_asset_id INTEGER NOT NULL REFERENCES photo_asset(id),
+  item_order INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'done', 'failed')),
+  error_message TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE(scan_batch_id, item_order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_batch_item_asset
+ON scan_batch_item(photo_asset_id);
+
 CREATE TABLE IF NOT EXISTS photo_asset (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   library_source_id INTEGER NOT NULL REFERENCES library_source(id),
