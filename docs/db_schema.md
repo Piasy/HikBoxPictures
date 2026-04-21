@@ -262,7 +262,7 @@
 
 约束与索引：
 
-- `UNIQUE(photo_asset_id, face_index)`
+- partial unique：`UNIQUE(photo_asset_id, face_index) WHERE active=1`。
 - `CHECK (bbox_x2 > bbox_x1 AND bbox_y2 > bbox_y1)`
 - `idx_face_observation_asset(photo_asset_id)`
 - `idx_face_observation_pending_reassign(pending_reassign)`
@@ -295,7 +295,7 @@
 | `id` | `INTEGER` | `PRIMARY KEY` | run ID |
 | `scan_session_id` | `INTEGER` | `NOT NULL REFERENCES scan_session(id)` | 来源扫描会话 |
 | `algorithm_version` | `TEXT` | `NOT NULL` | 算法版本 |
-| `param_snapshot_json` | `TEXT` | `NOT NULL` | 参数快照 |
+| `param_snapshot_json` | `TEXT` | `NOT NULL` | 参数快照（冻结 v5，固定不含 `embedding_flip_weight`） |
 | `run_kind` | `TEXT` | `NOT NULL CHECK (run_kind IN ('scan_full','scan_incremental','scan_resume'))` | 运行类型 |
 | `started_at` | `TEXT` | `NOT NULL` | 开始时间 |
 | `finished_at` | `TEXT` |  | 结束时间 |
@@ -308,6 +308,8 @@
 
 规则：
 
+- 首版固定 `algorithm_version='v5.2026-04-21'`。
+- `param_snapshot_json` 用于完整复现 assignment 执行参数，至少包含 `preview_max_side` 与冻结阶段序列。
 - 若扫描在 assignment 阶段被用户中止，运行中的 `assignment_run.status` 记为 `failed`（原因由 `last_error`/事件日志记录）。
 
 #### `person_face_assignment`
@@ -318,7 +320,7 @@
 | `person_id` | `INTEGER` | `NOT NULL REFERENCES person(id)` | 归属人物 |
 | `face_observation_id` | `INTEGER` | `NOT NULL REFERENCES face_observation(id)` | observation |
 | `assignment_run_id` | `INTEGER` | `NOT NULL REFERENCES assignment_run(id)` | run |
-| `assignment_source` | `TEXT` | `NOT NULL CHECK (assignment_source IN ('hdbscan','person_consensus','merge','undo'))` | 来源 |
+| `assignment_source` | `TEXT` | `NOT NULL CHECK (assignment_source IN ('hdbscan','person_consensus','recall','merge','undo'))` | 来源 |
 | `active` | `INTEGER` | `NOT NULL DEFAULT 1 CHECK (active IN (0,1))` | 是否生效 |
 | `confidence` | `REAL` |  | 置信度 |
 | `margin` | `REAL` |  | margin |
@@ -327,7 +329,7 @@
 
 约束与索引：
 
-- 自动来源：`hdbscan|person_consensus`；不存在 `manual`。
+- 自动来源：`hdbscan|person_consensus|recall`；不存在 `manual`。
 - `noise` 与 `low_quality_ignored` 不写入 `person_face_assignment`。
 - partial unique：`UNIQUE(face_observation_id) WHERE active=1`。
 - `idx_assignment_person(person_id, active)`。
@@ -546,6 +548,7 @@
 
 - `UNIQUE(face_observation_id, feature_type, model_key, variant)`
 - `idx_face_embedding_observation(face_observation_id)`
+- assignment 阶段统一落 `main/flip` 两种 `variant` 到 `embedding.db.face_embedding`，不再依赖 JSON flip 缓存文件。
 
 ## 6. 跨库一致性规则
 
