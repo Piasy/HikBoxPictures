@@ -40,6 +40,15 @@
 
 ### 3.1 首版（schema_version=1）
 
+- 初始化入口：`initialize_workspace(workspace_root, external_root)`。
+- 初始化行为：
+  - 若 `workspace/.hikbox/config.json` 不存在，则创建并写入：
+    - `version=1`
+    - `external_root=<绝对路径>`
+  - 若 `library.db` / `embedding.db` 不存在，则分别按 `library_v1.sql` / `embedding_v1.sql` 创建。
+  - 若元信息键缺失，启动时补齐固定键：
+    - `library.schema_meta`: `schema_version=1`、`product_schema_name=people_gallery_v1`
+    - `embedding.embedding_meta`: `schema_version=1`、`vector_dim=512`、`vector_dtype=float32`
 - 应用启动时若 DB 不存在，直接按本文创建全量 schema。
 - 不支持对旧 prototype schema 自动 `ALTER TABLE` 兜底。
 
