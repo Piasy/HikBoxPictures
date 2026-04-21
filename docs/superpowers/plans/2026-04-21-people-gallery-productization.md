@@ -786,13 +786,13 @@ Expected: 模板路径仍可被打包。
 - Test: `tests/cli/test_cli_output_modes.py`
 - Test: `tests/cli/test_cli_db_commands.py`
 
-- [ ] **Step 1: 写 `init` 与 `serve start` 失败用例（必须执行真实命令并断言退出码+stdout/stderr）**
+- [x] **Step 1: 写 `init` 与 `serve start` 失败用例（必须执行真实命令并断言退出码+stdout/stderr）**
 
 ```python
 def test_init_creates_workspace_files(cli_bin, tmp_path):
     ws = tmp_path / "ws"
     run = subprocess.run(
-        [cli_bin, "init", "--workspace", str(ws)],
+        [*cli_cmd, "init", "--workspace", str(ws)],
         text=True, capture_output=True, check=False
     )
     assert run.returncode == 0
@@ -801,7 +801,7 @@ def test_init_creates_workspace_files(cli_bin, tmp_path):
 
 def test_serve_start_success_path(cli_bin, prepared_workspace, wait_http_ok):
     proc = subprocess.Popen(
-        [cli_bin, "serve", "start", "--workspace", str(prepared_workspace), "--host", "127.0.0.1", "--port", "38766"],
+        [*cli_cmd, "serve", "start", "--workspace", str(prepared_workspace), "--host", "127.0.0.1", "--port", "38766"],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
     try:
@@ -812,7 +812,7 @@ def test_serve_start_success_path(cli_bin, prepared_workspace, wait_http_ok):
 
 def test_serve_start_blocked_when_scan_active(cli_bin, prepared_workspace_with_active_scan):
     run = subprocess.run(
-        [cli_bin, "serve", "start", "--workspace", str(prepared_workspace_with_active_scan), "--port", "38765"],
+        [*cli_cmd, "serve", "start", "--workspace", str(prepared_workspace_with_active_scan), "--port", "38765"],
         text=True, capture_output=True, check=False
     )
     assert run.returncode == 7
@@ -822,11 +822,11 @@ def test_serve_start_blocked_when_scan_active(cli_bin, prepared_workspace_with_a
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_init_serve_commands.py::test_init_creates_workspace_files tests/cli/test_cli_init_serve_commands.py::test_serve_start_success_path tests/cli/test_cli_init_serve_commands.py::test_serve_start_blocked_when_scan_active -v`
 Expected: FAIL。
 
-- [ ] **Step 2: 写 `people` 命令失败用例（list/show/rename/exclude/exclude-batch/merge/undo-last-merge）并做 JSON 字段与 DB 真值逐项比对**
+- [x] **Step 2: 写 `people` 命令失败用例（list/show/rename/exclude/exclude-batch/merge/undo-last-merge）并做 JSON 字段与 DB 真值逐项比对**
 
 ```python
 def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
-    run_list = subprocess.run([cli_bin, "--json", "people", "list", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_list = subprocess.run([*cli_cmd, "--json", "people", "list", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     list_data = json.loads(run_list.stdout)["data"]
     db_total = query_one(seeded_workspace, "SELECT COUNT(*) FROM person WHERE status='active'")[0]
     assert run_list.returncode == 0
@@ -839,7 +839,7 @@ def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
     assert item1["is_named"] == bool(db_person1[2])
     assert item1["status"] == db_person1[3]
 
-    run_named = subprocess.run([cli_bin, "--json", "people", "list", "--named", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_named = subprocess.run([*cli_cmd, "--json", "people", "list", "--named", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     named_data = json.loads(run_named.stdout)["data"]
     db_named_total = query_one(seeded_workspace, "SELECT COUNT(*) FROM person WHERE status='active' AND is_named=1")[0]
     assert run_named.returncode == 0
@@ -848,7 +848,7 @@ def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
     for item in named_data["items"]:
         assert query_one(seeded_workspace, "SELECT is_named FROM person WHERE id=?", [item["person_id"]])[0] == 1
 
-    run_anonymous = subprocess.run([cli_bin, "--json", "people", "list", "--anonymous", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_anonymous = subprocess.run([*cli_cmd, "--json", "people", "list", "--anonymous", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     anonymous_data = json.loads(run_anonymous.stdout)["data"]
     db_anonymous_total = query_one(seeded_workspace, "SELECT COUNT(*) FROM person WHERE status='active' AND is_named=0")[0]
     assert run_anonymous.returncode == 0
@@ -857,27 +857,27 @@ def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
     for item in anonymous_data["items"]:
         assert query_one(seeded_workspace, "SELECT is_named FROM person WHERE id=?", [item["person_id"]])[0] == 0
 
-    run_show = subprocess.run([cli_bin, "--json", "people", "show", "1", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_show = subprocess.run([*cli_cmd, "--json", "people", "show", "1", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     show_data = json.loads(run_show.stdout)["data"]
     assert run_show.returncode == 0
     assert show_data["person_id"] == 1
     assert show_data["person_uuid"] == db_person1[0]
     assert show_data["display_name"] == db_person1[1]
-    run_rename = subprocess.run([cli_bin, "people", "rename", "1", "family-2026", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_rename = subprocess.run([*cli_cmd, "people", "rename", "1", "family-2026", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert run_rename.returncode == 0
     assert query_one(seeded_workspace, "SELECT display_name FROM person WHERE id=1")[0] == "family-2026"
-    run_exclude = subprocess.run([cli_bin, "people", "exclude", "1", "--face-observation-id", "11", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_exclude = subprocess.run([*cli_cmd, "people", "exclude", "1", "--face-observation-id", "11", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert run_exclude.returncode == 0
     assert query_one(seeded_workspace, "SELECT COUNT(*) FROM person_face_exclusion WHERE person_id=1 AND face_observation_id=11 AND active=1")[0] == 1
-    run_batch = subprocess.run([cli_bin, "people", "exclude-batch", "1", "--face-observation-ids", "12,13", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_batch = subprocess.run([*cli_cmd, "people", "exclude-batch", "1", "--face-observation-ids", "12,13", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert run_batch.returncode == 0
     assert query_one(seeded_workspace, "SELECT COUNT(*) FROM person_face_exclusion WHERE person_id=1 AND face_observation_id IN (12,13) AND active=1")[0] == 2
-    run_merge = subprocess.run([cli_bin, "people", "merge", "--selected-person-ids", "1,2", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_merge = subprocess.run([*cli_cmd, "people", "merge", "--selected-person-ids", "1,2", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert run_merge.returncode == 0
     merge_id = query_one(seeded_workspace, "SELECT id FROM merge_operation ORDER BY id DESC LIMIT 1")[0]
     assert merge_id is not None
     assert query_one(seeded_workspace, "SELECT COUNT(*) FROM merge_operation_exclusion_delta WHERE merge_operation_id=?", [merge_id])[0] >= 1
-    run_undo = subprocess.run([cli_bin, "people", "undo-last-merge", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_undo = subprocess.run([*cli_cmd, "people", "undo-last-merge", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert run_undo.returncode == 0
     assert query_one(seeded_workspace, "SELECT status FROM merge_operation WHERE id=?", [merge_id])[0] == "undone"
 ```
@@ -885,13 +885,13 @@ def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_people_commands.py::test_people_commands_have_real_effects -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 写 `audit list`、`source list`、`export template list/create/update`、`export run` 失败用例（结构化字段与 DB 真值比对，禁止固定输出）**
+- [x] **Step 3: 写 `audit list`、`source list`、`export template list/create/update`、`export run` 失败用例（结构化字段与 DB 真值比对，禁止固定输出）**
 
 ```python
 def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
-    scan_start = subprocess.run([cli_bin, "--json", "scan", "start-or-resume", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    scan_start = subprocess.run([*cli_cmd, "--json", "scan", "start-or-resume", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     session_id = json.loads(scan_start.stdout)["data"]["session_id"]
-    audit_list = subprocess.run([cli_bin, "--json", "audit", "list", "--scan-session-id", str(session_id), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    audit_list = subprocess.run([*cli_cmd, "--json", "audit", "list", "--scan-session-id", str(session_id), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     audit_items = json.loads(audit_list.stdout)["data"]["items"]
     db_audit_count = query_one(seeded_workspace, "SELECT COUNT(*) FROM scan_audit_item WHERE scan_session_id=?", [session_id])[0]
     assert audit_list.returncode == 0
@@ -903,7 +903,7 @@ def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
             [session_id, item["audit_type"], item["face_observation_id"], item["person_id"]],
         )[0] >= 1
 
-    source_list = subprocess.run([cli_bin, "--json", "source", "list", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    source_list = subprocess.run([*cli_cmd, "--json", "source", "list", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     source_items = json.loads(source_list.stdout)["data"]["items"]
     db_source_count = query_one(seeded_workspace, "SELECT COUNT(*) FROM library_source")[0]
     assert source_list.returncode == 0
@@ -922,15 +922,15 @@ def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
 
     output_root = (seeded_workspace / "exports" / "named-only").resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    create_tpl = subprocess.run([cli_bin, "--json", "export", "template", "create", "--name", "named-only", "--output-root", str(output_root), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    create_tpl = subprocess.run([*cli_cmd, "--json", "export", "template", "create", "--name", "named-only", "--output-root", str(output_root), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert create_tpl.returncode == 0
     template_id = json.loads(create_tpl.stdout)["data"]["template_id"]
-    update_tpl = subprocess.run([cli_bin, "export", "template", "update", str(template_id), "--name", "named-only-v2", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    update_tpl = subprocess.run([*cli_cmd, "export", "template", "update", str(template_id), "--name", "named-only-v2", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert update_tpl.returncode == 0
     assert query_one(seeded_workspace, "SELECT name FROM export_template WHERE id=?", [template_id])[0] == "named-only-v2"
-    list_tpl = subprocess.run([cli_bin, "export", "template", "list", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    list_tpl = subprocess.run([*cli_cmd, "export", "template", "list", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert list_tpl.returncode == 0 and "named-only-v2" in list_tpl.stdout
-    run_export = subprocess.run([cli_bin, "export", "run", str(template_id), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    run_export = subprocess.run([*cli_cmd, "export", "run", str(template_id), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert run_export.returncode == 0
     assert query_one(seeded_workspace, "SELECT COUNT(*) FROM export_run WHERE template_id=?", [template_id])[0] >= 1
 ```
@@ -938,32 +938,32 @@ def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py::test_audit_source_export_template_and_run -v`
 Expected: FAIL。
 
-- [ ] **Step 4: 写 `config/source/scan status|list/export run-status|run-list/logs/db` 失败用例（命令签名严格对齐 spec 15.5）**
+- [x] **Step 4: 写 `config/source/scan status|list/export run-status|run-list/logs/db` 失败用例（命令签名严格对齐 spec 15.5）**
 
 ```python
 def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
-    assert subprocess.run([cli_bin, "init", "--workspace", str(workspace)], text=True, capture_output=True, check=False).returncode == 0
+    assert subprocess.run([*cli_cmd, "init", "--workspace", str(workspace)], text=True, capture_output=True, check=False).returncode == 0
     lib_db = workspace / ".hikbox" / "library.db"
     emb_db = workspace / ".hikbox" / "embedding.db"
 
-    set_root = subprocess.run([cli_bin, "config", "set-external-root", str(workspace / "ext"), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    set_root = subprocess.run([*cli_cmd, "config", "set-external-root", str(workspace / "ext"), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     assert set_root.returncode == 0
-    show = subprocess.run([cli_bin, "--json", "config", "show", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    show = subprocess.run([*cli_cmd, "--json", "config", "show", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     show_data = json.loads(show.stdout)["data"]
     assert show.returncode == 0 and show_data["external_root"] == str(workspace / "ext")
 
-    add = subprocess.run([cli_bin, "--json", "source", "add", str(photos_dir), "--label", "family", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    add = subprocess.run([*cli_cmd, "--json", "source", "add", str(photos_dir), "--label", "family", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     source_id = json.loads(add.stdout)["data"]["source_id"]
-    assert subprocess.run([cli_bin, "--json", "source", "disable", str(source_id), "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
+    assert subprocess.run([*cli_cmd, "--json", "source", "disable", str(source_id), "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
     assert query_one(workspace, "SELECT enabled FROM library_source WHERE id=?", [source_id])[0] == 0
-    assert subprocess.run([cli_bin, "--json", "source", "enable", str(source_id), "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
+    assert subprocess.run([*cli_cmd, "--json", "source", "enable", str(source_id), "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
     assert query_one(workspace, "SELECT enabled FROM library_source WHERE id=?", [source_id])[0] == 1
-    assert subprocess.run([cli_bin, "--json", "source", "relabel", str(source_id), "family-2026", "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
+    assert subprocess.run([*cli_cmd, "--json", "source", "relabel", str(source_id), "family-2026", "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
     assert query_one(workspace, "SELECT label FROM library_source WHERE id=?", [source_id])[0] == "family-2026"
-    assert subprocess.run([cli_bin, "--json", "source", "remove", str(source_id), "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
+    assert subprocess.run([*cli_cmd, "--json", "source", "remove", str(source_id), "--workspace", str(workspace)], text=True, capture_output=True).returncode == 0
     assert query_one(workspace, "SELECT COUNT(*) FROM library_source WHERE id=? AND enabled=1", [source_id])[0] == 0
 
-    start = subprocess.run([cli_bin, "--json", "scan", "start-or-resume", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    start = subprocess.run([*cli_cmd, "--json", "scan", "start-or-resume", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     session_id = json.loads(start.stdout)["data"]["session_id"]
     with sqlite3.connect(lib_db) as conn:
         conn.execute("INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_full','completed','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
@@ -971,18 +971,18 @@ def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
         conn.commit()
         latest_seed_id = conn.execute("SELECT id FROM scan_session ORDER BY id DESC LIMIT 1").fetchone()[0]
 
-    status_latest = subprocess.run([cli_bin, "--json", "scan", "status", "--latest", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    status_latest = subprocess.run([*cli_cmd, "--json", "scan", "status", "--latest", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     latest_data = json.loads(status_latest.stdout)["data"]
     assert status_latest.returncode == 0
     assert latest_data["session_id"] == latest_seed_id
     assert latest_data["status"] == query_one(workspace, "SELECT status FROM scan_session WHERE id=?", [latest_seed_id])[0]
 
-    status = subprocess.run([cli_bin, "--json", "scan", "status", "--session-id", str(session_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    status = subprocess.run([*cli_cmd, "--json", "scan", "status", "--session-id", str(session_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     status_data = json.loads(status.stdout)["data"]
     assert status.returncode == 0 and status_data["session_id"] == session_id
     assert status_data["status"] == query_one(workspace, "SELECT status FROM scan_session WHERE id=?", [session_id])[0]
 
-    scan_list = subprocess.run([cli_bin, "--json", "scan", "list", "--limit", "2", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    scan_list = subprocess.run([*cli_cmd, "--json", "scan", "list", "--limit", "2", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     scan_items = json.loads(scan_list.stdout)["data"]["items"]
     assert len(scan_items) <= 2
     scan_ids = [item["session_id"] for item in scan_items]
@@ -992,26 +992,26 @@ def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
 
     output_root = (workspace / "exports" / "for-run-status").resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    create_tpl = subprocess.run([cli_bin, "--json", "export", "template", "create", "--name", "for-run-status", "--output-root", str(output_root), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    create_tpl = subprocess.run([*cli_cmd, "--json", "export", "template", "create", "--name", "for-run-status", "--output-root", str(output_root), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     template_id = json.loads(create_tpl.stdout)["data"]["template_id"]
-    run_export = subprocess.run([cli_bin, "--json", "export", "run", str(template_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    run_export = subprocess.run([*cli_cmd, "--json", "export", "run", str(template_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     export_run_id = json.loads(run_export.stdout)["data"]["export_run_id"]
-    run_export_2 = subprocess.run([cli_bin, "--json", "export", "run", str(template_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    run_export_2 = subprocess.run([*cli_cmd, "--json", "export", "run", str(template_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     export_run_id_2 = json.loads(run_export_2.stdout)["data"]["export_run_id"]
 
     output_root_other = (workspace / "exports" / "for-run-status-other").resolve()
     output_root_other.mkdir(parents=True, exist_ok=True)
-    create_tpl_other = subprocess.run([cli_bin, "--json", "export", "template", "create", "--name", "for-run-status-other", "--output-root", str(output_root_other), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    create_tpl_other = subprocess.run([*cli_cmd, "--json", "export", "template", "create", "--name", "for-run-status-other", "--output-root", str(output_root_other), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     template_id_other = json.loads(create_tpl_other.stdout)["data"]["template_id"]
-    run_export_other = subprocess.run([cli_bin, "--json", "export", "run", str(template_id_other), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    run_export_other = subprocess.run([*cli_cmd, "--json", "export", "run", str(template_id_other), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     export_run_id_other = json.loads(run_export_other.stdout)["data"]["export_run_id"]
 
-    run_status = subprocess.run([cli_bin, "--json", "export", "run-status", str(export_run_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    run_status = subprocess.run([*cli_cmd, "--json", "export", "run-status", str(export_run_id), "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     run_status_data = json.loads(run_status.stdout)["data"]
     assert run_status_data["export_run_id"] == export_run_id
     assert run_status_data["status"] == query_one(workspace, "SELECT status FROM export_run WHERE id=?", [export_run_id])[0]
 
-    run_list = subprocess.run([cli_bin, "--json", "export", "run-list", "--template-id", str(template_id), "--limit", "1", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    run_list = subprocess.run([*cli_cmd, "--json", "export", "run-list", "--template-id", str(template_id), "--limit", "1", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     run_items = json.loads(run_list.stdout)["data"]["items"]
     db_template_run_count = query_one(workspace, "SELECT COUNT(*) FROM export_run WHERE template_id=?", [template_id])[0]
     assert len(run_items) == min(1, db_template_run_count)
@@ -1020,7 +1020,7 @@ def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
         assert run_items[0]["template_id"] == template_id
         assert run_items[0]["export_run_id"] == expected_latest_template_run
 
-    run_list_other = subprocess.run([cli_bin, "--json", "export", "run-list", "--template-id", str(template_id_other), "--limit", "5", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    run_list_other = subprocess.run([*cli_cmd, "--json", "export", "run-list", "--template-id", str(template_id_other), "--limit", "5", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     run_items_other = json.loads(run_list_other.stdout)["data"]["items"]
     assert all(item["template_id"] == template_id_other for item in run_items_other)
     assert any(item["export_run_id"] == export_run_id_other for item in run_items_other)
@@ -1035,7 +1035,7 @@ def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
     assert lib_freelist_before > 0
     lib_mtime_before = lib_db.stat().st_mtime_ns
     emb_mtime_before = emb_db.stat().st_mtime_ns
-    vacuum = subprocess.run([cli_bin, "--json", "db", "vacuum", "--library", "--embedding", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
+    vacuum = subprocess.run([*cli_cmd, "--json", "db", "vacuum", "--library", "--embedding", "--workspace", str(workspace)], text=True, capture_output=True, check=False)
     assert vacuum.returncode == 0 and json.loads(vacuum.stdout)["ok"] is True
     with sqlite3.connect(lib_db) as conn:
         lib_freelist_after = conn.execute("PRAGMA freelist_count").fetchone()[0]
@@ -1064,7 +1064,7 @@ def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
         conn.commit()
 
     logs_filtered = subprocess.run(
-        [cli_bin, "--json", "logs", "list", "--scan-session-id", str(session_id), "--export-run-id", str(export_run_id_2), "--severity", "warning", "--limit", "1", "--workspace", str(workspace)],
+        [*cli_cmd, "--json", "logs", "list", "--scan-session-id", str(session_id), "--export-run-id", str(export_run_id_2), "--severity", "warning", "--limit", "1", "--workspace", str(workspace)],
         text=True,
         capture_output=True,
         check=False,
@@ -1081,22 +1081,22 @@ def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
         assert logs_items[0]["export_run_id"] == export_run_id_2
         assert logs_items[0]["severity"] == "warning"
 
-    out_json = subprocess.run([cli_bin, "--json", "logs", "list", "--workspace", str(workspace)], text=True, capture_output=True).stdout
-    out_quiet = subprocess.run([cli_bin, "--quiet", "logs", "list", "--workspace", str(workspace)], text=True, capture_output=True).stdout
+    out_json = subprocess.run([*cli_cmd, "--json", "logs", "list", "--workspace", str(workspace)], text=True, capture_output=True).stdout
+    out_quiet = subprocess.run([*cli_cmd, "--quiet", "logs", "list", "--workspace", str(workspace)], text=True, capture_output=True).stdout
     assert json.loads(out_json)["ok"] is True and out_quiet.strip() == ""
 ```
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_db_commands.py tests/cli/test_cli_output_modes.py -v`
 Expected: FAIL。
 
-- [ ] **Step 5: 写 `scan start-or-resume` / `scan start-new` / `scan abort <session_id>` 失败用例（含 interrupted 恢复与 abandoned 契约）**
+- [x] **Step 5: 写 `scan start-or-resume` / `scan start-new` / `scan abort <session_id>` 失败用例（含 interrupted 恢复与 abandoned 契约）**
 
 ```python
 def test_scan_start_or_resume_resumes_latest_interrupted(cli_bin, seeded_workspace):
     older_interrupted = create_scan_session(seeded_workspace, status="interrupted", run_kind="scan_resume")
     latest_interrupted = create_scan_session(seeded_workspace, status="interrupted", run_kind="scan_resume")
     total_before = query_one(seeded_workspace, "SELECT COUNT(*) FROM scan_session")[0]
-    resume = subprocess.run([cli_bin, "--json", "scan", "start-or-resume", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    resume = subprocess.run([*cli_cmd, "--json", "scan", "start-or-resume", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     data = json.loads(resume.stdout)["data"]
     assert resume.returncode == 0
     assert data["resumed"] is True
@@ -1104,7 +1104,7 @@ def test_scan_start_or_resume_resumes_latest_interrupted(cli_bin, seeded_workspa
     assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [latest_interrupted])[0] == "running"
     assert query_one(seeded_workspace, "SELECT COUNT(*) FROM scan_session")[0] == total_before
 
-    resume_again = subprocess.run([cli_bin, "--json", "scan", "start-or-resume", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    resume_again = subprocess.run([*cli_cmd, "--json", "scan", "start-or-resume", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     data_again = json.loads(resume_again.stdout)["data"]
     assert resume_again.returncode == 0
     assert data_again["resumed"] is True
@@ -1113,7 +1113,7 @@ def test_scan_start_or_resume_resumes_latest_interrupted(cli_bin, seeded_workspa
 
 def test_scan_start_new_and_abort_contract(cli_bin, seeded_workspace):
     old_interrupted = create_scan_session(seeded_workspace, status="interrupted", run_kind="scan_resume")
-    start_new_from_interrupted = subprocess.run([cli_bin, "--json", "scan", "start-new", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    start_new_from_interrupted = subprocess.run([*cli_cmd, "--json", "scan", "start-new", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     start_new_data = json.loads(start_new_from_interrupted.stdout)["data"]
     assert start_new_from_interrupted.returncode == 0
     assert start_new_data["session_id"] != old_interrupted
@@ -1121,11 +1121,11 @@ def test_scan_start_new_and_abort_contract(cli_bin, seeded_workspace):
     assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [old_interrupted])[0] == "abandoned"
     assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [start_new_data["session_id"]])[0] in {"pending", "running"}
 
-    new_conflict = subprocess.run([cli_bin, "scan", "start-new", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    new_conflict = subprocess.run([*cli_cmd, "scan", "start-new", "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert new_conflict.returncode == 4
     assert "SCAN_ACTIVE_CONFLICT" in (new_conflict.stdout + new_conflict.stderr)
 
-    abort_run = subprocess.run([cli_bin, "scan", "abort", str(start_new_data["session_id"]), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
+    abort_run = subprocess.run([*cli_cmd, "scan", "abort", str(start_new_data["session_id"]), "--workspace", str(seeded_workspace)], text=True, capture_output=True, check=False)
     assert abort_run.returncode == 0
     assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [start_new_data["session_id"]])[0] in {"aborting", "interrupted", "failed"}
 ```
@@ -1133,7 +1133,7 @@ def test_scan_start_new_and_abort_contract(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_scan_lifecycle_commands.py::test_scan_start_or_resume_resumes_latest_interrupted tests/cli/test_cli_scan_lifecycle_commands.py::test_scan_start_new_and_abort_contract -v`
 Expected: FAIL。
 
-- [ ] **Step 6: 实现 scan 三命令最小真实语义（第二段闭环：最小真实实现）**
+- [x] **Step 6: 实现 scan 三命令最小真实语义（第二段闭环：最小真实实现）**
 
 实现要求：
 - `scan start-or-resume`：无 active 且存在最近 `interrupted` 会话时，必须恢复该会话（`session_id` 不变），并把 DB 状态 `interrupted -> running`。
@@ -1144,17 +1144,19 @@ Expected: FAIL。
 - `scan start-new`：存在 `running|aborting` 会话时返回冲突错误码 `4`。
 - `scan abort <session_id>`：仅对活动会话置 `aborting` 并记录 `updated_at`；不存在返回 `3`。
 
-- [ ] **Step 7: 跑 scan 三命令通过用例（第三段闭环：通过用例）**
+- [x] **Step 7: 跑 scan 三命令通过用例（第三段闭环：通过用例）**
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_scan_lifecycle_commands.py -v`
 Expected: PASS，包含 `start-or-resume` 的 `interrupted -> running` 迁移、`resumed=true`、返回最近 interrupted 的 `session_id`、active 场景复用同 `session_id`，以及 `start-new` 的 `interrupted -> abandoned` + 新会话断言。
 
-- [ ] **Step 8: 做 scan 三命令命令行验证（第四段闭环：退出码+输出+DB 状态）**
+- [x] **Step 8: 做 scan 三命令命令行验证（第四段闭环：退出码+输出+DB 状态）**
 
-Run: `source .venv/bin/activate && python - <<'PY'\nimport json\nimport sqlite3\nimport subprocess\nimport tomllib\nfrom pathlib import Path\n\npyproject = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))\nscripts = pyproject.get('project', {}).get('scripts', {})\ncli_name = next((k for k, v in scripts.items() if v == 'hikbox_pictures.cli:cli_entry'), None)\nassert cli_name, 'pyproject 未声明 hikbox_pictures.cli:cli_entry 脚本入口'\ncli_bin = str(Path('.venv/bin') / cli_name)\nassert Path(cli_bin).exists(), f'CLI 二进制不存在: {cli_bin}'\n\nws = Path('.tmp/cli/scan-lifecycle-ws')\nsubprocess.run([cli_bin, 'init', '--workspace', str(ws)], check=True, text=True)\nlib_db = ws / '.hikbox' / 'library.db'\nconn = sqlite3.connect(lib_db)\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nlatest_interrupted_id = conn.execute(\"SELECT id FROM scan_session WHERE status='interrupted' ORDER BY id DESC LIMIT 1\").fetchone()[0]\ncount_before_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.commit()\nconn.close()\n\nresume = subprocess.run([cli_bin, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume.returncode == 0\nresume_data = json.loads(resume.stdout)['data']\nassert resume_data['resumed'] is True\nassert resume_data['session_id'] == latest_interrupted_id\nconn = sqlite3.connect(lib_db)\nstatus_after_resume = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\ncount_after_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.close()\nassert status_after_resume == 'running'\nassert count_after_resume == count_before_resume\n\nresume_again = subprocess.run([cli_bin, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume_again.returncode == 0\nresume_again_data = json.loads(resume_again.stdout)['data']\nassert resume_again_data['session_id'] == latest_interrupted_id\nassert resume_again_data['resumed'] is True\n\nnew_conflict = subprocess.run([cli_bin, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert new_conflict.returncode == 4\nassert 'SCAN_ACTIVE_CONFLICT' in (new_conflict.stdout + new_conflict.stderr)\n\nabort = subprocess.run([cli_bin, '--json', 'scan', 'abort', str(latest_interrupted_id), '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert abort.returncode == 0\nconn = sqlite3.connect(lib_db)\naborted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nold_interrupted_for_start_new = conn.execute(\"SELECT id FROM scan_session WHERE status='interrupted' ORDER BY id DESC LIMIT 1\").fetchone()[0]\nconn.commit()\nconn.close()\nassert aborted_status in {'aborting', 'interrupted', 'failed'}\n\nstart_new = subprocess.run([cli_bin, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert start_new.returncode == 0\nstart_new_data = json.loads(start_new.stdout)['data']\nassert start_new_data['resumed'] is False\nassert start_new_data['session_id'] != old_interrupted_for_start_new\nconn = sqlite3.connect(lib_db)\nold_interrupted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [old_interrupted_for_start_new]).fetchone()[0]\nnew_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [start_new_data['session_id']]).fetchone()[0]\nconn.close()\nassert old_interrupted_status == 'abandoned'\nassert new_status in {'pending', 'running'}\nprint('OK')\nPY`
-Expected: 当无 active 且存在 `interrupted` 时，`start-or-resume` 退出码 `0`，返回 `resumed=true` 且 `session_id` 命中最近 interrupted，会话状态 `interrupted -> running` 且不新增会话行；active 时再次 `start-or-resume` 返回同一 `session_id`；active 时 `start-new` 退出码 `4` 且输出 `SCAN_ACTIVE_CONFLICT`；`abort` 退出码 `0`；无 active 且存在 interrupted 时 `start-new` 退出码 `0`，旧 interrupted 变 `abandoned`，并创建不同 `session_id` 新会话。
+Run: `source .venv/bin/activate && python - <<'PY'\nimport json\nimport shutil\nimport sqlite3\nimport subprocess\nimport tomllib\nfrom pathlib import Path\n\npyproject = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))\nscripts = pyproject.get('project', {}).get('scripts', {})\ncli_name = next((k for k, v in scripts.items() if v == 'hikbox_pictures.cli:cli_entry'), None)\nassert cli_name, 'pyproject 未声明 hikbox_pictures.cli:cli_entry 脚本入口'\nrepo_root = Path('.').resolve()\nvenv_bin = Path('/Users/linker/src/Piasy/HikBoxPictures-3/.venv/bin')\nif not venv_bin.exists():\n    venv_bin = repo_root / '.venv' / 'bin'\npython_bin = venv_bin / 'python'\nassert python_bin.exists(), f'Python 不存在: {python_bin}'\ncli_cmd = [str(python_bin), '-m', 'hikbox_pictures.cli']\n\nws = Path('.tmp/cli/scan-lifecycle-ws')
+shutil.rmtree(ws, ignore_errors=True)
+subprocess.run([*cli_cmd, 'init', '--workspace', str(ws)], check=True, text=True)\nlib_db = ws / '.hikbox' / 'library.db'\nconn = sqlite3.connect(lib_db)\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nlatest_interrupted_id = conn.execute(\"SELECT id FROM scan_session WHERE status='interrupted' ORDER BY id DESC LIMIT 1\").fetchone()[0]\ncount_before_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.commit()\nconn.close()\n\nresume = subprocess.run([*cli_cmd, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume.returncode == 0\nresume_data = json.loads(resume.stdout)['data']\nassert resume_data['resumed'] is True\nassert resume_data['session_id'] == latest_interrupted_id\nconn = sqlite3.connect(lib_db)\nstatus_after_resume = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\ncount_after_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.close()\nassert status_after_resume == 'running'\nassert count_after_resume == count_before_resume\n\nresume_again = subprocess.run([*cli_cmd, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume_again.returncode == 0\nresume_again_data = json.loads(resume_again.stdout)['data']\nassert resume_again_data['session_id'] == latest_interrupted_id\nassert resume_again_data['resumed'] is True\n\nnew_conflict = subprocess.run([*cli_cmd, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert new_conflict.returncode == 4\nassert 'SCAN_ACTIVE_CONFLICT' in (new_conflict.stdout + new_conflict.stderr)\n\nabort = subprocess.run([*cli_cmd, '--json', 'scan', 'abort', str(latest_interrupted_id), '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert abort.returncode == 0\nconn = sqlite3.connect(lib_db)\naborted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\nconn.execute(\"UPDATE scan_session SET status='interrupted' WHERE id=?\", [latest_interrupted_id])\nold_interrupted_for_start_new = latest_interrupted_id\nconn.commit()\nconn.close()\nassert aborted_status in {'aborting', 'interrupted', 'failed'}\n\nstart_new = subprocess.run([*cli_cmd, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert start_new.returncode == 0\nstart_new_data = json.loads(start_new.stdout)['data']\nassert start_new_data['resumed'] is False\nassert start_new_data['session_id'] != old_interrupted_for_start_new\nconn = sqlite3.connect(lib_db)\nold_interrupted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [old_interrupted_for_start_new]).fetchone()[0]\nnew_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [start_new_data['session_id']]).fetchone()[0]\nconn.close()\nassert old_interrupted_status == 'abandoned'\nassert new_status in {'pending', 'running'}\nprint('OK')\nPY`
+Expected: 当无 active 且存在 `interrupted` 时，`start-or-resume` 退出码 `0`，返回 `resumed=true` 且 `session_id` 命中最近 interrupted，会话状态 `interrupted -> running` 且不新增会话行；active 时再次 `start-or-resume` 返回同一 `session_id`；active 时 `start-new` 退出码 `4` 且输出 `SCAN_ACTIVE_CONFLICT`；`abort` 退出码 `0`。CLI-only 验证下，`abort` 后若需继续验证“无 active 且存在 interrupted 的 `start-new` 成功路径”，需先模拟扫描主流程收敛：`UPDATE scan_session SET status='interrupted' WHERE id=<aborting_session_id>;`，再执行 `start-new` 并断言旧 interrupted `-> abandoned` 与新会话创建成功。
 
-- [ ] **Step 9: 实现 `cli_entry` 与 spec 15.5 全命令树（禁止 no-op 命令壳，逐项核对 config/source/scan/serve/audit/db）**
+- [x] **Step 9: 实现 `cli_entry` 与 spec 15.5 全命令树（禁止 no-op 命令壳，逐项核对 config/source/scan/serve/audit/db）**
 
 ```python
 def cli_entry(argv: list[str] | None = None) -> int: ...
@@ -1173,24 +1175,24 @@ SPEC_15_5_COMMANDS = [
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 -v`
 Expected: PASS，命令签名与 spec 15.5 逐项一致。
 
-- [ ] **Step 10: 实现 `serve start` 成功路径与阻断路径、错误到退出码映射（2/3/4/5/6/7）及 `--json`/`--quiet` 输出切换**
+- [x] **Step 10: 实现 `serve start` 成功路径与阻断路径、错误到退出码映射（2/3/4/5/6/7）及 `--json`/`--quiet` 输出切换**
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_exit_codes.py::test_validation_not_found_scan_conflict_export_lock_illegal_state_and_serve_block_codes -v`
 Expected: PASS。
 
-- [ ] **Step 11: 跑关键行为套件（init/serve/people/audit/source/export-template/export/config/scan/db）**
+- [x] **Step 11: 跑关键行为套件（init/serve/people/audit/source/export-template/export/config/scan/db）**
 
-Run: `source .venv/bin/activate && pytest tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_people_commands.py tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py tests/cli/test_cli_scan_lifecycle_commands.py tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_db_commands.py -v`
+Run: `source /Users/linker/src/Piasy/HikBoxPictures-3/.venv/bin/activate && python -m pytest tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_people_commands.py tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py tests/cli/test_cli_scan_lifecycle_commands.py tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_db_commands.py tests/cli/test_cli_config_commands.py -v`
 Expected: PASS，且每个命令都校验退出码与真实状态变更/查询结果。
 
-- [ ] **Step 12: 校验 `pyproject.toml` 脚本入口与实际模块一致**
+- [x] **Step 12: 校验 `pyproject.toml` 脚本入口与实际模块一致**
 
-Run: `source .venv/bin/activate && python -c "import hikbox_pictures.cli as c; print(hasattr(c,'cli_entry'))"`
+Run: `source /Users/linker/src/Piasy/HikBoxPictures-3/.venv/bin/activate && python -c "import hikbox_pictures.cli as c; print(hasattr(c,'cli_entry'))"`
 Expected: 输出 `True`。
 
-- [ ] **Step 13: 跑 CLI 全量测试**
+- [x] **Step 13: 跑 CLI 全量测试**
 
-Run: `source .venv/bin/activate && pytest tests/cli/test_cli_commands.py tests/cli/test_cli_exit_codes.py tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_people_commands.py tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py tests/cli/test_cli_scan_lifecycle_commands.py tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_output_modes.py tests/cli/test_cli_db_commands.py -v`
+Run: `source /Users/linker/src/Piasy/HikBoxPictures-3/.venv/bin/activate && python -m pytest tests/cli/test_cli_commands.py tests/cli/test_cli_exit_codes.py tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_people_commands.py tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py tests/cli/test_cli_scan_lifecycle_commands.py tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_output_modes.py tests/cli/test_cli_db_commands.py tests/cli/test_cli_config_commands.py -v`
 Expected: PASS。
 
 ### Task 11: 端到端验收清单与文档收口
@@ -1233,7 +1235,7 @@ def test_ac13_homepage_sections_visible(app_services):
     assert "搜索" not in resp.text
 
 def test_ac21_cli_lock_and_conflict_codes(cli_bin, prepared_workspace):
-    run = subprocess.run([cli_bin, "serve", "start", "--workspace", str(prepared_workspace)], text=True, capture_output=True, check=False)
+    run = subprocess.run([*cli_cmd, "serve", "start", "--workspace", str(prepared_workspace)], text=True, capture_output=True, check=False)
     assert run.returncode == 7
     assert "SERVE_BLOCKED_BY_ACTIVE_SCAN" in (run.stdout + run.stderr)
 ```
