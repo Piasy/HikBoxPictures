@@ -165,6 +165,7 @@ class AssignmentStageService:
         run_kind: str,
         candidates: Sequence[AssignmentCandidate],
     ) -> AssignmentRunRecord:
+        self._assert_people_writes_allowed()
         run = self.start_assignment_run(scan_session_id=scan_session_id, run_kind=run_kind)
         try:
             return self._run_assignment_with_existing_run(run=run, candidates=candidates)
@@ -179,6 +180,7 @@ class AssignmentStageService:
         run_kind: str,
         executor_inputs: Iterable[dict[str, object]],
     ) -> AssignmentRunRecord:
+        self._assert_people_writes_allowed()
         run = self.start_assignment_run(scan_session_id=scan_session_id, run_kind=run_kind)
         try:
             frozen_candidates = self._executor.execute(executor_inputs)
@@ -196,6 +198,11 @@ class AssignmentStageService:
         except BaseException:
             self._mark_assignment_run_failed(run.id)
             raise
+
+    def _assert_people_writes_allowed(self) -> None:
+        from hikbox_pictures.product.export.run_service import assert_people_writes_allowed
+
+        assert_people_writes_allowed(self._library_db_path)
 
     def _run_assignment_with_existing_run(
         self,
