@@ -379,7 +379,7 @@ Expected: 字段与行为描述一致。
 - Test: `tests/product/test_detect_batch_claim_ack.py`
 - Test: `tests/product/test_detect_worker_contract.py`
 
-- [ ] **Step 1: 写失败用例（默认 det_size/workers/batch_size 与批次切分规则）**
+- [x] **Step 1: 写失败用例（默认 det_size/workers/batch_size 与批次切分规则）**
 
 ```python
 defaults = build_scan_runtime_defaults(cpu_count=8)
@@ -391,30 +391,30 @@ assert split_batch(total=300, workers=3) == [100, 100, 100]
 assert split_batch(total=302, workers=3) == [101, 101, 100]
 ```
 
-- [ ] **Step 2: 写失败用例（子进程不得直接写业务真相表）**
+- [x] **Step 2: 写失败用例（子进程不得直接写业务真相表）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_detect_worker_contract.py::test_worker_never_writes_business_tables -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现主进程 claim/dispatch/ack 流程和 scan_batch/scan_batch_item 状态推进**
+- [x] **Step 3: 实现主进程 claim/dispatch/ack 流程和 scan_batch/scan_batch_item 状态推进**
 
 ```python
 with repo.transaction():
     batch_id = repo.claim_detect_batch(...)
 ```
 
-- [ ] **Step 4: 实现子进程输出协议与临时文件+rename 产物写入**
+- [x] **Step 4: 实现子进程输出协议与临时文件+rename 产物写入**
 
 ```python
 tmp_path.replace(final_path)
 ```
 
-- [ ] **Step 5: 实现 abort 场景下未 ack 批次回退与 interrupted 迁移**
+- [x] **Step 5: 实现 abort 场景下未 ack 批次回退与 interrupted 迁移**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_detect_batch_claim_ack.py::test_abort_rolls_back_unacked_batches -v`
 Expected: PASS。
 
-- [ ] **Step 6: 对齐文档中 detect 阶段唯一使用 claim/ack 的约束，并校验默认值断言通过**
+- [x] **Step 6: 对齐文档中 detect 阶段唯一使用 claim/ack 的约束，并校验默认值断言通过**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_detect_batch_claim_ack.py::test_default_scan_runtime_values tests/product/test_detect_batch_claim_ack.py::test_split_batch_evenly -v && rg -n "scan_batch|detect|claim|ack" docs/db_schema.md hikbox_pictures/product/scan/*.py`
 Expected: 默认值与切分测试 PASS，且非 detect 阶段无 claim/ack 实现。

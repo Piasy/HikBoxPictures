@@ -192,6 +192,21 @@ class ScanSessionService:
         except sqlite3.IntegrityError as exc:
             raise _as_active_conflict(self._repo, exc) from exc
 
+    def mark_interrupted(self, session_id: int, *, last_error: str | None = None) -> ScanSession:
+        session = self._repo.get_session(session_id)
+        if session is None:
+            raise ScanSessionNotFoundError(session_id)
+        if session.status == "interrupted":
+            return session
+        if session.status not in {"running", "aborting"}:
+            raise ScanSessionIllegalStatusError(session_id, session.status)
+        return self._repo.update_status(
+            session_id,
+            status="interrupted",
+            finished_at=_utc_now(),
+            last_error=last_error,
+        )
+
 
 def assert_no_active_scan_for_serve(repo: SQLiteScanSessionRepository) -> None:
     active = repo.latest_by_status(ACTIVE_STATUS)
