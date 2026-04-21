@@ -1,26 +1,62 @@
+import hashlib
+import json
 from pathlib import Path
 
+import numpy as np
+import pytest
 from PIL import Image
 
+import hikbox_pictures.face_review_pipeline as pipeline_module
 from hikbox_pictures.face_review_pipeline import (
-    DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE,
     attach_micro_clusters_to_existing_persons,
     attach_noise_faces_to_person_consensus,
-    compute_detect_workset_stats,
     exclude_low_quality_faces_from_assignment,
     group_faces_by_cluster,
     iter_embedded_faces,
     iter_faces_pending_embedding,
     iter_image_files,
     mark_face_embedded,
+    merge_embedding_with_optional_flip,
     merge_clusters_to_persons,
     open_pipeline_db,
     render_review_html,
     run_cluster_stage,
     run_detection_stage,
-    set_meta,
+    run_pipeline,
     upsert_detected_face,
+    write_person_review_pages,
 )
+
+
+def _list_pending_source_rows(output_dir: Path, source_key: str, batch_size: int) -> list[dict[str, str]]:
+    conn = open_pipeline_db(output_dir / "cache" / "pipeline.db")
+    try:
+        rows = conn.execute(
+            """
+            SELECT source_key, photo_relpath
+            FROM source_images
+            WHERE source_key=?
+              AND detect_status='pending'
+            ORDER BY photo_relpath
+            LIMIT ?
+            """,
+            (source_key, batch_size),
+        ).fetchall()
+        return [{"source_key": str(row["source_key"]), "photo_relpath": str(row["photo_relpath"])} for row in rows]
+    finally:
+        conn.close()
+
+
+def test_merge_embedding_with_optional_flip_blends_and_normalizes() -> None:
+    merged = merge_embedding_with_optional_flip(
+        main_embedding=[1.0, 0.0],
+        flip_embedding=[0.0, 1.0],
+        flip_weight=1.0,
+    )
+
+    assert len(merged) == 2
+    assert abs(merged[0] - 0.70710678) < 1e-6
+    assert abs(merged[1] - 0.70710678) < 1e-6
 
 
 def test_iter_image_files_filters_hidden_and_non_images(tmp_path: Path) -> None:
@@ -39,22 +75,47 @@ def test_iter_image_files_filters_hidden_and_non_images(tmp_path: Path) -> None:
     assert results == ["A.JPG", "b.heic", "c.png", "sub/e.JPEG"]
 
 
-def test_run_detection_stage_batch_mode_avoids_detector_restarts(tmp_path: Path, monkeypatch) -> None:
+def test_run_detection_stage_batch_mode_uses_subprocess_worker(tmp_path: Path, monkeypatch, capsys) -> None:
     source_dir = tmp_path / "album"
     source_dir.mkdir()
     for idx in range(3):
         Image.new("RGB", (16, 16), (idx, idx, idx)).save(source_dir / f"img_{idx}.jpg")
 
     output_dir = tmp_path / "out"
-    init_calls: list[int] = []
+    worker_batches: list[list[str]] = []
 
-    class _FakeDetector:
-        def get(self, _image_bgr):  # noqa: ANN001
-            return []
+    def fake_detection_subprocess_worker(
+        *,
+        output_dir: Path,
+        source_key: str,
+        batch_size: int,
+        **kwargs,  # noqa: ANN003, ARG001
+    ) -> int:
+        pending_rows = _list_pending_source_rows(output_dir=output_dir, source_key=source_key, batch_size=batch_size)
+        worker_batches.append([row["photo_relpath"] for row in pending_rows])
+        conn = open_pipeline_db(output_dir / "cache" / "pipeline.db")
+        try:
+            for row in pending_rows:
+                pipeline_module._mark_source_image_detect_result(
+                    conn,
+                    source_key=row["source_key"],
+                    photo_relpath=row["photo_relpath"],
+                    status="done",
+                )
+            pipeline_module._refresh_source_detect_stage(conn, source_key=source_key)
+        finally:
+            conn.close()
+        return len(pending_rows)
 
     monkeypatch.setattr(
+        pipeline_module,
+        "_run_detection_subprocess_worker",
+        fake_detection_subprocess_worker,
+        raising=False,
+    )
+    monkeypatch.setattr(
         "hikbox_pictures.face_review_pipeline._init_detection_model",
-        lambda **kwargs: (init_calls.append(1), _FakeDetector())[1],  # noqa: ARG005
+        lambda **kwargs: pytest.fail("detect 不应在父进程里直接初始化 detector"),  # noqa: ARG005
     )
 
     summary = run_detection_stage(
@@ -64,23 +125,298 @@ def test_run_detection_stage_batch_mode_avoids_detector_restarts(tmp_path: Path,
         detector_model_name="buffalo_l",
         det_size=640,
         preview_max_side=480,
-        max_images=None,
-        reset_output=True,
-        detect_restart_interval=1,
-        detect_skip_existing=False,
-        detect_max_images_per_run=3,
+        detect_restart_interval=2,
     )
+    stdout = capsys.readouterr().out
 
     assert summary["processed_image_count"] == 3
     assert summary["remaining_image_count"] == 0
-    assert len(init_calls) == 1
+    assert "阶段 detect：启动子进程处理批次 source=__root__ batch=2 总体进度=0/3" in stdout
+    assert "阶段 detect：启动子进程处理批次 source=__root__ batch=1 总体进度=2/3" in stdout
+    assert worker_batches == [["img_0.jpg", "img_1.jpg"], ["img_2.jpg"]]
 
 
-def test_compute_detect_workset_stats_uses_default_batch_in_all_stage() -> None:
-    assert DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE == 120
-    assert compute_detect_workset_stats(total_images=500, max_images=None, processed_count=0) == (500, 500, 120)
-    assert compute_detect_workset_stats(total_images=500, max_images=80, processed_count=40) == (80, 40, 120)
-    assert compute_detect_workset_stats(total_images=500, max_images=80, processed_count=90) == (80, 0, 120)
+def test_run_detection_stage_only_refreshes_discovery_when_explicitly_requested(tmp_path: Path, monkeypatch) -> None:
+    source_dir = tmp_path / "album"
+    source_dir.mkdir()
+    (source_dir / "family").mkdir()
+    Image.new("RGB", (16, 16), (1, 1, 1)).save(source_dir / "root.jpg")
+    Image.new("RGB", (16, 16), (2, 2, 2)).save(source_dir / "family" / "img_0.jpg")
+
+    output_dir = tmp_path / "out"
+    worker_calls: list[tuple[str, list[str]]] = []
+
+    def fake_detection_subprocess_worker(
+        *,
+        output_dir: Path,
+        source_key: str,
+        batch_size: int,
+        **kwargs,  # noqa: ANN003, ARG001
+    ) -> int:
+        pending_rows = _list_pending_source_rows(output_dir=output_dir, source_key=source_key, batch_size=batch_size)
+        worker_calls.append((source_key, [row["photo_relpath"] for row in pending_rows]))
+        conn = open_pipeline_db(output_dir / "cache" / "pipeline.db")
+        try:
+            for row in pending_rows:
+                pipeline_module._mark_source_image_detect_result(
+                    conn,
+                    source_key=row["source_key"],
+                    photo_relpath=row["photo_relpath"],
+                    status="done",
+                )
+            pipeline_module._refresh_source_detect_stage(conn, source_key=source_key)
+        finally:
+            conn.close()
+        return len(pending_rows)
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_detection_subprocess_worker",
+        fake_detection_subprocess_worker,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.face_review_pipeline._init_detection_model",
+        lambda **kwargs: pytest.fail("detect 不应在父进程里直接初始化 detector"),  # noqa: ARG005
+    )
+
+    first = run_detection_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        insightface_root=tmp_path / "insightface",
+        detector_model_name="buffalo_l",
+        det_size=640,
+        preview_max_side=480,
+        detect_restart_interval=999,
+    )
+    Image.new("RGB", (16, 16), (3, 3, 3)).save(source_dir / "family" / "img_1.jpg")
+    second = run_detection_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        insightface_root=tmp_path / "insightface",
+        detector_model_name="buffalo_l",
+        det_size=640,
+        preview_max_side=480,
+        detect_restart_interval=999,
+    )
+    third = run_detection_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        insightface_root=tmp_path / "insightface",
+        detector_model_name="buffalo_l",
+        det_size=640,
+        preview_max_side=480,
+        detect_restart_interval=999,
+        refresh_discover=True,
+    )
+
+    conn = open_pipeline_db(output_dir / "cache" / "pipeline.db")
+    sources = [
+        (row["source_key"], row["source_relpath"], row["discover_status"], row["detect_status"])
+        for row in conn.execute(
+            """
+            SELECT source_key, source_relpath, discover_status, detect_status
+            FROM pipeline_sources
+            ORDER BY source_key
+            """
+        ).fetchall()
+    ]
+    source_images = [
+        (row["photo_relpath"], row["source_key"], row["detect_status"])
+        for row in conn.execute(
+            """
+            SELECT photo_relpath, source_key, detect_status
+            FROM source_images
+            ORDER BY photo_relpath
+            """
+        ).fetchall()
+    ]
+    conn.close()
+
+    assert first["discovered_image_count"] == 2
+    assert first["processed_image_count"] == 2
+    assert second["pending_image_count"] == 0
+    assert second["processed_image_count"] == 0
+    assert second["discovered_image_count"] == 2
+    assert third["discovered_image_count"] == 3
+    assert third["processed_image_count"] == 1
+    assert worker_calls == [
+        ("__root__", ["root.jpg"]),
+        ("family", ["family/img_0.jpg"]),
+        ("family", ["family/img_1.jpg"]),
+    ]
+    assert sources == [
+        ("__root__", ".", "done", "done"),
+        ("family", "family", "done", "done"),
+    ]
+    assert source_images == [
+        ("family/img_0.jpg", "family", "done"),
+        ("family/img_1.jpg", "family", "done"),
+        ("root.jpg", "__root__", "done"),
+    ]
+
+
+def test_run_pipeline_second_start_skips_completed_detect_embed_cluster(tmp_path: Path, monkeypatch) -> None:
+    source_dir = tmp_path / "album"
+    source_dir.mkdir()
+    Image.new("RGB", (32, 32), (128, 128, 128)).save(source_dir / "img_0.jpg")
+
+    output_dir = tmp_path / "out"
+    detect_worker_call_count = 0
+    embedder_init_count = 0
+    cluster_call_count = 0
+
+    class _FakeEmbedder:
+        def __init__(self, checkpoint_path: Path, device: str = "cpu") -> None:  # noqa: ARG002
+            nonlocal embedder_init_count
+            embedder_init_count += 1
+
+        def embed(self, aligned_face_bgr_112):  # noqa: ANN001
+            return [1.0, 0.0], 12.3
+
+    def fake_detection_subprocess_worker(
+        *,
+        output_dir: Path,
+        source_key: str,
+        batch_size: int,
+        **kwargs,  # noqa: ANN003, ARG001
+    ) -> int:
+        nonlocal detect_worker_call_count
+        pending_rows = _list_pending_source_rows(output_dir=output_dir, source_key=source_key, batch_size=batch_size)
+        if not pending_rows:
+            return 0
+        detect_worker_call_count += 1
+        aligned_dir = output_dir / "assets" / "aligned"
+        crop_dir = output_dir / "assets" / "crops"
+        context_dir = output_dir / "assets" / "context"
+        conn = open_pipeline_db(output_dir / "cache" / "pipeline.db")
+        try:
+            for row in pending_rows:
+                relpath = row["photo_relpath"]
+                face_id = f"{hashlib.sha1(relpath.encode('utf-8')).hexdigest()[:16]}_000"
+                Image.new("RGB", (32, 32), (200, 200, 200)).save(crop_dir / f"{face_id}.jpg")
+                Image.new("RGB", (32, 32), (180, 180, 180)).save(context_dir / f"{face_id}.jpg")
+                Image.new("RGB", (112, 112), (128, 128, 128)).save(aligned_dir / f"{face_id}.png")
+                upsert_detected_face(
+                    conn,
+                    {
+                        "face_id": face_id,
+                        "photo_relpath": relpath,
+                        "crop_relpath": f"assets/crops/{face_id}.jpg",
+                        "context_relpath": f"assets/context/{face_id}.jpg",
+                        "preview_relpath": "",
+                        "aligned_relpath": f"assets/aligned/{face_id}.png",
+                        "bbox": [4, 4, 24, 24],
+                        "detector_confidence": 0.99,
+                        "face_area_ratio": 0.4,
+                    },
+                )
+                pipeline_module._mark_source_image_detect_result(
+                    conn,
+                    source_key=row["source_key"],
+                    photo_relpath=relpath,
+                    status="done",
+                )
+            pipeline_module._refresh_source_detect_stage(conn, source_key=source_key)
+        finally:
+            conn.close()
+        return len(pending_rows)
+
+    def fake_cluster(embeddings, min_cluster_size, min_samples):  # noqa: ANN001
+        nonlocal cluster_call_count
+        cluster_call_count += 1
+        assert len(embeddings) == 1
+        return [0], [0.99]
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_detection_subprocess_worker",
+        fake_detection_subprocess_worker,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "hikbox_pictures.face_review_pipeline._init_detection_model",
+        lambda **kwargs: pytest.fail("detect 不应在父进程里直接初始化 detector"),  # noqa: ARG005
+    )
+    monkeypatch.setattr("hikbox_pictures.face_review_pipeline.MagFaceEmbedder", _FakeEmbedder)
+    monkeypatch.setattr("hikbox_pictures.face_review_pipeline._cluster_with_hdbscan", fake_cluster)
+
+    first = run_pipeline(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        magface_checkpoint=tmp_path / "magface.pth",
+        insightface_root=tmp_path / "insightface",
+        detector_model_name="buffalo_l",
+        det_size=640,
+        embedding_enable_flip=False,
+        embedding_flip_weight=1.0,
+        detect_restart_interval=999,
+        min_cluster_size=2,
+        min_samples=1,
+        person_merge_threshold=0.26,
+        person_rep_top_k=3,
+        person_knn_k=8,
+        person_linkage="single",
+        person_enable_same_photo_cannot_link=False,
+        preview_max_side=480,
+        person_consensus_distance_threshold=0.24,
+        person_consensus_margin_threshold=0.04,
+        person_consensus_rep_top_k=3,
+        low_quality_micro_cluster_max_size=3,
+        low_quality_micro_cluster_top2_weight=0.5,
+        low_quality_micro_cluster_min_quality_evidence=0.72,
+        face_min_quality_for_assignment=0.25,
+        person_cluster_recall_distance_threshold=0.32,
+        person_cluster_recall_margin_threshold=0.04,
+        person_cluster_recall_top_n=5,
+        person_cluster_recall_min_votes=3,
+        person_cluster_recall_source_max_cluster_size=20,
+        person_cluster_recall_source_max_person_faces=8,
+        person_cluster_recall_target_min_person_faces=40,
+        person_cluster_recall_max_rounds=2,
+    )
+    second = run_pipeline(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        magface_checkpoint=tmp_path / "magface.pth",
+        insightface_root=tmp_path / "insightface",
+        detector_model_name="buffalo_l",
+        det_size=640,
+        embedding_enable_flip=False,
+        embedding_flip_weight=1.0,
+        detect_restart_interval=999,
+        min_cluster_size=2,
+        min_samples=1,
+        person_merge_threshold=0.26,
+        person_rep_top_k=3,
+        person_knn_k=8,
+        person_linkage="single",
+        person_enable_same_photo_cannot_link=False,
+        preview_max_side=480,
+        person_consensus_distance_threshold=0.24,
+        person_consensus_margin_threshold=0.04,
+        person_consensus_rep_top_k=3,
+        low_quality_micro_cluster_max_size=3,
+        low_quality_micro_cluster_top2_weight=0.5,
+        low_quality_micro_cluster_min_quality_evidence=0.72,
+        face_min_quality_for_assignment=0.25,
+        person_cluster_recall_distance_threshold=0.32,
+        person_cluster_recall_margin_threshold=0.04,
+        person_cluster_recall_top_n=5,
+        person_cluster_recall_min_votes=3,
+        person_cluster_recall_source_max_cluster_size=20,
+        person_cluster_recall_source_max_person_faces=8,
+        person_cluster_recall_target_min_person_faces=40,
+        person_cluster_recall_max_rounds=2,
+    )
+
+    assert first["meta"]["detect_summary"]["processed_image_count"] == 1
+    assert second["meta"]["detect_summary"]["processed_image_count"] == 0
+    assert second["meta"]["embed_summary"]["pending_face_count"] == 0
+    assert detect_worker_call_count == 1
+    assert embedder_init_count == 1
+    assert cluster_call_count == 1
+    assert second["meta"]["person_count"] == 1
 
 
 def test_group_faces_by_cluster_keeps_noise_separate() -> None:
@@ -333,6 +669,36 @@ def test_attach_noise_faces_to_person_consensus_keeps_cross_person_ambiguous_noi
     assert attached_count == 0
     assert attached_labels == labels
     assert attached_probabilities == probabilities
+
+
+def test_attach_noise_faces_to_person_consensus_can_use_flip_embedding_as_supplement() -> None:
+    faces = [
+        {"face_id": "a0", "embedding": [1.0, 0.0], "embedding_flip": [0.0, 1.0], "quality_score": 0.95},
+        {"face_id": "a1", "embedding": [0.998, 0.06], "embedding_flip": [0.0, 1.0], "quality_score": 0.90},
+        {"face_id": "b0", "embedding": [-1.0, 0.0], "embedding_flip": [0.0, -1.0], "quality_score": 0.94},
+        {"face_id": "b1", "embedding": [-0.998, -0.06], "embedding_flip": [0.0, -1.0], "quality_score": 0.91},
+        {"face_id": "n0", "embedding": [0.0, 1.0], "embedding_flip": [0.0, 1.0], "quality_score": 0.88},
+    ]
+    labels = [0, 0, 1, 1, -1]
+    probabilities: list[float | None] = [0.99, 0.98, 0.97, 0.96, 0.0]
+    persons = [
+        {"person_label": 0, "clusters": [{"cluster_label": 0}]},
+        {"person_label": 1, "clusters": [{"cluster_label": 1}]},
+    ]
+
+    attached_labels, attached_probabilities, attached_count = attach_noise_faces_to_person_consensus(
+        faces=faces,
+        labels=labels,
+        probabilities=probabilities,
+        persons=persons,
+        rep_top_k=2,
+        distance_threshold=0.20,
+        margin_threshold=0.04,
+    )
+
+    assert attached_count == 1
+    assert attached_labels[-1] == 0
+    assert attached_probabilities[-1] is None
 
 
 def test_exclude_low_quality_faces_from_assignment_marks_noise_with_counts() -> None:
@@ -611,6 +977,147 @@ def test_render_review_html_has_two_stage_collapsible_sections() -> None:
     assert "折叠全部 person" in html
 
 
+def test_write_person_review_pages_only_outputs_large_person_split_html_files(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "review_person_9999.html").write_text("stale", encoding="utf-8")
+
+    payload = {
+        "meta": {"source": ".hikbox", "model": "MagFace", "clusterer": "HDBSCAN", "person_clusterer": "AHC"},
+        "persons": [
+            {
+                "person_label": 0,
+                "person_key": "person_0",
+                "person_face_count": 120,
+                "person_cluster_count": 1,
+                "clusters": [
+                    {
+                        "cluster_key": "cluster_0",
+                        "cluster_label": 0,
+                        "member_count": 1,
+                        "members": [
+                            {
+                                "face_id": "x",
+                                "crop_relpath": "assets/crops/x.jpg",
+                                "context_relpath": "assets/context/x.jpg",
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "person_label": 1,
+                "person_key": "person_1",
+                "person_face_count": 130,
+                "person_cluster_count": 1,
+                "clusters": [
+                    {
+                        "cluster_key": "cluster_9",
+                        "cluster_label": 9,
+                        "member_count": 1,
+                        "members": [
+                            {
+                                "face_id": "y",
+                                "crop_relpath": "assets/crops/y.jpg",
+                                "context_relpath": "assets/context/y.jpg",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+        "clusters": [],
+    }
+
+    pages = write_person_review_pages(output_dir=output_dir, payload=payload)
+
+    assert len(pages) == 2
+    assert pages[0]["html"] == "review_person_0000.html"
+    assert pages[1]["html"] == "review_person_0001.html"
+
+    html_first = (output_dir / "review_person_0000.html").read_text(encoding="utf-8")
+    assert "person_0" in html_first
+    assert "person_1" not in html_first
+    assert "第二阶段 人物聚合（AHC）" in html_first
+    assert "第一阶段 微簇（HDBSCAN）" in html_first
+    assert 'class="person-toggle-all"' in html_first
+    assert "assets/crops/x.jpg" in html_first
+    assert "assets/crops/y.jpg" not in html_first
+
+    pages_manifest = json.loads((output_dir / "review_person_pages.json").read_text(encoding="utf-8"))
+    assert pages_manifest["count"] == 2
+    assert pages_manifest["pages"][0]["html"] == "review_person_0000.html"
+    assert not (output_dir / "review_person_9999.html").exists()
+
+
+def test_write_person_review_pages_outputs_large_person_index_page(tmp_path: Path) -> None:
+    output_dir = tmp_path / "out"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "meta": {"source": ".hikbox", "model": "MagFace", "clusterer": "HDBSCAN", "person_clusterer": "AHC"},
+        "persons": [
+            {
+                "person_label": 0,
+                "person_key": "person_0",
+                "person_face_count": 120,
+                "person_cluster_count": 3,
+                "clusters": [
+                    {
+                        "cluster_key": "cluster_0",
+                        "cluster_label": 0,
+                        "member_count": 120,
+                        "members": [
+                            {
+                                "face_id": "x",
+                                "crop_relpath": "assets/crops/x.jpg",
+                                "context_relpath": "assets/context/x.jpg",
+                            }
+                        ],
+                    }
+                ],
+            },
+            {
+                "person_label": 1,
+                "person_key": "person_1",
+                "person_face_count": 80,
+                "person_cluster_count": 2,
+                "clusters": [
+                    {
+                        "cluster_key": "cluster_9",
+                        "cluster_label": 9,
+                        "member_count": 80,
+                        "members": [
+                            {
+                                "face_id": "y",
+                                "crop_relpath": "assets/crops/y.jpg",
+                                "context_relpath": "assets/context/y.jpg",
+                            }
+                        ],
+                    }
+                ],
+            },
+        ],
+        "clusters": [],
+    }
+
+    write_person_review_pages(output_dir=output_dir, payload=payload)
+
+    large_index_html = (output_dir / "review_person_pages_over_100.html").read_text(encoding="utf-8")
+    assert "person_0" in large_index_html
+    assert "120" in large_index_html
+    assert "review_person_0000.html" in large_index_html
+    assert "person_1" not in large_index_html
+    assert not (output_dir / "review_person_0001.html").exists()
+
+    large_pages_manifest = json.loads(
+        (output_dir / "review_person_pages_over_100.json").read_text(encoding="utf-8")
+    )
+    assert large_pages_manifest["min_face_count"] == 100
+    assert large_pages_manifest["count"] == 1
+    assert large_pages_manifest["pages"][0]["person_key"] == "person_0"
+
+
 def test_run_cluster_stage_can_merge_split_micro_clusters(tmp_path: Path, monkeypatch) -> None:
     output_dir = tmp_path / "out"
     source_dir = tmp_path / "source"
@@ -672,7 +1179,6 @@ def test_run_cluster_stage_can_merge_split_micro_clusters(tmp_path: Path, monkey
     mark_face_embedded(conn, "a_001", embedding=[0.997, 0.077], magface_quality=12.0, quality_score=0.92)
     mark_face_embedded(conn, "b_000", embedding=[0.996, 0.089], magface_quality=11.8, quality_score=0.90)
     mark_face_embedded(conn, "b_001", embedding=[0.992, 0.123], magface_quality=11.5, quality_score=0.88)
-    set_meta(conn, "max_images", 1)
     conn.close()
 
     def fake_cluster(embeddings, min_cluster_size, min_samples):
@@ -701,6 +1207,10 @@ def test_run_cluster_stage_can_merge_split_micro_clusters(tmp_path: Path, monkey
     assert payload["meta"]["person_count"] == 1
     assert payload["persons"][0]["person_cluster_count"] == 2
     assert "members" not in payload["persons"][0]
+    assert payload["meta"]["person_review_page_count"] == 0
+    assert not (output_dir / "review_person_0000.html").exists()
+    pages_manifest = json.loads((output_dir / "review_person_pages.json").read_text(encoding="utf-8"))
+    assert pages_manifest["count"] == 0
     for cluster in payload["persons"][0]["clusters"]:
         for member in cluster["members"]:
             assert "embedding" not in member
@@ -780,7 +1290,6 @@ def test_run_cluster_stage_can_attach_noise_face_by_person_consensus(tmp_path: P
     mark_face_embedded(conn, "b_000", embedding=[0.978, 0.208], magface_quality=11.9, quality_score=0.91)
     mark_face_embedded(conn, "b_001", embedding=[0.965, 0.262], magface_quality=11.7, quality_score=0.89)
     mark_face_embedded(conn, "n_000", embedding=[0.992, 0.122], magface_quality=11.8, quality_score=0.90)
-    set_meta(conn, "max_images", 1)
     conn.close()
 
     def fake_cluster(embeddings, min_cluster_size, min_samples):
@@ -893,7 +1402,6 @@ def test_run_cluster_stage_can_demote_low_quality_micro_clusters_to_noise(tmp_pa
     mark_face_embedded(conn, "l_000", embedding=[-1.0, 0.0], magface_quality=11.8, quality_score=0.26)
     mark_face_embedded(conn, "l_001", embedding=[-0.981, -0.194], magface_quality=11.5, quality_score=0.18)
     mark_face_embedded(conn, "n_000", embedding=[0.0, 1.0], magface_quality=11.7, quality_score=0.90)
-    set_meta(conn, "max_images", 1)
     conn.close()
 
     def fake_cluster(embeddings, min_cluster_size, min_samples):
@@ -919,6 +1427,7 @@ def test_run_cluster_stage_can_demote_low_quality_micro_clusters_to_noise(tmp_pa
         low_quality_micro_cluster_max_size=3,
         low_quality_micro_cluster_top2_weight=0.5,
         low_quality_micro_cluster_min_quality_evidence=0.65,
+        face_min_quality_for_assignment=None,
     )
 
     assert payload["meta"]["cluster_count"] == 1
@@ -1073,7 +1582,6 @@ def test_run_cluster_stage_can_reassign_non_noise_micro_cluster_to_anchor_person
 
     mark_face_embedded(conn, "c_000", embedding=[0.865, 0.502], magface_quality=11.9, quality_score=0.91)
     mark_face_embedded(conn, "c_001", embedding=[0.842, 0.539], magface_quality=11.8, quality_score=0.90)
-    set_meta(conn, "max_images", 1)
     conn.close()
 
     def fake_cluster(embeddings, min_cluster_size, min_samples):
@@ -1154,58 +1662,31 @@ def test_sqlite_roundtrip_for_two_phase_pipeline(tmp_path: Path) -> None:
     embedded = list(iter_embedded_faces(conn))
     assert len(embedded) == 2
     assert embedded[0]["bbox"] == [1, 2, 3, 4]
-    assert embedded[0]["embedding"] == [0.1, 0.2]
+    assert embedded[0]["embedding"] == pytest.approx([0.1, 0.2], rel=1e-6, abs=1e-6)
     assert embedded[0]["cluster_assignment_source"] is None
-    assert embedded[1]["embedding"] == [0.3, 0.4]
+    assert embedded[1]["embedding"] == pytest.approx([0.3, 0.4], rel=1e-6, abs=1e-6)
     assert embedded[1]["cluster_assignment_source"] is None
 
     conn.close()
 
 
-def test_open_pipeline_db_migrates_cluster_assignment_source_column(tmp_path: Path) -> None:
+def test_open_pipeline_db_creates_required_source_staged_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "pipeline.db"
-    import sqlite3
-
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE detected_faces (
-            face_id TEXT PRIMARY KEY,
-            photo_relpath TEXT NOT NULL,
-            crop_relpath TEXT NOT NULL,
-            context_relpath TEXT NOT NULL,
-            preview_relpath TEXT NOT NULL,
-            aligned_relpath TEXT NOT NULL,
-            bbox_json TEXT NOT NULL,
-            detector_confidence REAL NOT NULL,
-            face_area_ratio REAL NOT NULL,
-            embedding_json TEXT,
-            magface_quality REAL,
-            quality_score REAL,
-            cluster_label INTEGER,
-            cluster_probability REAL,
-            face_error TEXT,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE failed_images (
-            photo_relpath TEXT PRIMARY KEY,
-            error TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE TABLE pipeline_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-    )
-    conn.commit()
+    conn = open_pipeline_db(db_path)
+    table_names = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    detected_faces_columns = [row[1] for row in conn.execute("PRAGMA table_info(detected_faces)").fetchall()]
+    source_images_columns = [row[1] for row in conn.execute("PRAGMA table_info(source_images)").fetchall()]
+    source_rows = conn.execute("SELECT COUNT(*) AS c FROM pipeline_sources").fetchone()["c"]
     conn.close()
 
-    migrated = open_pipeline_db(db_path)
-    columns = [row[1] for row in migrated.execute("PRAGMA table_info(detected_faces)").fetchall()]
-    migrated.close()
-
-    assert "cluster_assignment_source" in columns
+    assert "embedding_blob" in detected_faces_columns
+    assert "embedding_dtype" in detected_faces_columns
+    assert "cluster_assignment_source" in detected_faces_columns
+    assert "source_key" in source_images_columns
+    assert "detect_status" in source_images_columns
+    assert source_rows == 0
+    assert "processed_images" not in table_names
+    assert "failed_images" not in table_names

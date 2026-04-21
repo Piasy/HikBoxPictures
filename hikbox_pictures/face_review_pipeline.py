@@ -5,13 +5,14 @@ import gc
 import hashlib
 import html
 import json
-import shutil
+import re
 import sqlite3
 import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -29,7 +30,17 @@ register_heif_opener()
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 MAGFACE_GOOGLE_DRIVE_ID = "1Bd87admxOZvbIOAyTkGEntsEz3fyMt7H"
-DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE = 120
+EMBEDDING_STORAGE_DTYPE = "float32"
+ROOT_SOURCE_KEY = "__root__"
+SUPPORTED_EMBEDDING_STORAGE_DTYPES: dict[str, np.dtype[Any]] = {
+    "float16": np.dtype(np.float16),
+    "float32": np.dtype(np.float32),
+}
+ANN_BUILD_MIN_ITEMS = 2048
+ANN_DEFAULT_QUERY_K = 64
+ANN_CANDIDATE_PRUNE_MIN_ITEMS = 64
+LARGE_PERSON_REVIEW_MIN_FACE_COUNT = 100
+PERSON_REVIEW_HTML_RE = re.compile(r"^review_person_\d{4}\.html$")
 
 
 @dataclass
@@ -39,39 +50,108 @@ class FaceObservation:
     crop_relpath: str
     context_relpath: str
     bbox: tuple[int, int, int, int]
-    embedding: list[float]
+    embedding: np.ndarray
     detector_confidence: float
     face_area_ratio: float
     magface_quality: float
     quality_score: float
+    embedding_flip: np.ndarray | None = None
     cluster_label: int | None = None
     cluster_probability: float | None = None
     cluster_assignment_source: str | None = None
     quality_gate_excluded: bool = False
 
 
-def _ensure_detected_faces_schema(conn: sqlite3.Connection) -> None:
-    columns = {
-        str(row[1])
-        for row in conn.execute("PRAGMA table_info(detected_faces)").fetchall()
-    }
-    if "cluster_assignment_source" not in columns:
-        conn.execute("ALTER TABLE detected_faces ADD COLUMN cluster_assignment_source TEXT")
-        conn.commit()
+def _normalize_embedding_storage_dtype(storage_dtype: str | None) -> str:
+    if storage_dtype in SUPPORTED_EMBEDDING_STORAGE_DTYPES:
+        return str(storage_dtype)
+    return EMBEDDING_STORAGE_DTYPE
 
-    conn.execute(
-        """
-        UPDATE detected_faces
-        SET cluster_assignment_source = CASE
-            WHEN cluster_label IS NULL THEN NULL
-            WHEN cluster_label = -1 THEN 'noise'
-            WHEN cluster_probability IS NULL THEN 'person_consensus'
-            ELSE 'hdbscan'
-        END
-        WHERE cluster_assignment_source IS NULL
-        """
-    )
-    conn.commit()
+
+def _coerce_embedding_vector(raw_embedding: Any) -> np.ndarray | None:
+    if raw_embedding is None:
+        return None
+    if isinstance(raw_embedding, np.ndarray):
+        vector = raw_embedding.astype(np.float32, copy=False)
+    elif isinstance(raw_embedding, (list, tuple)) and raw_embedding:
+        vector = np.asarray(raw_embedding, dtype=np.float32)
+    else:
+        return None
+    if vector.ndim != 1 or int(vector.shape[0]) <= 0:
+        return None
+    return vector
+
+
+def _encode_embedding_blob(embedding: Any, storage_dtype: str = EMBEDDING_STORAGE_DTYPE) -> tuple[bytes, str]:
+    dtype_name = _normalize_embedding_storage_dtype(storage_dtype)
+    vector = _coerce_embedding_vector(embedding)
+    if vector is None:
+        raise ValueError("embedding 为空或格式无效")
+    storage_dtype_np = SUPPORTED_EMBEDDING_STORAGE_DTYPES[dtype_name]
+    return vector.astype(storage_dtype_np, copy=False).tobytes(), dtype_name
+
+
+def _decode_embedding_blob(
+    embedding_blob: bytes | memoryview | None,
+    embedding_dtype: str | None,
+    embedding_json: str | None,
+    as_numpy: bool,
+) -> list[float] | np.ndarray | None:
+    if embedding_blob is not None:
+        dtype_name = _normalize_embedding_storage_dtype(embedding_dtype)
+        dtype = SUPPORTED_EMBEDDING_STORAGE_DTYPES[dtype_name]
+        vector = np.frombuffer(embedding_blob, dtype=dtype).astype(np.float32, copy=False)
+        if as_numpy:
+            return vector
+        return vector.astype(float).tolist()
+
+    if embedding_json:
+        try:
+            parsed = json.loads(embedding_json)
+        except json.JSONDecodeError:
+            return None
+        vector = _coerce_embedding_vector(parsed)
+        if vector is None:
+            return None
+        if as_numpy:
+            return vector
+        return vector.astype(float).tolist()
+
+    return None
+
+
+def _flip_embedding_cache_path(output_dir: Path) -> Path:
+    return output_dir / "cache" / "flip_embeddings.json"
+
+
+def _load_flip_embeddings_cache(output_dir: Path) -> dict[str, list[float]]:
+    path = _flip_embedding_cache_path(output_dir)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+
+    result: dict[str, list[float]] = {}
+    for face_id, emb in payload.items():
+        if not isinstance(face_id, str):
+            continue
+        if not isinstance(emb, list) or not emb:
+            continue
+        try:
+            result[face_id] = [float(v) for v in emb]
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _save_flip_embeddings_cache(output_dir: Path, flip_embeddings: dict[str, list[float]]) -> None:
+    path = _flip_embedding_cache_path(output_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(flip_embeddings, ensure_ascii=False), encoding="utf-8")
 
 
 def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
@@ -93,6 +173,8 @@ def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
             detector_confidence REAL NOT NULL,
             face_area_ratio REAL NOT NULL,
             embedding_json TEXT,
+            embedding_blob BLOB,
+            embedding_dtype TEXT,
             magface_quality REAL,
             quality_score REAL,
             cluster_label INTEGER,
@@ -102,17 +184,26 @@ def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS failed_images (
-            photo_relpath TEXT PRIMARY KEY,
-            error TEXT NOT NULL,
+        CREATE TABLE IF NOT EXISTS pipeline_sources (
+            source_key TEXT PRIMARY KEY,
+            source_relpath TEXT NOT NULL,
+            discover_status TEXT NOT NULL DEFAULT 'pending',
+            detect_status TEXT NOT NULL DEFAULT 'pending',
+            embed_status TEXT NOT NULL DEFAULT 'pending',
+            cluster_status TEXT NOT NULL DEFAULT 'pending',
+            discover_completed_at TEXT,
+            detect_completed_at TEXT,
+            embed_completed_at TEXT,
+            cluster_completed_at TEXT,
+            last_error TEXT,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
-        CREATE TABLE IF NOT EXISTS processed_images (
+        CREATE TABLE IF NOT EXISTS source_images (
             photo_relpath TEXT PRIMARY KEY,
-            status TEXT NOT NULL,
-            face_count INTEGER NOT NULL DEFAULT 0,
-            error TEXT,
+            source_key TEXT NOT NULL,
+            detect_status TEXT NOT NULL DEFAULT 'pending',
+            detect_error TEXT,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
@@ -121,12 +212,33 @@ def open_pipeline_db(db_path: Path) -> sqlite3.Connection:
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
-
-        CREATE INDEX IF NOT EXISTS idx_detected_faces_pending
-        ON detected_faces(embedding_json, face_error);
         """
     )
-    _ensure_detected_faces_schema(conn)
+    conn.execute("DROP INDEX IF EXISTS idx_detected_faces_pending")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_detected_faces_pending
+        ON detected_faces(embedding_blob, embedding_json, face_error)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_images_source_detect_status
+        ON source_images(source_key, detect_status)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_source_images_detect_status
+        ON source_images(detect_status)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_pipeline_sources_discover_status
+        ON pipeline_sources(discover_status)
+        """
+    )
     conn.commit()
     return conn
 
@@ -152,32 +264,355 @@ def get_meta(conn: sqlite3.Connection, key: str, default: Any = None) -> Any:
     return json.loads(row["value"])
 
 
-def reset_pipeline_state(conn: sqlite3.Connection) -> None:
-    conn.execute("DELETE FROM detected_faces")
-    conn.execute("DELETE FROM failed_images")
-    conn.execute("DELETE FROM processed_images")
+def upsert_pipeline_source(conn: sqlite3.Connection, source_key: str, source_relpath: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO pipeline_sources(
+            source_key, source_relpath, discover_status, detect_status, embed_status, cluster_status, updated_at
+        )
+        VALUES(?, ?, 'pending', 'pending', 'pending', 'pending', CURRENT_TIMESTAMP)
+        ON CONFLICT(source_key) DO UPDATE SET
+            source_relpath=excluded.source_relpath,
+            updated_at=CURRENT_TIMESTAMP
+        """,
+        (source_key, source_relpath),
+    )
+
+
+def list_pipeline_sources(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT source_key, source_relpath, discover_status, detect_status, embed_status, cluster_status
+        FROM pipeline_sources
+        ORDER BY source_key
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _set_source_stage_status(
+    conn: sqlite3.Connection,
+    source_key: str,
+    stage: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    stage = str(stage)
+    if stage not in {"discover", "detect", "embed", "cluster"}:
+        raise ValueError(f"未知 source stage: {stage}")
+    status_col = f"{stage}_status"
+    completed_col = f"{stage}_completed_at"
+    if status == "done":
+        conn.execute(
+            f"""
+            UPDATE pipeline_sources
+            SET {status_col}='done',
+                {completed_col}=CURRENT_TIMESTAMP,
+                last_error=NULL,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE source_key=?
+            """,
+            (source_key,),
+        )
+    elif status == "running":
+        conn.execute(
+            f"""
+            UPDATE pipeline_sources
+            SET {status_col}='running',
+                {completed_col}=NULL,
+                last_error=NULL,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE source_key=?
+            """,
+            (source_key,),
+        )
+    elif status == "error":
+        conn.execute(
+            f"""
+            UPDATE pipeline_sources
+            SET {status_col}='error',
+                {completed_col}=NULL,
+                last_error=?,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE source_key=?
+            """,
+            (error or "", source_key),
+        )
+    else:
+        conn.execute(
+            f"""
+            UPDATE pipeline_sources
+            SET {status_col}='pending',
+                {completed_col}=NULL,
+                last_error=NULL,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE source_key=?
+            """,
+            (source_key,),
+        )
+
+
+def _discover_source_roots(source_dir: Path) -> list[tuple[str, str]]:
+    discovered: list[tuple[str, str]] = []
+    has_root_images = False
+    for item in sorted(source_dir.iterdir(), key=lambda p: p.name):
+        if item.name.startswith("."):
+            continue
+        if item.is_dir():
+            discovered.append((item.name, item.name))
+            continue
+        if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES:
+            has_root_images = True
+    if has_root_images:
+        discovered.append((ROOT_SOURCE_KEY, "."))
+    return discovered
+
+
+def _iter_source_image_relpaths(source_dir: Path, source_relpath: str) -> list[str]:
+    source_relpath = "." if source_relpath in {"", "."} else source_relpath
+    if source_relpath == ".":
+        results: list[str] = []
+        for item in sorted(source_dir.iterdir(), key=lambda p: p.name):
+            if item.name.startswith("."):
+                continue
+            if item.is_file() and item.suffix.lower() in IMAGE_SUFFIXES:
+                results.append(item.name)
+        return results
+
+    root = (source_dir / source_relpath).resolve()
+    if not root.exists() or not root.is_dir():
+        return []
+    results: list[str] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        rel_parts = path.relative_to(root).parts
+        if any(part.startswith(".") for part in rel_parts):
+            continue
+        if path.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        results.append((Path(source_relpath) / Path(*rel_parts)).as_posix())
+    return sorted(results)
+
+
+def _bootstrap_sources_if_needed(conn: sqlite3.Connection, source_dir: Path) -> int:
+    existing_count = int(conn.execute("SELECT COUNT(*) AS c FROM pipeline_sources").fetchone()["c"])
+    if existing_count > 0:
+        return 0
+
+    discovered_sources = _discover_source_roots(source_dir)
+    for source_key, source_relpath in discovered_sources:
+        upsert_pipeline_source(conn, source_key=source_key, source_relpath=source_relpath)
+    conn.commit()
+    return len(discovered_sources)
+
+
+def _refresh_discoverable_sources(conn: sqlite3.Connection, source_dir: Path) -> int:
+    discovered_sources = _discover_source_roots(source_dir)
+    existing_source_keys = {
+        str(row["source_key"])
+        for row in conn.execute("SELECT source_key FROM pipeline_sources").fetchall()
+    }
+
+    for source_key, source_relpath in discovered_sources:
+        upsert_pipeline_source(conn, source_key=source_key, source_relpath=source_relpath)
+        _set_source_stage_status(conn, source_key=source_key, stage="discover", status="pending")
+
+    conn.commit()
+    return len([source_key for source_key, _ in discovered_sources if source_key not in existing_source_keys])
+
+
+def _register_source_images(conn: sqlite3.Connection, source_key: str, photo_relpaths: list[str]) -> int:
+    if not photo_relpaths:
+        return 0
+    existing_relpaths = {
+        str(row["photo_relpath"])
+        for row in conn.execute(
+            "SELECT photo_relpath FROM source_images WHERE source_key=?",
+            (source_key,),
+        ).fetchall()
+    }
+    fresh_relpaths = [path for path in photo_relpaths if path not in existing_relpaths]
+    if not fresh_relpaths:
+        return 0
+
+    conn.executemany(
+        """
+        INSERT INTO source_images(photo_relpath, source_key, detect_status, detect_error, updated_at)
+        VALUES(?, ?, 'pending', NULL, CURRENT_TIMESTAMP)
+        ON CONFLICT(photo_relpath) DO NOTHING
+        """,
+        [(path, source_key) for path in fresh_relpaths],
+    )
+    conn.commit()
+    return len(fresh_relpaths)
+
+
+def _list_pending_source_images(conn: sqlite3.Connection) -> list[dict[str, str]]:
+    rows = conn.execute(
+        """
+        SELECT source_key, photo_relpath
+        FROM source_images
+        WHERE detect_status='pending'
+        ORDER BY source_key, photo_relpath
+        """
+    ).fetchall()
+    return [{"source_key": str(row["source_key"]), "photo_relpath": str(row["photo_relpath"])} for row in rows]
+
+
+def _list_pending_source_images_for_source(
+    conn: sqlite3.Connection,
+    source_key: str,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
+    query = """
+        SELECT source_key, photo_relpath
+        FROM source_images
+        WHERE source_key=?
+          AND detect_status='pending'
+        ORDER BY photo_relpath
+    """
+    params: list[Any] = [source_key]
+    if limit is not None:
+        query += "\nLIMIT ?"
+        params.append(max(1, int(limit)))
+    rows = conn.execute(query, tuple(params)).fetchall()
+    return [{"source_key": str(row["source_key"]), "photo_relpath": str(row["photo_relpath"])} for row in rows]
+
+
+def _refresh_source_detect_stage(conn: sqlite3.Connection, source_key: str) -> None:
+    row = conn.execute(
+        """
+        SELECT
+            SUM(CASE WHEN detect_status='pending' THEN 1 ELSE 0 END) AS pending_count,
+            SUM(CASE WHEN detect_status='error' THEN 1 ELSE 0 END) AS error_count
+        FROM source_images
+        WHERE source_key=?
+        """,
+        (source_key,),
+    ).fetchone()
+    pending_count = int(row["pending_count"] or 0)
+    error_count = int(row["error_count"] or 0)
+    if pending_count == 0:
+        if error_count > 0:
+            err_row = conn.execute(
+                """
+                SELECT detect_error
+                FROM source_images
+                WHERE source_key=? AND detect_status='error'
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (source_key,),
+            ).fetchone()
+            _set_source_stage_status(
+                conn,
+                source_key=source_key,
+                stage="detect",
+                status="error",
+                error=str(err_row["detect_error"]) if err_row and err_row["detect_error"] else "detect 阶段存在失败图片",
+            )
+        else:
+            _set_source_stage_status(conn, source_key=source_key, stage="detect", status="done")
+    else:
+        _set_source_stage_status(conn, source_key=source_key, stage="detect", status="pending")
     conn.commit()
 
 
-def upsert_processed_image(
+def _count_source_images(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) AS c FROM source_images").fetchone()["c"])
+
+
+def _build_source_stage_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = list_pipeline_sources(conn)
+    source_count = len(rows)
+    return {
+        "source_count": source_count,
+        "source_discover_done_count": sum(1 for row in rows if row.get("discover_status") == "done"),
+        "source_detect_done_count": sum(1 for row in rows if row.get("detect_status") == "done"),
+        "source_embed_done_count": sum(1 for row in rows if row.get("embed_status") == "done"),
+        "source_cluster_done_count": sum(1 for row in rows if row.get("cluster_status") == "done"),
+    }
+
+
+def _mark_source_image_detect_result(
     conn: sqlite3.Connection,
+    source_key: str,
     photo_relpath: str,
     status: str,
-    face_count: int = 0,
     error: str | None = None,
 ) -> None:
-    conn.execute(
-        """
-        INSERT INTO processed_images(photo_relpath, status, face_count, error, updated_at)
-        VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(photo_relpath) DO UPDATE SET
-            status=excluded.status,
-            face_count=excluded.face_count,
-            error=excluded.error,
-            updated_at=CURRENT_TIMESTAMP
-        """,
-        (photo_relpath, status, int(face_count), error),
+    if status == "error":
+        conn.execute(
+            """
+            UPDATE source_images
+            SET detect_status='error', detect_error=?, updated_at=CURRENT_TIMESTAMP
+            WHERE photo_relpath=? AND source_key=?
+            """,
+            (error or "", photo_relpath, source_key),
+        )
+    else:
+        conn.execute(
+            """
+            UPDATE source_images
+            SET detect_status='done', detect_error=NULL, updated_at=CURRENT_TIMESTAMP
+            WHERE photo_relpath=? AND source_key=?
+            """,
+            (photo_relpath, source_key),
+        )
+    conn.commit()
+
+
+def _refresh_all_source_embed_stage(conn: sqlite3.Connection) -> None:
+    sources = list_pipeline_sources(conn)
+    for source in sources:
+        source_key = str(source["source_key"])
+        detect_status = str(source.get("detect_status", "pending"))
+        if detect_status not in {"done", "error"}:
+            _set_source_stage_status(conn, source_key=source_key, stage="embed", status="pending")
+            continue
+
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS pending_faces
+            FROM detected_faces AS face
+            INNER JOIN source_images AS src ON src.photo_relpath = face.photo_relpath
+            WHERE src.source_key=?
+              AND face.embedding_blob IS NULL
+              AND face.embedding_json IS NULL
+              AND face.face_error IS NULL
+            """,
+            (source_key,),
+        ).fetchone()
+        pending_faces = int(row["pending_faces"])
+        if pending_faces > 0:
+            _set_source_stage_status(conn, source_key=source_key, stage="embed", status="pending")
+        else:
+            _set_source_stage_status(conn, source_key=source_key, stage="embed", status="done")
+    conn.commit()
+
+
+def _refresh_all_source_cluster_stage(conn: sqlite3.Connection) -> None:
+    cluster_pending_exists = bool(
+        conn.execute(
+            """
+            SELECT 1
+            FROM detected_faces
+            WHERE (embedding_blob IS NOT NULL OR embedding_json IS NOT NULL)
+              AND face_error IS NULL
+              AND cluster_assignment_source IS NULL
+            LIMIT 1
+            """
+        ).fetchone()
     )
+    sources = list_pipeline_sources(conn)
+    for source in sources:
+        source_key = str(source["source_key"])
+        embed_status = str(source.get("embed_status", "pending"))
+        if embed_status == "done" and not cluster_pending_exists:
+            _set_source_stage_status(conn, source_key=source_key, stage="cluster", status="done")
+        else:
+            _set_source_stage_status(conn, source_key=source_key, stage="cluster", status="pending")
     conn.commit()
 
 
@@ -187,10 +622,10 @@ def upsert_detected_face(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         INSERT INTO detected_faces(
             face_id, photo_relpath, crop_relpath, context_relpath, preview_relpath,
             aligned_relpath, bbox_json, detector_confidence, face_area_ratio,
-            embedding_json, magface_quality, quality_score,
+            embedding_json, embedding_blob, embedding_dtype, magface_quality, quality_score,
             cluster_label, cluster_probability, cluster_assignment_source, face_error, updated_at
         )
-        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, CURRENT_TIMESTAMP)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(face_id) DO UPDATE SET
             photo_relpath=excluded.photo_relpath,
             crop_relpath=excluded.crop_relpath,
@@ -201,6 +636,8 @@ def upsert_detected_face(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             detector_confidence=excluded.detector_confidence,
             face_area_ratio=excluded.face_area_ratio,
             embedding_json=NULL,
+            embedding_blob=NULL,
+            embedding_dtype=NULL,
             magface_quality=NULL,
             quality_score=NULL,
             cluster_label=NULL,
@@ -219,6 +656,15 @@ def upsert_detected_face(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
             json.dumps(row["bbox"], ensure_ascii=False),
             float(row["detector_confidence"]),
             float(row["face_area_ratio"]),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         ),
     )
     conn.commit()
@@ -230,7 +676,7 @@ def iter_faces_pending_embedding(conn: sqlite3.Connection) -> Iterator[dict[str,
         SELECT face_id, photo_relpath, crop_relpath, context_relpath, preview_relpath,
                aligned_relpath, bbox_json, detector_confidence, face_area_ratio
         FROM detected_faces
-        WHERE embedding_json IS NULL AND face_error IS NULL
+        WHERE embedding_blob IS NULL AND embedding_json IS NULL AND face_error IS NULL
         ORDER BY face_id
         """
     )
@@ -251,22 +697,60 @@ def iter_faces_pending_embedding(conn: sqlite3.Connection) -> Iterator[dict[str,
 def mark_face_embedded(
     conn: sqlite3.Connection,
     face_id: str,
-    embedding: list[float],
+    embedding: list[float] | np.ndarray,
     magface_quality: float,
     quality_score: float,
+    commit: bool = True,
 ) -> None:
+    embedding_blob, embedding_dtype = _encode_embedding_blob(embedding, storage_dtype=EMBEDDING_STORAGE_DTYPE)
     conn.execute(
         """
         UPDATE detected_faces
-        SET embedding_json=?, magface_quality=?, quality_score=?, face_error=NULL, updated_at=CURRENT_TIMESTAMP
+        SET embedding_json=NULL, embedding_blob=?, embedding_dtype=?, magface_quality=?, quality_score=?, face_error=NULL, updated_at=CURRENT_TIMESTAMP
         WHERE face_id=?
         """,
-        (json.dumps(embedding, ensure_ascii=False), float(magface_quality), float(quality_score), face_id),
+        (
+            sqlite3.Binary(embedding_blob),
+            embedding_dtype,
+            float(magface_quality),
+            float(quality_score),
+            face_id,
+        ),
+    )
+    if commit:
+        conn.commit()
+
+
+def mark_faces_embedded_batch(
+    conn: sqlite3.Connection,
+    rows: list[tuple[str, list[float] | np.ndarray, float, float]],
+) -> None:
+    if not rows:
+        return
+    payload: list[tuple[bytes, str, float, float, str]] = []
+    for face_id, embedding, magface_quality, quality_score in rows:
+        embedding_blob, embedding_dtype = _encode_embedding_blob(embedding, storage_dtype=EMBEDDING_STORAGE_DTYPE)
+        payload.append(
+            (
+                bytes(embedding_blob),
+                embedding_dtype,
+                float(magface_quality),
+                float(quality_score),
+                str(face_id),
+            )
+        )
+    conn.executemany(
+        """
+        UPDATE detected_faces
+        SET embedding_json=NULL, embedding_blob=?, embedding_dtype=?, magface_quality=?, quality_score=?, face_error=NULL, updated_at=CURRENT_TIMESTAMP
+        WHERE face_id=?
+        """,
+        payload,
     )
     conn.commit()
 
 
-def mark_face_error(conn: sqlite3.Connection, face_id: str, error: str) -> None:
+def mark_face_error(conn: sqlite3.Connection, face_id: str, error: str, commit: bool = True) -> None:
     conn.execute(
         """
         UPDATE detected_faces
@@ -275,22 +759,45 @@ def mark_face_error(conn: sqlite3.Connection, face_id: str, error: str) -> None:
         """,
         (error, face_id),
     )
+    if commit:
+        conn.commit()
+
+
+def mark_face_errors_batch(conn: sqlite3.Connection, rows: list[tuple[str, str]]) -> None:
+    if not rows:
+        return
+    conn.executemany(
+        """
+        UPDATE detected_faces
+        SET face_error=?, updated_at=CURRENT_TIMESTAMP
+        WHERE face_id=?
+        """,
+        [(str(error), str(face_id)) for face_id, error in rows],
+    )
     conn.commit()
 
 
-def iter_embedded_faces(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
+def iter_embedded_faces(conn: sqlite3.Connection, *, as_numpy: bool = False) -> Iterator[dict[str, Any]]:
     cursor = conn.execute(
         """
         SELECT face_id, photo_relpath, crop_relpath, context_relpath, preview_relpath,
                bbox_json, detector_confidence, face_area_ratio,
-               embedding_json, magface_quality, quality_score,
+               embedding_json, embedding_blob, embedding_dtype, magface_quality, quality_score,
                cluster_label, cluster_probability, cluster_assignment_source
         FROM detected_faces
-        WHERE embedding_json IS NOT NULL AND face_error IS NULL
+        WHERE (embedding_blob IS NOT NULL OR embedding_json IS NOT NULL) AND face_error IS NULL
         ORDER BY face_id
         """
     )
     for row in cursor:
+        embedding = _decode_embedding_blob(
+            embedding_blob=row["embedding_blob"],
+            embedding_dtype=row["embedding_dtype"],
+            embedding_json=row["embedding_json"],
+            as_numpy=as_numpy,
+        )
+        if embedding is None:
+            continue
         yield {
             "face_id": row["face_id"],
             "photo_relpath": row["photo_relpath"],
@@ -300,7 +807,7 @@ def iter_embedded_faces(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
             "bbox": json.loads(row["bbox_json"]),
             "detector_confidence": float(row["detector_confidence"]),
             "face_area_ratio": float(row["face_area_ratio"]),
-            "embedding": json.loads(row["embedding_json"]),
+            "embedding": embedding,
             "magface_quality": float(row["magface_quality"]),
             "quality_score": float(row["quality_score"]),
             "cluster_label": row["cluster_label"],
@@ -309,28 +816,16 @@ def iter_embedded_faces(conn: sqlite3.Connection) -> Iterator[dict[str, Any]]:
         }
 
 
-def upsert_failed_image(conn: sqlite3.Connection, photo_relpath: str, error: str) -> None:
-    conn.execute(
-        """
-        INSERT INTO failed_images(photo_relpath, error, updated_at)
-        VALUES(?, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(photo_relpath) DO UPDATE SET
-            error=excluded.error,
-            updated_at=CURRENT_TIMESTAMP
-        """,
-        (photo_relpath, error),
-    )
-    conn.commit()
-
-
-def clear_failed_image(conn: sqlite3.Connection, photo_relpath: str) -> None:
-    conn.execute("DELETE FROM failed_images WHERE photo_relpath=?", (photo_relpath,))
-    conn.commit()
-
-
 def list_failed_images(conn: sqlite3.Connection) -> list[dict[str, str]]:
-    rows = conn.execute("SELECT photo_relpath, error FROM failed_images ORDER BY photo_relpath").fetchall()
-    return [{"photo_relpath": row["photo_relpath"], "error": row["error"]} for row in rows]
+    rows = conn.execute(
+        """
+        SELECT photo_relpath, detect_error
+        FROM source_images
+        WHERE detect_status='error'
+        ORDER BY photo_relpath
+        """
+    ).fetchall()
+    return [{"photo_relpath": row["photo_relpath"], "error": row["detect_error"]} for row in rows]
 
 
 def list_failed_faces(conn: sqlite3.Connection) -> list[dict[str, str]]:
@@ -347,8 +842,20 @@ def count_all_faces(conn: sqlite3.Connection) -> int:
 
 def count_pending_faces(conn: sqlite3.Connection) -> int:
     row = conn.execute(
-        "SELECT COUNT(*) AS c FROM detected_faces WHERE embedding_json IS NULL AND face_error IS NULL"
+        "SELECT COUNT(*) AS c FROM detected_faces WHERE embedding_blob IS NULL AND embedding_json IS NULL AND face_error IS NULL"
     ).fetchone()
+    return int(row["c"])
+
+
+def count_embedded_faces(conn: sqlite3.Connection) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS c FROM detected_faces WHERE (embedding_blob IS NOT NULL OR embedding_json IS NOT NULL) AND face_error IS NULL"
+    ).fetchone()
+    return int(row["c"])
+
+
+def count_failed_faces(conn: sqlite3.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) AS c FROM detected_faces WHERE face_error IS NOT NULL").fetchone()
     return int(row["c"])
 
 
@@ -358,6 +865,7 @@ def update_cluster_result(
     label: int,
     probability: float | None,
     assignment_source: str | None,
+    commit: bool = True,
 ) -> None:
     conn.execute(
         """
@@ -371,6 +879,32 @@ def update_cluster_result(
             assignment_source,
             face_id,
         ),
+    )
+    if commit:
+        conn.commit()
+
+
+def update_cluster_results_batch(
+    conn: sqlite3.Connection,
+    rows: list[tuple[str, int, float | None, str | None]],
+) -> None:
+    if not rows:
+        return
+    conn.executemany(
+        """
+        UPDATE detected_faces
+        SET cluster_label=?, cluster_probability=?, cluster_assignment_source=?, updated_at=CURRENT_TIMESTAMP
+        WHERE face_id=?
+        """,
+        [
+            (
+                int(label),
+                None if probability is None else float(probability),
+                assignment_source,
+                str(face_id),
+            )
+            for face_id, label, probability, assignment_source in rows
+        ],
     )
     conn.commit()
 
@@ -446,6 +980,33 @@ class MagFaceEmbedder:
         return normalized.astype(float).tolist(), magface_quality
 
 
+def merge_embedding_with_optional_flip(
+    main_embedding: list[float],
+    flip_embedding: list[float] | None,
+    flip_weight: float = 1.0,
+) -> list[float]:
+    main_vec = np.asarray(main_embedding, dtype=np.float32)
+    merged = main_vec
+
+    safe_flip_weight = float(flip_weight)
+    if flip_embedding is not None and safe_flip_weight > 0:
+        flip_vec = np.asarray(flip_embedding, dtype=np.float32)
+        if flip_vec.shape != main_vec.shape:
+            raise ValueError(
+                f"flip embedding 维度不匹配: main={main_vec.shape}, flip={flip_vec.shape}"
+            )
+        merged = main_vec + safe_flip_weight * flip_vec
+
+    merged_norm = float(np.linalg.norm(merged))
+    if merged_norm > 1e-9:
+        return (merged / merged_norm).astype(float).tolist()
+
+    main_norm = float(np.linalg.norm(main_vec))
+    if main_norm > 1e-9:
+        return (main_vec / main_norm).astype(float).tolist()
+    return main_vec.astype(float).tolist()
+
+
 def iter_image_files(root: Path) -> list[Path]:
     root = root.resolve()
     candidates: list[Path] = []
@@ -458,28 +1019,6 @@ def iter_image_files(root: Path) -> list[Path]:
         if path.suffix.lower() in IMAGE_SUFFIXES:
             candidates.append(path)
     return sorted(candidates, key=lambda item: item.relative_to(root).as_posix())
-
-
-def compute_detect_workset_stats(
-    total_images: int,
-    max_images: int | None,
-    processed_count: int,
-    detect_max_images_per_run: int | None = None,
-) -> tuple[int, int, int]:
-    effective_total = int(total_images)
-    if max_images is not None and int(max_images) > 0:
-        effective_total = min(effective_total, int(max_images))
-    effective_total = max(effective_total, 0)
-
-    effective_processed = max(int(processed_count), 0)
-    remaining = max(effective_total - effective_processed, 0)
-
-    if detect_max_images_per_run is not None and int(detect_max_images_per_run) > 0:
-        batch_size = int(detect_max_images_per_run)
-    else:
-        batch_size = DEFAULT_DETECT_MAX_IMAGES_PER_RUN_IN_ALL_STAGE
-
-    return effective_total, remaining, batch_size
 
 
 def group_faces_by_cluster(faces: list[dict[str, Any]], labels: list[int]) -> list[dict[str, Any]]:
@@ -522,7 +1061,11 @@ def _normalize_embedding(vector: np.ndarray) -> np.ndarray:
     return (vector / norm).astype(np.float32)
 
 
-def _build_cluster_representative(cluster: dict[str, Any], rep_top_k: int) -> np.ndarray | None:
+def _build_cluster_representative(
+    cluster: dict[str, Any],
+    rep_top_k: int,
+    embedding_key: str = "embedding",
+) -> np.ndarray | None:
     members = list(cluster.get("members", []))
     if not members:
         return None
@@ -534,11 +1077,8 @@ def _build_cluster_representative(cluster: dict[str, Any], rep_top_k: int) -> np
     weights: list[float] = []
     dim: int | None = None
     for member in sorted_members:
-        raw_embedding = member.get("embedding")
-        if not isinstance(raw_embedding, list) or not raw_embedding:
-            continue
-        vector = np.asarray(raw_embedding, dtype=np.float32)
-        if vector.ndim != 1:
+        vector = _coerce_embedding_vector(member.get(embedding_key))
+        if vector is None:
             continue
         if dim is None:
             dim = int(vector.shape[0])
@@ -582,31 +1122,159 @@ def attach_noise_faces_to_person_consensus(
         return list(labels), list(probabilities), 0
 
     cluster_representatives: dict[int, np.ndarray] = {}
+    cluster_representatives_flip: dict[int, np.ndarray] = {}
     for cluster in normal_clusters:
-        representative = _build_cluster_representative(cluster, rep_top_k=rep_top_k)
+        representative = _build_cluster_representative(
+            cluster,
+            rep_top_k=rep_top_k,
+            embedding_key="embedding",
+        )
         if representative is None:
-            continue
-        cluster_representatives[int(cluster.get("cluster_label", -1))] = representative
+            representative = None
+        representative_flip = _build_cluster_representative(
+            cluster,
+            rep_top_k=rep_top_k,
+            embedding_key="embedding_flip",
+        )
+        cluster_label = int(cluster.get("cluster_label", -1))
+        if representative is not None:
+            cluster_representatives[cluster_label] = representative
+        if representative_flip is not None:
+            cluster_representatives_flip[cluster_label] = representative_flip
 
-    if not cluster_representatives:
+    if not cluster_representatives and not cluster_representatives_flip:
         return list(labels), list(probabilities), 0
 
     person_cluster_labels: list[list[int]] = []
+    person_idx_by_cluster_label: dict[int, int] = {}
     for person in persons:
         candidate_labels: list[int] = []
         for cluster_ref in person.get("clusters", []):
             label = int(cluster_ref.get("cluster_label", -1))
-            if label in cluster_representatives:
+            if label in cluster_representatives or label in cluster_representatives_flip:
                 candidate_labels.append(label)
         if candidate_labels:
+            person_idx = len(person_cluster_labels)
             person_cluster_labels.append(candidate_labels)
+            for label in candidate_labels:
+                person_idx_by_cluster_label[label] = person_idx
 
     if not person_cluster_labels:
         return list(labels), list(probabilities), 0
 
+    rep_main_labels = sorted(cluster_representatives.keys())
+    rep_flip_labels = sorted(cluster_representatives_flip.keys())
+    rep_main_index = (
+        _build_vector_search_index(
+            vectors=np.stack([cluster_representatives[label] for label in rep_main_labels], axis=0),
+            prefer_ann=True,
+        )
+        if rep_main_labels
+        else None
+    )
+    rep_flip_index = (
+        _build_vector_search_index(
+            vectors=np.stack([cluster_representatives_flip[label] for label in rep_flip_labels], axis=0),
+            prefer_ann=True,
+        )
+        if rep_flip_labels
+        else None
+    )
+    use_candidate_pruning = max(len(rep_main_labels), len(rep_flip_labels)) >= ANN_CANDIDATE_PRUNE_MIN_ITEMS
+
     updated_labels = list(labels)
     updated_probabilities = list(probabilities)
     attached_count = 0
+
+    def candidate_cluster_labels_for_face(
+        vector_main: np.ndarray,
+        vector_flip: np.ndarray | None,
+    ) -> list[list[int]]:
+        if not use_candidate_pruning:
+            return person_cluster_labels
+
+        candidate_person_indices: set[int] = set()
+        query_k_main = max(ANN_DEFAULT_QUERY_K, int(rep_top_k) * 8)
+        query_k_flip = max(ANN_DEFAULT_QUERY_K, int(rep_top_k) * 8)
+
+        if rep_main_index is not None and rep_main_labels:
+            top_k = min(int(query_k_main), len(rep_main_labels))
+            main_indices, _ = _query_vector_search_index(rep_main_index, vector_main[None, :], top_k=top_k)
+            if main_indices.size > 0:
+                for pos in main_indices[0].tolist():
+                    cluster_label = int(rep_main_labels[int(pos)])
+                    owner = person_idx_by_cluster_label.get(cluster_label)
+                    if owner is not None:
+                        candidate_person_indices.add(int(owner))
+
+        if rep_flip_index is not None and rep_flip_labels and vector_flip is not None:
+            top_k = min(int(query_k_flip), len(rep_flip_labels))
+            flip_indices, _ = _query_vector_search_index(rep_flip_index, vector_flip[None, :], top_k=top_k)
+            if flip_indices.size > 0:
+                for pos in flip_indices[0].tolist():
+                    cluster_label = int(rep_flip_labels[int(pos)])
+                    owner = person_idx_by_cluster_label.get(cluster_label)
+                    if owner is not None:
+                        candidate_person_indices.add(int(owner))
+
+        # 需要至少两个候选人物，否则 margin 语义不稳定，回退全量比较。
+        if len(candidate_person_indices) < 2:
+            return person_cluster_labels
+        return [person_cluster_labels[idx] for idx in sorted(candidate_person_indices)]
+
+    def build_person_candidates(
+        cluster_labels_by_person: list[list[int]],
+        vector_main: np.ndarray,
+        vector_flip: np.ndarray | None,
+        use_flip_supplement: bool,
+    ) -> list[tuple[float, float, int]]:
+        person_candidates: list[tuple[float, float, int]] = []
+        for cluster_labels in cluster_labels_by_person:
+            best_label: int | None = None
+            best_sim: float | None = None
+            for cluster_label in cluster_labels:
+                main_sim: float | None = None
+                rep_main = cluster_representatives.get(cluster_label)
+                if rep_main is not None:
+                    main_sim = float(np.clip(np.dot(rep_main, vector_main), -1.0, 1.0))
+
+                flip_sim: float | None = None
+                if use_flip_supplement and vector_flip is not None:
+                    rep_flip = cluster_representatives_flip.get(cluster_label)
+                    if rep_flip is not None:
+                        flip_sim = float(np.clip(np.dot(rep_flip, vector_flip), -1.0, 1.0))
+
+                if main_sim is None and flip_sim is None:
+                    continue
+                if main_sim is None:
+                    current_sim = float(flip_sim)  # type: ignore[arg-type]
+                elif flip_sim is None:
+                    current_sim = float(main_sim)
+                else:
+                    current_sim = float(max(main_sim, flip_sim))
+
+                if best_sim is None or current_sim > best_sim:
+                    best_sim = current_sim
+                    best_label = cluster_label
+
+            if best_label is None or best_sim is None:
+                continue
+            person_candidates.append((1.0 - best_sim, best_sim, best_label))
+
+        person_candidates.sort(key=lambda item: item[0])
+        return person_candidates
+
+    def evaluate_pass(candidates: list[tuple[float, float, int]]) -> tuple[bool, int]:
+        if not candidates:
+            return False, -1
+        best_dist, best_sim, best_label = candidates[0]
+        second_sim = candidates[1][1] if len(candidates) >= 2 else -1.0
+        margin = best_sim - second_sim
+        if best_dist > float(distance_threshold):
+            return False, -1
+        if margin < float(margin_threshold):
+            return False, -1
+        return True, int(best_label)
 
     for idx, (face, label) in enumerate(zip(faces, labels, strict=True)):
         if int(label) != -1:
@@ -614,43 +1282,42 @@ def attach_noise_faces_to_person_consensus(
         if bool(face.get("quality_gate_excluded", False)):
             continue
 
-        raw_embedding = face.get("embedding")
-        if not isinstance(raw_embedding, list) or not raw_embedding:
-            continue
-
-        vector = np.asarray(raw_embedding, dtype=np.float32)
-        if vector.ndim != 1:
+        vector = _coerce_embedding_vector(face.get("embedding"))
+        if vector is None:
             continue
         vector = _normalize_embedding(vector)
 
-        person_candidates: list[tuple[float, float, int]] = []
-        for cluster_labels in person_cluster_labels:
-            best_label: int | None = None
-            best_sim: float | None = None
-            for cluster_label in cluster_labels:
-                representative = cluster_representatives[cluster_label]
-                sim = float(np.clip(np.dot(representative, vector), -1.0, 1.0))
-                if best_sim is None or sim > best_sim:
-                    best_sim = sim
-                    best_label = cluster_label
-            if best_label is None or best_sim is None:
-                continue
-            person_candidates.append((1.0 - best_sim, best_sim, best_label))
+        vector_flip: np.ndarray | None = None
+        flip = _coerce_embedding_vector(face.get("embedding_flip"))
+        if flip is not None:
+            vector_flip = _normalize_embedding(flip)
 
-        if not person_candidates:
+        candidate_cluster_labels = candidate_cluster_labels_for_face(vector_main=vector, vector_flip=vector_flip)
+
+        main_candidates = build_person_candidates(
+            cluster_labels_by_person=candidate_cluster_labels,
+            vector_main=vector,
+            vector_flip=None,
+            use_flip_supplement=False,
+        )
+        supplement_candidates = build_person_candidates(
+            cluster_labels_by_person=candidate_cluster_labels,
+            vector_main=vector,
+            vector_flip=vector_flip,
+            use_flip_supplement=True,
+        )
+
+        main_pass, main_label = evaluate_pass(main_candidates)
+        supplement_pass, supplement_label = evaluate_pass(supplement_candidates)
+
+        if main_pass:
+            final_label = main_label
+        elif supplement_pass:
+            final_label = supplement_label
+        else:
             continue
-        person_candidates.sort(key=lambda item: item[0])
 
-        best_dist, best_sim, best_label = person_candidates[0]
-        second_sim = person_candidates[1][1] if len(person_candidates) >= 2 else -1.0
-        margin = best_sim - second_sim
-
-        if best_dist > float(distance_threshold):
-            continue
-        if margin < float(margin_threshold):
-            continue
-
-        updated_labels[idx] = best_label
+        updated_labels[idx] = final_label
         # 这里的回挂置信不是 HDBSCAN 原生 probability，review 中留空避免误解。
         updated_probabilities[idx] = None
         attached_count += 1
@@ -749,6 +1416,66 @@ def _pairwise_cosine_distance(vectors: np.ndarray) -> np.ndarray:
     return dist.astype(np.float32)
 
 
+@dataclass
+class _VectorSearchIndex:
+    vectors: np.ndarray
+    hnsw_index: Any | None = None
+
+
+def _build_vector_search_index(vectors: np.ndarray, prefer_ann: bool = True) -> _VectorSearchIndex:
+    safe_vectors = np.asarray(vectors, dtype=np.float32)
+    if safe_vectors.ndim != 2 or safe_vectors.shape[0] <= 0:
+        return _VectorSearchIndex(vectors=np.zeros((0, 0), dtype=np.float32), hnsw_index=None)
+
+    hnsw_index: Any | None = None
+    if prefer_ann and safe_vectors.shape[0] >= ANN_BUILD_MIN_ITEMS:
+        try:
+            import hnswlib
+
+            dim = int(safe_vectors.shape[1])
+            index = hnswlib.Index(space="cosine", dim=dim)
+            index.init_index(max_elements=int(safe_vectors.shape[0]), ef_construction=200, M=16)
+            index.add_items(safe_vectors, np.arange(int(safe_vectors.shape[0]), dtype=np.int32))
+            index.set_ef(max(64, min(512, ANN_DEFAULT_QUERY_K * 4)))
+            hnsw_index = index
+        except Exception:
+            hnsw_index = None
+
+    return _VectorSearchIndex(vectors=safe_vectors, hnsw_index=hnsw_index)
+
+
+def _query_vector_search_index(
+    index: _VectorSearchIndex,
+    queries: np.ndarray,
+    top_k: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    if index.vectors.ndim != 2 or index.vectors.shape[0] <= 0:
+        return np.zeros((0, 0), dtype=np.int32), np.zeros((0, 0), dtype=np.float32)
+
+    query_matrix = np.asarray(queries, dtype=np.float32)
+    if query_matrix.ndim == 1:
+        query_matrix = query_matrix[None, :]
+    if query_matrix.ndim != 2 or query_matrix.shape[0] <= 0:
+        return np.zeros((0, 0), dtype=np.int32), np.zeros((0, 0), dtype=np.float32)
+
+    effective_k = max(1, min(int(top_k), int(index.vectors.shape[0])))
+    if index.hnsw_index is not None:
+        try:
+            labels, distances = index.hnsw_index.knn_query(query_matrix, k=effective_k)
+            return labels.astype(np.int32), distances.astype(np.float32)
+        except Exception:
+            pass
+
+    sims = np.clip(query_matrix @ index.vectors.T, -1.0, 1.0)
+    order = np.argpartition(-sims, kth=effective_k - 1, axis=1)[:, :effective_k]
+    picked_sims = np.take_along_axis(sims, order, axis=1)
+    picked_order = np.argsort(-picked_sims, axis=1)
+    sorted_indices = np.take_along_axis(order, picked_order, axis=1).astype(np.int32)
+    sorted_sims = np.take_along_axis(picked_sims, picked_order, axis=1)
+    sorted_dist = np.maximum(1.0 - sorted_sims, 0.0).astype(np.float32)
+    return sorted_indices, sorted_dist
+
+
 def _build_cluster_knn_mask(dist_matrix: np.ndarray, knn_k: int) -> np.ndarray:
     size = int(dist_matrix.shape[0])
     mask = np.zeros((size, size), dtype=bool)
@@ -769,31 +1496,113 @@ def _build_cluster_knn_mask(dist_matrix: np.ndarray, knn_k: int) -> np.ndarray:
     return np.logical_or(mask, mask.T)
 
 
+def _build_cluster_cannot_link_pairs(clusters: list[dict[str, Any]]) -> set[tuple[int, int]]:
+    if len(clusters) <= 1:
+        return set()
+
+    photo_to_cluster_indices: dict[str, list[int]] = defaultdict(list)
+    for idx, cluster in enumerate(clusters):
+        seen_photos: set[str] = set()
+        for member in cluster.get("members", []):
+            photo_relpath = str(member.get("photo_relpath", ""))
+            if photo_relpath:
+                seen_photos.add(photo_relpath)
+        for photo in seen_photos:
+            photo_to_cluster_indices[photo].append(idx)
+
+    cannot_link_pairs: set[tuple[int, int]] = set()
+    for indices in photo_to_cluster_indices.values():
+        if len(indices) <= 1:
+            continue
+        sorted_indices = sorted(set(indices))
+        for left, right in combinations(sorted_indices, 2):
+            cannot_link_pairs.add((int(left), int(right)))
+    return cannot_link_pairs
+
+
 def _build_cluster_cannot_link_mask(clusters: list[dict[str, Any]]) -> np.ndarray:
     size = len(clusters)
     mask = np.zeros((size, size), dtype=bool)
     if size <= 1:
         return mask
-
-    photo_sets: list[set[str]] = []
-    for cluster in clusters:
-        photos: set[str] = set()
-        for member in cluster.get("members", []):
-            photo_relpath = str(member.get("photo_relpath", ""))
-            if photo_relpath:
-                photos.add(photo_relpath)
-        photo_sets.append(photos)
-
-    for row_idx in range(size):
-        row_photos = photo_sets[row_idx]
-        if not row_photos:
-            continue
-        for col_idx in range(row_idx + 1, size):
-            if row_photos.intersection(photo_sets[col_idx]):
-                mask[row_idx, col_idx] = True
-                mask[col_idx, row_idx] = True
-
+    for left, right in _build_cluster_cannot_link_pairs(clusters):
+        mask[left, right] = True
+        mask[right, left] = True
     return mask
+
+
+def _cluster_single_linkage_sparse(
+    vectors: np.ndarray,
+    clusters: list[dict[str, Any]],
+    distance_threshold: float,
+    knn_k: int,
+    enable_same_photo_cannot_link: bool,
+) -> list[int]:
+    size = int(vectors.shape[0])
+    if size <= 1:
+        return [0]
+
+    effective_k = max(1, min(int(knn_k), size - 1))
+    # 需要 +1 保留 self，随后丢弃 self 项。
+    neighbor_indices, _ = _query_vector_search_index(
+        _build_vector_search_index(vectors=vectors, prefer_ann=True),
+        queries=vectors,
+        top_k=effective_k + 1,
+    )
+
+    cannot_link_pairs = _build_cluster_cannot_link_pairs(clusters) if enable_same_photo_cannot_link else set()
+
+    parent = list(range(size))
+    rank = [0 for _ in range(size)]
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        root_x = find(x)
+        root_y = find(y)
+        if root_x == root_y:
+            return
+        if rank[root_x] < rank[root_y]:
+            parent[root_x] = root_y
+        elif rank[root_x] > rank[root_y]:
+            parent[root_y] = root_x
+        else:
+            parent[root_y] = root_x
+            rank[root_x] += 1
+
+    candidate_edges: set[tuple[int, int]] = set()
+    for row_idx in range(size):
+        row_neighbors = neighbor_indices[row_idx].tolist() if row_idx < neighbor_indices.shape[0] else []
+        for col_idx in row_neighbors:
+            col = int(col_idx)
+            if col == row_idx:
+                continue
+            left, right = (row_idx, col) if row_idx < col else (col, row_idx)
+            candidate_edges.add((left, right))
+
+    threshold = float(distance_threshold)
+    for left, right in candidate_edges:
+        if (left, right) in cannot_link_pairs:
+            continue
+        sim = float(np.clip(np.dot(vectors[left], vectors[right]), -1.0, 1.0))
+        dist = max(1.0 - sim, 0.0)
+        if dist <= threshold:
+            union(left, right)
+
+    root_to_label: dict[int, int] = {}
+    labels: list[int] = []
+    next_label = 0
+    for idx in range(size):
+        root = find(idx)
+        if root not in root_to_label:
+            root_to_label[root] = next_label
+            next_label += 1
+        labels.append(root_to_label[root])
+    return labels
 
 
 def _cluster_by_ahc_distance_matrix(
@@ -927,20 +1736,29 @@ def merge_clusters_to_persons(
             ahc_labels = [0]
         else:
             vector_matrix = np.stack(representatives, axis=0)
-            dist_matrix = _pairwise_cosine_distance(vector_matrix)
-            mask = _build_cluster_knn_mask(dist_matrix, knn_k=knn_k)
-            large_distance = max(float(distance_threshold) + 1.0, 2.0)
-            constrained_dist = dist_matrix.copy()
-            constrained_dist[~mask] = large_distance
-            if enable_same_photo_cannot_link:
-                cannot_link_mask = _build_cluster_cannot_link_mask(indexed_clusters)
-                constrained_dist[cannot_link_mask] = large_distance
-            np.fill_diagonal(constrained_dist, 0.0)
-            ahc_labels = _cluster_by_ahc_distance_matrix(
-                constrained_dist,
-                distance_threshold=distance_threshold,
-                linkage=linkage,
-            )
+            if linkage == "single":
+                ahc_labels = _cluster_single_linkage_sparse(
+                    vectors=vector_matrix,
+                    clusters=indexed_clusters,
+                    distance_threshold=float(distance_threshold),
+                    knn_k=int(knn_k),
+                    enable_same_photo_cannot_link=bool(enable_same_photo_cannot_link),
+                )
+            else:
+                dist_matrix = _pairwise_cosine_distance(vector_matrix)
+                mask = _build_cluster_knn_mask(dist_matrix, knn_k=knn_k)
+                large_distance = max(float(distance_threshold) + 1.0, 2.0)
+                constrained_dist = dist_matrix.copy()
+                constrained_dist[~mask] = large_distance
+                if enable_same_photo_cannot_link:
+                    cannot_link_mask = _build_cluster_cannot_link_mask(indexed_clusters)
+                    constrained_dist[cannot_link_mask] = large_distance
+                np.fill_diagonal(constrained_dist, 0.0)
+                ahc_labels = _cluster_by_ahc_distance_matrix(
+                    constrained_dist,
+                    distance_threshold=distance_threshold,
+                    linkage=linkage,
+                )
     else:
         ahc_labels = []
 
@@ -960,11 +1778,8 @@ def _collect_normalized_member_embeddings(cluster: dict[str, Any]) -> np.ndarray
     vectors: list[np.ndarray] = []
     dim: int | None = None
     for member in cluster.get("members", []):
-        raw_embedding = member.get("embedding")
-        if not isinstance(raw_embedding, list) or not raw_embedding:
-            continue
-        vector = np.asarray(raw_embedding, dtype=np.float32)
-        if vector.ndim != 1:
+        vector = _coerce_embedding_vector(member.get("embedding"))
+        if vector is None:
             continue
         if dim is None:
             dim = int(vector.shape[0])
@@ -1061,6 +1876,20 @@ def attach_micro_clusters_to_existing_persons(
         if not target_vectors:
             break
 
+        target_anchor_vectors: dict[int, np.ndarray] = {}
+        for owner, matrix in target_vectors.items():
+            target_anchor_vectors[int(owner)] = _normalize_embedding(np.mean(matrix, axis=0))
+        target_anchor_labels = sorted(target_anchor_vectors.keys())
+        target_anchor_index = (
+            _build_vector_search_index(
+                vectors=np.stack([target_anchor_vectors[label] for label in target_anchor_labels], axis=0),
+                prefer_ann=True,
+            )
+            if target_anchor_labels
+            else None
+        )
+        use_target_candidate_pruning = len(target_anchor_labels) >= ANN_CANDIDATE_PRUNE_MIN_ITEMS
+
         candidate_cluster_labels: list[int] = []
         for cluster_label, owner in owner_by_cluster.items():
             cluster_size = len(clusters_by_label[cluster_label].get("members", []))
@@ -1085,13 +1914,25 @@ def attach_micro_clusters_to_existing_persons(
             if current_owner == -1:
                 continue
 
-            candidate_targets = [owner for owner in target_person_labels if owner != current_owner and owner in target_vectors]
-            if not candidate_targets:
-                continue
-
             cluster_vectors = _collect_normalized_member_embeddings(clusters_by_label[cluster_label])
             if cluster_vectors is None or cluster_vectors.size <= 0:
                 continue
+
+            candidate_targets = [owner for owner in target_person_labels if owner != current_owner and owner in target_vectors]
+            if not candidate_targets:
+                continue
+            if use_target_candidate_pruning and target_anchor_index is not None:
+                cluster_anchor = _normalize_embedding(np.mean(cluster_vectors, axis=0))
+                query_k = min(max(int(knn_top_n) * 4, ANN_DEFAULT_QUERY_K), len(target_anchor_labels))
+                ann_indices, _ = _query_vector_search_index(target_anchor_index, cluster_anchor[None, :], top_k=query_k)
+                ann_targets = [
+                    int(target_anchor_labels[int(pos)])
+                    for pos in ann_indices[0].tolist()
+                    if int(target_anchor_labels[int(pos)]) != current_owner and int(target_anchor_labels[int(pos)]) in target_vectors
+                ]
+                # 至少两个候选目标时再裁剪，避免 margin 语义受损。
+                if len(ann_targets) >= 2:
+                    candidate_targets = sorted(set(ann_targets))
 
             person_scores: list[tuple[int, float, float, int]] = []
             global_pairs: list[tuple[float, int]] = []
@@ -1647,6 +2488,210 @@ def render_review_html(payload: dict[str, Any]) -> str:
 """
 
 
+def _cluster_member_count(cluster: dict[str, Any]) -> int:
+    return int(cluster.get("member_count", len(cluster.get("members", []))))
+
+
+def _person_page_payload(base_payload: dict[str, Any], person: dict[str, Any]) -> dict[str, Any]:
+    base_meta = dict(base_payload.get("meta", {}))
+    person_clusters = list(person.get("clusters", []))
+    person_cluster_count = int(person.get("person_cluster_count", len(person_clusters)))
+    person_face_count = int(
+        person.get("person_face_count", sum(_cluster_member_count(cluster) for cluster in person_clusters))
+    )
+    person_noise_count = sum(
+        _cluster_member_count(cluster)
+        for cluster in person_clusters
+        if int(cluster.get("cluster_label", -1)) == -1 or str(cluster.get("cluster_key", "")) == "noise"
+    )
+    person_cluster_total = sum(
+        1 for cluster in person_clusters if int(cluster.get("cluster_label", -1)) != -1 and str(cluster.get("cluster_key", "")) != "noise"
+    )
+    base_meta.update(
+        {
+            "person_count": 1,
+            "person_cluster_count": person_cluster_count,
+            "face_count": person_face_count,
+            "cluster_count": person_cluster_total,
+            "noise_count": person_noise_count,
+        }
+    )
+    return {
+        "meta": base_meta,
+        "failed_images": base_payload.get("failed_images", []),
+        "failed_faces": base_payload.get("failed_faces", []),
+        "persons": [person],
+        "clusters": person_clusters,
+    }
+
+
+def _render_large_person_pages_index(pages: list[dict[str, Any]], min_face_count: int) -> str:
+    rows = []
+    for page in sorted(
+        pages,
+        key=lambda item: (-int(item.get("person_face_count", 0)), int(item.get("person_label", 0))),
+    ):
+        person_key = html.escape(str(page.get("person_key", "")))
+        html_name = html.escape(str(page.get("html", "")))
+        person_face_count = int(page.get("person_face_count", 0))
+        person_cluster_count = int(page.get("person_cluster_count", 0))
+        rows.append(
+            (
+                "<tr>"
+                f"<td>{person_key}</td>"
+                f"<td>{person_face_count}</td>"
+                f"<td>{person_cluster_count}</td>"
+                f"<td><a href=\"{html_name}\" target=\"_blank\">打开 review</a></td>"
+                "</tr>"
+            )
+        )
+
+    if rows:
+        tbody = "".join(rows)
+    else:
+        tbody = (
+            "<tr>"
+            "<td colspan=\"4\">当前没有样本数大于阈值的人物。</td>"
+            "</tr>"
+        )
+
+    return f"""<!DOCTYPE html>
+<html lang=\"zh-CN\">
+<head>
+  <meta charset=\"UTF-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+  <title>大人物 Review 索引</title>
+  <style>
+    body {{
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      color: #1a2330;
+      background: #f6f8fb;
+    }}
+    main {{
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 24px;
+    }}
+    h1 {{
+      margin: 0 0 8px;
+      font-size: 28px;
+    }}
+    p {{
+      color: #5a6b82;
+      margin: 0 0 20px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+      background: #fff;
+      border: 1px solid #d7deea;
+      border-radius: 12px;
+      overflow: hidden;
+    }}
+    th, td {{
+      padding: 12px 14px;
+      border-bottom: 1px solid #e3e9f3;
+      text-align: left;
+    }}
+    th {{
+      background: #edf3ff;
+      font-weight: 700;
+    }}
+    tr:last-child td {{
+      border-bottom: none;
+    }}
+    a {{
+      color: #1f5eff;
+      text-decoration: none;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>大人物 Review 索引</h1>
+    <p>仅收录样本数大于 {int(min_face_count)} 的 person。</p>
+    <table>
+      <thead>
+        <tr>
+          <th>Person</th>
+          <th>样本数</th>
+          <th>微簇数</th>
+          <th>Review</th>
+        </tr>
+      </thead>
+      <tbody>{tbody}</tbody>
+    </table>
+  </main>
+</body>
+</html>"""
+
+
+def _cleanup_generated_person_review_pages(output_dir: Path) -> None:
+    for path in output_dir.glob("review_person_*.html"):
+        if PERSON_REVIEW_HTML_RE.fullmatch(path.name):
+            path.unlink(missing_ok=True)
+
+
+def write_person_review_pages(output_dir: Path, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    persons = [
+        person
+        for person in list(payload.get("persons", []))
+        if int(person.get("person_face_count", 0)) > int(LARGE_PERSON_REVIEW_MIN_FACE_COUNT)
+    ]
+    pages: list[dict[str, Any]] = []
+    _cleanup_generated_person_review_pages(output_dir)
+
+    for idx, person in enumerate(persons):
+        try:
+            person_label = int(person.get("person_label", idx))
+        except (TypeError, ValueError):
+            person_label = idx
+        person_key = str(person.get("person_key", f"person_{person_label}"))
+        person_html = f"review_person_{person_label:04d}.html"
+        person_payload = _person_page_payload(base_payload=payload, person=person)
+        (output_dir / person_html).write_text(render_review_html(person_payload), encoding="utf-8")
+        pages.append(
+            {
+                "person_label": person_label,
+                "person_key": person_key,
+                "person_face_count": int(person.get("person_face_count", 0)),
+                "person_cluster_count": int(person.get("person_cluster_count", len(person.get("clusters", [])))),
+                "html": person_html,
+            }
+        )
+
+    person_pages_payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "count": len(pages),
+        "pages": pages,
+    }
+    (output_dir / "review_person_pages.json").write_text(
+        json.dumps(person_pages_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    large_person_pages = [
+        page for page in pages if int(page.get("person_face_count", 0)) > int(LARGE_PERSON_REVIEW_MIN_FACE_COUNT)
+    ]
+    large_pages_payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "min_face_count": int(LARGE_PERSON_REVIEW_MIN_FACE_COUNT),
+        "count": len(large_person_pages),
+        "pages": large_person_pages,
+    }
+    (output_dir / "review_person_pages_over_100.json").write_text(
+        json.dumps(large_pages_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (output_dir / "review_person_pages_over_100.html").write_text(
+        _render_large_person_pages_index(
+            pages=large_person_pages,
+            min_face_count=int(LARGE_PERSON_REVIEW_MIN_FACE_COUNT),
+        ),
+        encoding="utf-8",
+    )
+    return pages
+
+
 def _safe_bbox(bbox: np.ndarray, width: int, height: int) -> tuple[int, int, int, int]:
     x1, y1, x2, y2 = [int(v) for v in bbox.tolist()]
     x1 = max(0, min(x1, width - 1))
@@ -1701,19 +2746,222 @@ def _init_detection_model(insightface_root: Path, detector_model_name: str, det_
     return detector
 
 
+def _run_detection_items(
+    source_dir: Path,
+    output_dir: Path,
+    insightface_root: Path,
+    detector_model_name: str,
+    det_size: int,
+    preview_max_side: int,
+    items: list[dict[str, str]],
+    detect_restart_interval: int,
+) -> int:
+    if not items:
+        return 0
+
+    dirs = _ensure_dirs(output_dir)
+    conn = open_pipeline_db(dirs["db"])
+    safe_restart_interval = max(1, int(detect_restart_interval))
+    detector: FaceAnalysis | None = None
+    last_restart_processed_count = 0
+    processed_count = 0
+    total_items = len(items)
+    try:
+        for idx, item in enumerate(items, start=1):
+            source_key = str(item["source_key"])
+            relpath = str(item["photo_relpath"])
+            image_path = source_dir / relpath
+
+            if detector is None or (processed_count - last_restart_processed_count) >= safe_restart_interval:
+                if detector is not None:
+                    del detector
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                detector = _init_detection_model(
+                    insightface_root=insightface_root,
+                    detector_model_name=detector_model_name,
+                    det_size=det_size,
+                )
+                last_restart_processed_count = processed_count
+
+            print(f"[det {idx}/{total_items}] 处理 {relpath}")
+
+            rgb_image: Image.Image | None = None
+            rgb_arr: np.ndarray | None = None
+            bgr_arr: np.ndarray | None = None
+            faces = None
+            crop_img: Image.Image | None = None
+            context_img: Image.Image | None = None
+            aligned_bgr: np.ndarray | None = None
+            try:
+                if not image_path.exists():
+                    raise FileNotFoundError(f"图片不存在: {image_path}")
+                rgb_image = _load_rgb_image(image_path)
+                rgb_arr = np.asarray(rgb_image)
+                bgr_arr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+                height, width = bgr_arr.shape[:2]
+
+                photo_key = hashlib.sha1(relpath.encode("utf-8")).hexdigest()[:16]
+
+                faces = detector.get(bgr_arr)
+                for face_idx, face in enumerate(faces):
+                    if getattr(face, "kps", None) is None:
+                        continue
+
+                    bbox = _safe_bbox(face.bbox, width=width, height=height)
+                    x1, y1, x2, y2 = bbox
+                    area_ratio = float((x2 - x1) * (y2 - y1) / max(1, width * height))
+                    det_conf = float(getattr(face, "det_score", 0.0))
+
+                    face_id = f"{photo_key}_{face_idx:03d}"
+                    crop_name = f"{face_id}.jpg"
+                    context_name = f"{face_id}.jpg"
+                    aligned_name = f"{face_id}.png"
+                    aligned_relpath = f"assets/aligned/{aligned_name}"
+
+                    crop_img = _make_crop(image=rgb_image, bbox=bbox)
+                    crop_img.save(dirs["crop"] / crop_name, format="JPEG", quality=92)
+                    crop_img = None
+
+                    context_img = _make_context(image=rgb_image, bbox=bbox, max_side=preview_max_side)
+                    context_img.save(dirs["context"] / context_name, format="JPEG", quality=88)
+                    context_img = None
+
+                    aligned_bgr = face_align.norm_crop(bgr_arr, face.kps, image_size=112)
+                    cv2.imwrite(str(dirs["aligned"] / aligned_name), aligned_bgr)
+                    aligned_bgr = None
+
+                    upsert_detected_face(
+                        conn,
+                        {
+                            "face_id": face_id,
+                            "photo_relpath": relpath,
+                            "crop_relpath": f"assets/crops/{crop_name}",
+                            "context_relpath": f"assets/context/{context_name}",
+                            "preview_relpath": "",
+                            "aligned_relpath": aligned_relpath,
+                            "bbox": [x1, y1, x2, y2],
+                            "detector_confidence": det_conf,
+                            "face_area_ratio": area_ratio,
+                        },
+                    )
+                _mark_source_image_detect_result(conn, source_key=source_key, photo_relpath=relpath, status="done")
+                processed_count += 1
+            except Exception as exc:  # pragma: no cover
+                _mark_source_image_detect_result(
+                    conn, source_key=source_key, photo_relpath=relpath, status="error", error=str(exc)
+                )
+                processed_count += 1
+            finally:
+                del rgb_image, rgb_arr, bgr_arr, faces, crop_img, context_img, aligned_bgr
+                if idx % 20 == 0:
+                    gc.collect()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+            _refresh_source_detect_stage(conn, source_key=source_key)
+        return processed_count
+    finally:
+        if detector is not None:
+            del detector
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        conn.close()
+
+
+def _run_detection_worker_batch(
+    source_dir: Path,
+    output_dir: Path,
+    insightface_root: Path,
+    detector_model_name: str,
+    det_size: int,
+    preview_max_side: int,
+    source_key: str,
+    batch_size: int,
+    detect_restart_interval: int,
+) -> int:
+    dirs = _ensure_dirs(output_dir)
+    conn = open_pipeline_db(dirs["db"])
+    try:
+        items = _list_pending_source_images_for_source(conn, source_key=source_key, limit=batch_size)
+    finally:
+        conn.close()
+    if not items:
+        return 0
+    print(f"detect worker：source={source_key} batch={len(items)}")
+    return _run_detection_items(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        insightface_root=insightface_root,
+        detector_model_name=detector_model_name,
+        det_size=det_size,
+        preview_max_side=preview_max_side,
+        items=items,
+        detect_restart_interval=detect_restart_interval,
+    )
+
+
+def _run_detection_subprocess_worker(
+    *,
+    source_dir: Path,
+    output_dir: Path,
+    insightface_root: Path,
+    detector_model_name: str,
+    det_size: int,
+    preview_max_side: int,
+    source_key: str,
+    batch_size: int,
+    detect_restart_interval: int,
+) -> int:
+    repo_root = Path(__file__).resolve().parent.parent
+    command = [
+        sys.executable,
+        "-m",
+        "hikbox_pictures.face_review_pipeline",
+        "--detect-worker",
+        "--source",
+        str(source_dir),
+        "--output",
+        str(output_dir),
+        "--insightface-root",
+        str(insightface_root),
+        "--detector-model-name",
+        str(detector_model_name),
+        "--det-size",
+        str(int(det_size)),
+        "--preview-max-side",
+        str(int(preview_max_side)),
+        "--detect-restart-interval",
+        str(int(detect_restart_interval)),
+        "--detect-worker-source-key",
+        str(source_key),
+        "--detect-worker-batch-size",
+        str(max(1, int(batch_size))),
+    ]
+    subprocess.run(command, check=True, cwd=str(repo_root))
+    return max(1, int(batch_size))
+
+
 def _cluster_with_hdbscan(
-    embeddings: list[list[float]],
+    embeddings: list[list[float]] | np.ndarray,
     min_cluster_size: int,
     min_samples: int,
 ) -> tuple[list[int], list[float]]:
     import hdbscan
 
-    if not embeddings:
-        return [], []
-    if len(embeddings) < max(2, min_cluster_size, min_samples):
-        return [-1 for _ in embeddings], [0.0 for _ in embeddings]
+    if isinstance(embeddings, np.ndarray):
+        vectors = np.asarray(embeddings, dtype=np.float32)
+    else:
+        if not embeddings:
+            return [], []
+        vectors = np.asarray(embeddings, dtype=np.float32)
 
-    vectors = np.asarray(embeddings, dtype=np.float32)
+    if vectors.ndim != 2 or int(vectors.shape[0]) <= 0:
+        return [], []
+    if int(vectors.shape[0]) < max(2, min_cluster_size, min_samples):
+        return [-1 for _ in range(int(vectors.shape[0]))], [0.0 for _ in range(int(vectors.shape[0]))]
+
     clusterer = hdbscan.HDBSCAN(
         min_cluster_size=max(2, int(min_cluster_size)),
         min_samples=max(1, int(min_samples)),
@@ -1726,10 +2974,7 @@ def _cluster_with_hdbscan(
     return labels, probabilities
 
 
-def _ensure_dirs(output_dir: Path, reset_output: bool) -> dict[str, Path]:
-    if reset_output and output_dir.exists():
-        shutil.rmtree(output_dir)
-
+def _ensure_dirs(output_dir: Path) -> dict[str, Path]:
     (output_dir / "assets" / "crops").mkdir(parents=True, exist_ok=True)
     (output_dir / "assets" / "context").mkdir(parents=True, exist_ok=True)
     (output_dir / "assets" / "aligned").mkdir(parents=True, exist_ok=True)
@@ -1750,173 +2995,131 @@ def run_detection_stage(
     detector_model_name: str,
     det_size: int,
     preview_max_side: int,
-    max_images: int | None,
-    reset_output: bool,
     detect_restart_interval: int = 300,
-    detect_skip_existing: bool = True,
-    detect_max_images_per_run: int | None = None,
+    refresh_discover: bool = False,
 ) -> dict[str, Any]:
-    dirs = _ensure_dirs(output_dir, reset_output=reset_output)
+    dirs = _ensure_dirs(output_dir)
     conn = open_pipeline_db(dirs["db"])
-    if reset_output:
-        reset_pipeline_state(conn)
-
-    image_paths = iter_image_files(source_dir)
-    if max_images is not None and max_images > 0:
-        image_paths = image_paths[:max_images]
+    _bootstrap_sources_if_needed(conn, source_dir)
+    if refresh_discover:
+        _refresh_discoverable_sources(conn, source_dir)
+    sources = list_pipeline_sources(conn)
 
     set_meta(conn, "source", str(source_dir))
     set_meta(conn, "detector_model_name", detector_model_name)
     set_meta(conn, "det_size", det_size)
     set_meta(conn, "preview_max_side", preview_max_side)
-    set_meta(conn, "max_images", max_images)
     set_meta(conn, "last_detection_at", datetime.now().isoformat(timespec="seconds"))
+    set_meta(conn, "source_scan_mode", "source_staged_db_resume")
+    set_meta(conn, "source_count", len(sources))
+    set_meta(conn, "source_refresh_requested", bool(refresh_discover))
 
-    print("阶段 detect：检测 + 预处理")
-    safe_restart_interval = max(1, int(detect_restart_interval))
-    safe_max_images_per_run = (
-        max(1, int(detect_max_images_per_run))
-        if detect_max_images_per_run is not None and int(detect_max_images_per_run) > 0
-        else None
+    print("阶段 detect：source discover -> detect pending 队列")
+    discover_source_count = 0
+    new_discovered_count = 0
+    for source in sources:
+        if str(source.get("discover_status", "pending")) == "done":
+            continue
+        discover_source_count += 1
+        source_key = str(source["source_key"])
+        source_relpath = str(source["source_relpath"])
+        _set_source_stage_status(conn, source_key=source_key, stage="discover", status="running")
+        conn.commit()
+        relpaths = _iter_source_image_relpaths(source_dir=source_dir, source_relpath=source_relpath)
+        new_discovered_count += _register_source_images(conn, source_key=source_key, photo_relpaths=relpaths)
+        _set_source_stage_status(conn, source_key=source_key, stage="discover", status="done")
+        _refresh_source_detect_stage(conn, source_key=source_key)
+        conn.commit()
+
+    for source in list_pipeline_sources(conn):
+        _refresh_source_detect_stage(conn, source_key=str(source["source_key"]))
+
+    _refresh_all_source_embed_stage(conn)
+    _refresh_all_source_cluster_stage(conn)
+
+    discovered_image_count = _count_source_images(conn)
+    set_meta(conn, "discovered_image_count", discovered_image_count)
+
+    pending_items = _list_pending_source_images(conn)
+    total_pending = len(pending_items)
+    already_processed_count = max(discovered_image_count - total_pending, 0)
+    print(
+        f"detect discover：source_discovered={discover_source_count} "
+        f"total={discovered_image_count} "
+        f"new={new_discovered_count} "
+        f"already_done={already_processed_count} "
+        f"pending={total_pending}"
     )
-    effective_restart_interval = safe_restart_interval
-    if safe_max_images_per_run is not None:
-        # 分批模式会通过子进程重启来回收内存，避免在同一进程内反复重建 detector。
-        effective_restart_interval = max(effective_restart_interval, safe_max_images_per_run + 1)
-    detector: FaceAnalysis | None = None
-    last_restart_idx = 0
 
-    processed_relpaths: set[str] = set()
-    if detect_skip_existing:
-        processed_relpaths.update(
-            str(row["photo_relpath"])
-            for row in conn.execute("SELECT photo_relpath FROM processed_images").fetchall()
-        )
-        # 兼容旧输出目录：尚未有 processed_images 表时，仍可利用已有检测结果做跳过。
-        processed_relpaths.update(
-            str(row["photo_relpath"])
-            for row in conn.execute("SELECT DISTINCT photo_relpath FROM detected_faces").fetchall()
-        )
-        processed_relpaths.update(str(row["photo_relpath"]) for row in conn.execute("SELECT photo_relpath FROM failed_images").fetchall())
+    if total_pending <= 0:
+        source_stage_counts = _build_source_stage_counts(conn)
+        summary = {
+            "image_count": discovered_image_count,
+            "discovered_image_count": discovered_image_count,
+            "new_discovered_image_count": new_discovered_count,
+            "skipped_image_count": already_processed_count,
+            "pending_image_count": 0,
+            "processed_image_count": 0,
+            "remaining_image_count": 0,
+            "detected_face_count": count_all_faces(conn),
+            "pending_face_count": count_pending_faces(conn),
+            "failed_image_count": len(list_failed_images(conn)),
+            "db_path": str(dirs["db"]),
+            **source_stage_counts,
+        }
+        conn.close()
+        return summary
 
-    skipped_count = 0
+    safe_restart_interval = max(1, int(detect_restart_interval))
     processed_count = 0
 
-    total = len(image_paths)
-    for idx, image_path in enumerate(image_paths, start=1):
-        relpath = image_path.relative_to(source_dir).as_posix()
-        if detect_skip_existing and relpath in processed_relpaths:
-            skipped_count += 1
-            print(f"[det {idx}/{total}] 跳过已处理 {relpath}")
-            continue
+    pending_source_keys = sorted({str(item["source_key"]) for item in pending_items})
+    for source_key in pending_source_keys:
+        _set_source_stage_status(conn, source_key=source_key, stage="detect", status="running")
+    conn.commit()
 
-        if detector is None or (idx - last_restart_idx) >= effective_restart_interval:
-            if detector is not None:
-                del detector
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            detector = _init_detection_model(
+    for source_key in pending_source_keys:
+        while True:
+            batch_items = _list_pending_source_images_for_source(conn, source_key=source_key, limit=safe_restart_interval)
+            if not batch_items:
+                _refresh_source_detect_stage(conn, source_key=source_key)
+                break
+            batch_size = len(batch_items)
+            print(
+                f"阶段 detect：启动子进程处理批次 source={source_key} "
+                f"batch={batch_size} "
+                f"总体进度={processed_count}/{total_pending}"
+            )
+            processed_count += _run_detection_subprocess_worker(
+                source_dir=source_dir,
+                output_dir=output_dir,
                 insightface_root=insightface_root,
                 detector_model_name=detector_model_name,
                 det_size=det_size,
+                preview_max_side=preview_max_side,
+                source_key=source_key,
+                batch_size=batch_size,
+                detect_restart_interval=safe_restart_interval,
             )
-            last_restart_idx = idx
+            _refresh_source_detect_stage(conn, source_key=source_key)
 
-        print(f"[det {idx}/{total}] 处理 {relpath}")
-
-        rgb_image: Image.Image | None = None
-        rgb_arr: np.ndarray | None = None
-        bgr_arr: np.ndarray | None = None
-        faces = None
-        crop_img: Image.Image | None = None
-        context_img: Image.Image | None = None
-        aligned_bgr: np.ndarray | None = None
-        try:
-            rgb_image = _load_rgb_image(image_path)
-            rgb_arr = np.asarray(rgb_image)
-            bgr_arr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
-            height, width = bgr_arr.shape[:2]
-
-            photo_key = hashlib.sha1(relpath.encode("utf-8")).hexdigest()[:16]
-
-            faces = detector.get(bgr_arr)
-            clear_failed_image(conn, relpath)
-            for face_idx, face in enumerate(faces):
-                if getattr(face, "kps", None) is None:
-                    continue
-
-                bbox = _safe_bbox(face.bbox, width=width, height=height)
-                x1, y1, x2, y2 = bbox
-                area_ratio = float((x2 - x1) * (y2 - y1) / max(1, width * height))
-                det_conf = float(getattr(face, "det_score", 0.0))
-
-                face_id = f"{photo_key}_{face_idx:03d}"
-                crop_name = f"{face_id}.jpg"
-                context_name = f"{face_id}.jpg"
-                aligned_name = f"{face_id}.png"
-                aligned_relpath = f"assets/aligned/{aligned_name}"
-
-                crop_img = _make_crop(image=rgb_image, bbox=bbox)
-                crop_img.save(dirs["crop"] / crop_name, format="JPEG", quality=92)
-                crop_img = None
-
-                context_img = _make_context(image=rgb_image, bbox=bbox, max_side=preview_max_side)
-                context_img.save(dirs["context"] / context_name, format="JPEG", quality=88)
-                context_img = None
-
-                aligned_bgr = face_align.norm_crop(bgr_arr, face.kps, image_size=112)
-                cv2.imwrite(str(dirs["aligned"] / aligned_name), aligned_bgr)
-                aligned_bgr = None
-
-                upsert_detected_face(
-                    conn,
-                    {
-                        "face_id": face_id,
-                        "photo_relpath": relpath,
-                        "crop_relpath": f"assets/crops/{crop_name}",
-                        "context_relpath": f"assets/context/{context_name}",
-                        "preview_relpath": "",
-                        "aligned_relpath": aligned_relpath,
-                        "bbox": [x1, y1, x2, y2],
-                        "detector_confidence": det_conf,
-                        "face_area_ratio": area_ratio,
-                    },
-                )
-            upsert_processed_image(conn, relpath, status="ok", face_count=len(faces))
-            processed_relpaths.add(relpath)
-            processed_count += 1
-        except Exception as exc:  # pragma: no cover
-            upsert_failed_image(conn, relpath, str(exc))
-            upsert_processed_image(conn, relpath, status="error", face_count=0, error=str(exc))
-            processed_relpaths.add(relpath)
-            processed_count += 1
-        finally:
-            del rgb_image, rgb_arr, bgr_arr, faces, crop_img, context_img, aligned_bgr
-            if idx % 20 == 0:
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-        if safe_max_images_per_run is not None and processed_count >= safe_max_images_per_run:
-            print(f"[det] 达到单次处理上限 {safe_max_images_per_run}，提前结束本轮 detect")
-            break
-
-    if detector is not None:
-        del detector
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
+    _refresh_all_source_embed_stage(conn)
+    _refresh_all_source_cluster_stage(conn)
+    remaining_pending = len(_list_pending_source_images(conn))
+    source_stage_counts = _build_source_stage_counts(conn)
     summary = {
-        "image_count": len(image_paths),
-        "skipped_image_count": skipped_count,
+        "image_count": discovered_image_count,
+        "discovered_image_count": discovered_image_count,
+        "new_discovered_image_count": new_discovered_count,
+        "skipped_image_count": already_processed_count,
+        "pending_image_count": total_pending,
         "processed_image_count": processed_count,
-        "remaining_image_count": len([path for path in image_paths if path.relative_to(source_dir).as_posix() not in processed_relpaths]),
+        "remaining_image_count": remaining_pending,
         "detected_face_count": count_all_faces(conn),
         "pending_face_count": count_pending_faces(conn),
         "failed_image_count": len(list_failed_images(conn)),
         "db_path": str(dirs["db"]),
+        **source_stage_counts,
     }
     conn.close()
     return summary
@@ -1925,63 +3128,120 @@ def run_detection_stage(
 def run_embedding_stage(
     output_dir: Path,
     magface_checkpoint: Path,
+    enable_flip_embedding: bool = False,
+    flip_weight: float = 1.0,
 ) -> dict[str, Any]:
-    dirs = _ensure_dirs(output_dir, reset_output=False)
+    dirs = _ensure_dirs(output_dir)
     conn = open_pipeline_db(dirs["db"])
+    _refresh_all_source_embed_stage(conn)
+    _refresh_all_source_cluster_stage(conn)
 
-    pending_rows = list(iter_faces_pending_embedding(conn))
-    pending_count = len(pending_rows)
+    pending_count = count_pending_faces(conn)
     print(f"阶段 embed：MagFace embedding（待处理 {pending_count}）")
 
     if pending_count == 0:
+        source_stage_counts = _build_source_stage_counts(conn)
         summary = {
             "pending_face_count": 0,
-            "embedded_face_count": len(list(iter_embedded_faces(conn))),
-            "failed_face_count": len(list_failed_faces(conn)),
+            "embedded_face_count": count_embedded_faces(conn),
+            "failed_face_count": count_failed_faces(conn),
             "db_path": str(dirs["db"]),
+            **source_stage_counts,
         }
         conn.close()
         return summary
 
+    running_source_rows = conn.execute(
+        """
+        SELECT DISTINCT src.source_key
+        FROM detected_faces AS face
+        INNER JOIN source_images AS src ON src.photo_relpath = face.photo_relpath
+        WHERE face.embedding_blob IS NULL
+          AND face.embedding_json IS NULL
+          AND face.face_error IS NULL
+        ORDER BY src.source_key
+        """
+    ).fetchall()
+    for row in running_source_rows:
+        _set_source_stage_status(conn, source_key=str(row["source_key"]), stage="embed", status="running")
+    conn.commit()
+
     embedder = MagFaceEmbedder(checkpoint_path=magface_checkpoint)
+    safe_flip_weight = float(flip_weight)
+    enable_flip_cache = bool(enable_flip_embedding) and safe_flip_weight > 0
+    flip_embeddings: dict[str, list[float]] = {}
+    pending_rows = iter_faces_pending_embedding(conn)
+    embedded_batch: list[tuple[str, list[float] | np.ndarray, float, float]] = []
+    error_batch: list[tuple[str, str]] = []
+    batch_size = 256
     for idx, row in enumerate(pending_rows, start=1):
+        face_id = str(row.get("face_id", ""))
         try:
             aligned_path = output_dir / str(row["aligned_relpath"])
             aligned_bgr = cv2.imread(str(aligned_path), cv2.IMREAD_COLOR)
             if aligned_bgr is None:
                 raise FileNotFoundError(f"aligned 文件不存在或无法读取: {aligned_path}")
 
-            embedding, magface_quality = embedder.embed(aligned_bgr)
+            embedding_main, magface_quality = embedder.embed(aligned_bgr)
+            if enable_flip_cache:
+                aligned_bgr_flip = cv2.flip(aligned_bgr, 1)
+                embedding_flip, _ = embedder.embed(aligned_bgr_flip)
+                flip_embeddings[face_id] = embedding_flip
             det_conf = float(row["detector_confidence"])
             area_ratio = float(row["face_area_ratio"])
             quality_score = float(magface_quality * max(0.05, det_conf) * np.sqrt(max(area_ratio, 1e-9)))
 
-            mark_face_embedded(
-                conn,
-                face_id=str(row["face_id"]),
-                embedding=embedding,
-                magface_quality=magface_quality,
-                quality_score=quality_score,
+            embedded_batch.append(
+                (
+                    face_id,
+                    embedding_main,
+                    magface_quality,
+                    quality_score,
+                )
             )
         except Exception as exc:  # pragma: no cover
-            mark_face_error(conn, str(row.get("face_id", "")), str(exc))
+            error_batch.append((face_id, str(exc)))
+
+        if len(embedded_batch) >= batch_size:
+            mark_faces_embedded_batch(conn, embedded_batch)
+            embedded_batch = []
+        if len(error_batch) >= batch_size:
+            mark_face_errors_batch(conn, error_batch)
+            error_batch = []
 
         if idx % 200 == 0 or idx == pending_count:
             print(f"[emb {idx}/{pending_count}]")
+
+    if embedded_batch:
+        mark_faces_embedded_batch(conn, embedded_batch)
+    if error_batch:
+        mark_face_errors_batch(conn, error_batch)
 
     del embedder
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
+    flip_cache_path = _flip_embedding_cache_path(output_dir)
+    if enable_flip_cache:
+        _save_flip_embeddings_cache(output_dir, flip_embeddings)
+    elif flip_cache_path.exists():
+        flip_cache_path.unlink()
+
     set_meta(conn, "magface_checkpoint", str(magface_checkpoint))
+    set_meta(conn, "embedding_flip_enabled", bool(enable_flip_cache))
+    set_meta(conn, "embedding_flip_weight", safe_flip_weight)
     set_meta(conn, "last_embedding_at", datetime.now().isoformat(timespec="seconds"))
+    _refresh_all_source_embed_stage(conn)
+    _refresh_all_source_cluster_stage(conn)
+    source_stage_counts = _build_source_stage_counts(conn)
 
     summary = {
         "pending_face_count": pending_count,
-        "embedded_face_count": len(list(iter_embedded_faces(conn))),
-        "failed_face_count": len(list_failed_faces(conn)),
+        "embedded_face_count": count_embedded_faces(conn),
+        "failed_face_count": count_failed_faces(conn),
         "db_path": str(dirs["db"]),
+        **source_stage_counts,
     }
     conn.close()
     return summary
@@ -2005,7 +3265,19 @@ def _observation_to_face_row(obs: FaceObservation, include_embedding: bool = Tru
     }
     if include_embedding:
         row["embedding"] = obs.embedding
+        if obs.embedding_flip is not None:
+            row["embedding_flip"] = obs.embedding_flip
     return row
+
+
+def _load_existing_manifest(output_dir: Path) -> dict[str, Any] | None:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def run_cluster_stage(
@@ -2022,39 +3294,97 @@ def run_cluster_stage(
     person_enable_same_photo_cannot_link: bool,
     preview_max_side: int,
     magface_checkpoint: Path,
-    person_consensus_distance_threshold: float | None = None,
+    person_consensus_distance_threshold: float | None = 0.24,
     person_consensus_margin_threshold: float = 0.04,
     person_consensus_rep_top_k: int = 3,
     low_quality_micro_cluster_max_size: int = 3,
     low_quality_micro_cluster_top2_weight: float = 0.5,
-    low_quality_micro_cluster_min_quality_evidence: float | None = None,
-    face_min_quality_for_assignment: float | None = None,
-    person_cluster_recall_distance_threshold: float | None = None,
+    low_quality_micro_cluster_min_quality_evidence: float | None = 0.72,
+    face_min_quality_for_assignment: float | None = 0.25,
+    person_cluster_recall_distance_threshold: float | None = 0.32,
     person_cluster_recall_margin_threshold: float = 0.04,
     person_cluster_recall_top_n: int = 5,
     person_cluster_recall_min_votes: int = 3,
-    person_cluster_recall_source_max_cluster_size: int = 3,
+    person_cluster_recall_source_max_cluster_size: int = 20,
     person_cluster_recall_source_max_person_faces: int = 8,
     person_cluster_recall_target_min_person_faces: int = 40,
     person_cluster_recall_max_rounds: int = 2,
 ) -> dict[str, Any]:
-    dirs = _ensure_dirs(output_dir, reset_output=False)
+    dirs = _ensure_dirs(output_dir)
     conn = open_pipeline_db(dirs["db"])
+    _refresh_all_source_embed_stage(conn)
+    _refresh_all_source_cluster_stage(conn)
+    sources = list_pipeline_sources(conn)
+    pending_cluster_sources = [
+        str(source["source_key"])
+        for source in sources
+        if str(source.get("embed_status", "pending")) == "done"
+        and str(source.get("cluster_status", "pending")) == "pending"
+    ]
+
+    existing_payload = _load_existing_manifest(output_dir)
+    if not pending_cluster_sources and existing_payload is not None:
+        source_stage_counts = _build_source_stage_counts(conn)
+        image_count = int(get_meta(conn, "discovered_image_count", 0) or 0)
+        if image_count <= 0:
+            image_count = _count_source_images(conn)
+        existing_payload["failed_images"] = list_failed_images(conn)
+        existing_payload["failed_faces"] = list_failed_faces(conn)
+        existing_payload.setdefault("meta", {})
+        existing_payload["meta"].update(
+            {
+                "source": str(source_dir),
+                "image_count": image_count,
+                "detected_face_count": count_all_faces(conn),
+                "db_path": str(dirs["db"]),
+                **source_stage_counts,
+            }
+        )
+        person_pages = write_person_review_pages(output_dir=output_dir, payload=existing_payload)
+        existing_payload["meta"]["person_review_page_count"] = len(person_pages)
+        existing_payload["meta"]["person_review_pages_manifest"] = "review_person_pages.json"
+        existing_payload["meta"]["large_person_review_min_face_count"] = int(LARGE_PERSON_REVIEW_MIN_FACE_COUNT)
+        existing_payload["meta"]["large_person_review_page_count"] = len(person_pages)
+        existing_payload["meta"]["large_person_review_pages_manifest"] = "review_person_pages_over_100.json"
+        existing_payload["meta"]["large_person_review_index_html"] = "review_person_pages_over_100.html"
+        (output_dir / "manifest.json").write_text(
+            json.dumps(existing_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (output_dir / "review.html").write_text(render_review_html(existing_payload), encoding="utf-8")
+        conn.close()
+        return existing_payload
+
+    for source in sources:
+        source_key = str(source["source_key"])
+        embed_status = str(source.get("embed_status", "pending"))
+        cluster_status = str(source.get("cluster_status", "pending"))
+        if embed_status == "done" and cluster_status == "pending":
+            _set_source_stage_status(conn, source_key=source_key, stage="cluster", status="running")
+    conn.commit()
 
     failed_images = list_failed_images(conn)
     failed_faces = list_failed_faces(conn)
+    flip_embeddings_by_face = _load_flip_embeddings_cache(output_dir)
 
     observations: list[FaceObservation] = []
-    for row in iter_embedded_faces(conn):
+    embedding_vectors: list[np.ndarray] = []
+    for row in iter_embedded_faces(conn, as_numpy=True):
+        embedding_main = _coerce_embedding_vector(row.get("embedding"))
+        if embedding_main is None:
+            continue
         bbox_values = [int(v) for v in row["bbox"]]
+        face_id = str(row["face_id"])
+        embedding_flip = _coerce_embedding_vector(flip_embeddings_by_face.get(face_id))
         observations.append(
             FaceObservation(
-                face_id=str(row["face_id"]),
+                face_id=face_id,
                 photo_relpath=str(row["photo_relpath"]),
                 crop_relpath=str(row["crop_relpath"]),
                 context_relpath=str(row["context_relpath"]),
                 bbox=(bbox_values[0], bbox_values[1], bbox_values[2], bbox_values[3]),
-                embedding=list(row["embedding"]),
+                embedding=embedding_main,
+                embedding_flip=embedding_flip,
                 detector_confidence=float(row["detector_confidence"]),
                 face_area_ratio=float(row["face_area_ratio"]),
                 magface_quality=float(row["magface_quality"]),
@@ -2062,12 +3392,18 @@ def run_cluster_stage(
                 cluster_assignment_source=row.get("cluster_assignment_source"),
             )
         )
+        embedding_vectors.append(embedding_main)
 
-    labels, probabilities = _cluster_with_hdbscan(
-        [list(obs.embedding) for obs in observations],
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-    )
+    if embedding_vectors:
+        embedding_matrix = np.stack(embedding_vectors, axis=0)
+        labels, probabilities = _cluster_with_hdbscan(
+            embedding_matrix,
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+        )
+        del embedding_matrix
+    else:
+        labels, probabilities = [], []
 
     face_quality_excluded_flags = [False for _ in observations]
     face_quality_excluded_count = 0
@@ -2130,6 +3466,7 @@ def run_cluster_stage(
             margin_threshold=float(person_consensus_margin_threshold),
         )
 
+    cluster_updates_batch: list[tuple[str, int, float | None, str | None]] = []
     for obs, label, probability in zip(observations, labels, probabilities, strict=True):
         obs.cluster_label = int(label)
         obs.cluster_probability = None if probability is None else float(probability)
@@ -2140,7 +3477,12 @@ def run_cluster_stage(
         else:
             assignment_source = "hdbscan"
         obs.cluster_assignment_source = assignment_source
-        update_cluster_result(conn, obs.face_id, int(label), probability, assignment_source)
+        cluster_updates_batch.append((obs.face_id, int(label), probability, assignment_source))
+        if len(cluster_updates_batch) >= 512:
+            update_cluster_results_batch(conn, cluster_updates_batch)
+            cluster_updates_batch = []
+    if cluster_updates_batch:
+        update_cluster_results_batch(conn, cluster_updates_batch)
 
     face_rows = [_observation_to_face_row(obs, include_embedding=True) for obs in observations]
     face_rows.sort(key=lambda row: (1 if row.get("cluster_label") == -1 else 0, -(row.get("quality_score") or 0.0)))
@@ -2183,11 +3525,14 @@ def run_cluster_stage(
     # embedding 仅用于二阶段聚合，不写入最终清单，避免 manifest 体积膨胀。
     for row in face_rows:
         row.pop("embedding", None)
+        row.pop("embedding_flip", None)
 
-    image_count = int(get_meta(conn, "max_images", 0) or 0)
+    image_count = int(get_meta(conn, "discovered_image_count", 0) or 0)
     if image_count <= 0:
-        image_count = len(iter_image_files(source_dir))
+        image_count = _count_source_images(conn)
 
+    _refresh_all_source_cluster_stage(conn)
+    source_stage_counts = _build_source_stage_counts(conn)
     payload: dict[str, Any] = {
         "meta": {
             "source": str(source_dir),
@@ -2235,6 +3580,7 @@ def run_cluster_stage(
             "preview_max_side": preview_max_side,
             "magface_checkpoint": str(magface_checkpoint),
             "db_path": str(dirs["db"]),
+            **source_stage_counts,
         },
         "failed_images": failed_images,
         "failed_faces": failed_faces,
@@ -2242,6 +3588,16 @@ def run_cluster_stage(
         "clusters": grouped_clusters,
         "person_cluster_recall_events": person_cluster_recall_events,
     }
+
+    person_pages = write_person_review_pages(output_dir=output_dir, payload=payload)
+    payload["meta"]["person_review_page_count"] = len(person_pages)
+    payload["meta"]["person_review_pages_manifest"] = "review_person_pages.json"
+    payload["meta"]["large_person_review_min_face_count"] = int(LARGE_PERSON_REVIEW_MIN_FACE_COUNT)
+    payload["meta"]["large_person_review_page_count"] = len(
+        [page for page in person_pages if int(page.get("person_face_count", 0)) > int(LARGE_PERSON_REVIEW_MIN_FACE_COUNT)]
+    )
+    payload["meta"]["large_person_review_pages_manifest"] = "review_person_pages_over_100.json"
+    payload["meta"]["large_person_review_index_html"] = "review_person_pages_over_100.html"
 
     (output_dir / "manifest.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     (output_dir / "review.html").write_text(render_review_html(payload), encoding="utf-8")
@@ -2257,9 +3613,9 @@ def run_pipeline(
     insightface_root: Path,
     detector_model_name: str,
     det_size: int,
+    embedding_enable_flip: bool,
+    embedding_flip_weight: float,
     detect_restart_interval: int,
-    detect_skip_existing: bool,
-    detect_max_images_per_run: int | None,
     min_cluster_size: int,
     min_samples: int,
     person_merge_threshold: float,
@@ -2283,9 +3639,7 @@ def run_pipeline(
     person_cluster_recall_source_max_person_faces: int,
     person_cluster_recall_target_min_person_faces: int,
     person_cluster_recall_max_rounds: int,
-    max_images: int | None,
-    stage: str,
-    reset_output: bool,
+    refresh_discover: bool = False,
 ) -> dict[str, Any]:
     source_dir = source_dir.resolve()
     output_dir = output_dir.resolve()
@@ -2293,202 +3647,57 @@ def run_pipeline(
     if not source_dir.exists():
         raise FileNotFoundError(f"图库目录不存在: {source_dir}")
 
-    if stage == "detect":
-        summary = run_detection_stage(
-            source_dir=source_dir,
-            output_dir=output_dir,
-            insightface_root=insightface_root,
-            detector_model_name=detector_model_name,
-            det_size=det_size,
-            preview_max_side=preview_max_side,
-            max_images=max_images,
-            reset_output=reset_output,
-            detect_restart_interval=detect_restart_interval,
-            detect_skip_existing=detect_skip_existing,
-            detect_max_images_per_run=detect_max_images_per_run,
-        )
-        return {"meta": {"stage": "detect", **summary}}
-
-    if stage == "embed":
-        summary = run_embedding_stage(
-            output_dir=output_dir,
-            magface_checkpoint=magface_checkpoint,
-        )
-        return {"meta": {"stage": "embed", **summary}}
-
-    if stage == "cluster":
-        return run_cluster_stage(
-            source_dir=source_dir,
-            output_dir=output_dir,
-            detector_model_name=detector_model_name,
-            det_size=det_size,
-            min_cluster_size=min_cluster_size,
-            min_samples=min_samples,
-            person_merge_threshold=person_merge_threshold,
-            person_rep_top_k=person_rep_top_k,
-            person_knn_k=person_knn_k,
-            person_linkage=person_linkage,
-            person_enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
-            preview_max_side=preview_max_side,
-            magface_checkpoint=magface_checkpoint,
-            person_consensus_distance_threshold=person_consensus_distance_threshold,
-            person_consensus_margin_threshold=person_consensus_margin_threshold,
-            person_consensus_rep_top_k=person_consensus_rep_top_k,
-            low_quality_micro_cluster_max_size=low_quality_micro_cluster_max_size,
-            low_quality_micro_cluster_top2_weight=low_quality_micro_cluster_top2_weight,
-            low_quality_micro_cluster_min_quality_evidence=low_quality_micro_cluster_min_quality_evidence,
-            face_min_quality_for_assignment=face_min_quality_for_assignment,
-            person_cluster_recall_distance_threshold=person_cluster_recall_distance_threshold,
-            person_cluster_recall_margin_threshold=person_cluster_recall_margin_threshold,
-            person_cluster_recall_top_n=person_cluster_recall_top_n,
-            person_cluster_recall_min_votes=person_cluster_recall_min_votes,
-            person_cluster_recall_source_max_cluster_size=person_cluster_recall_source_max_cluster_size,
-            person_cluster_recall_source_max_person_faces=person_cluster_recall_source_max_person_faces,
-            person_cluster_recall_target_min_person_faces=person_cluster_recall_target_min_person_faces,
-            person_cluster_recall_max_rounds=person_cluster_recall_max_rounds,
-        )
-
-    # all 阶段通过子进程串行执行，确保每个阶段释放内存。
-    print("all 模式：将按 detect -> embed -> cluster 三个子进程执行")
-    base_cmd = [
-        sys.executable,
-        "-m",
-        "hikbox_pictures.face_review_pipeline",
-        "--source",
-        str(source_dir),
-        "--output",
-        str(output_dir),
-        "--magface-checkpoint",
-        str(magface_checkpoint),
-        "--insightface-root",
-        str(insightface_root),
-        "--detector-model-name",
-        detector_model_name,
-        "--det-size",
-        str(det_size),
-        "--detect-restart-interval",
-        str(detect_restart_interval),
-        "--min-cluster-size",
-        str(min_cluster_size),
-        "--min-samples",
-        str(min_samples),
-        "--person-merge-threshold",
-        str(person_merge_threshold),
-        "--person-rep-top-k",
-        str(person_rep_top_k),
-        "--person-knn-k",
-        str(person_knn_k),
-        "--person-linkage",
-        person_linkage,
-        "--preview-max-side",
-        str(preview_max_side),
-    ]
-    if person_consensus_distance_threshold is not None:
-        base_cmd.extend(
-            [
-                "--person-consensus-distance-threshold",
-                str(person_consensus_distance_threshold),
-                "--person-consensus-margin-threshold",
-                str(person_consensus_margin_threshold),
-                "--person-consensus-rep-top-k",
-                str(person_consensus_rep_top_k),
-            ]
-        )
-    if low_quality_micro_cluster_min_quality_evidence is not None:
-        base_cmd.extend(
-            [
-                "--low-quality-micro-cluster-max-size",
-                str(low_quality_micro_cluster_max_size),
-                "--low-quality-micro-cluster-top2-weight",
-                str(low_quality_micro_cluster_top2_weight),
-                "--low-quality-micro-cluster-min-quality-evidence",
-                str(low_quality_micro_cluster_min_quality_evidence),
-            ]
-        )
-    if face_min_quality_for_assignment is not None:
-        base_cmd.extend(
-            [
-                "--face-min-quality-for-assignment",
-                str(face_min_quality_for_assignment),
-            ]
-        )
-    if person_cluster_recall_distance_threshold is not None:
-        base_cmd.extend(
-            [
-                "--person-cluster-recall-distance-threshold",
-                str(person_cluster_recall_distance_threshold),
-                "--person-cluster-recall-margin-threshold",
-                str(person_cluster_recall_margin_threshold),
-                "--person-cluster-recall-top-n",
-                str(person_cluster_recall_top_n),
-                "--person-cluster-recall-min-votes",
-                str(person_cluster_recall_min_votes),
-                "--person-cluster-recall-source-max-cluster-size",
-                str(person_cluster_recall_source_max_cluster_size),
-                "--person-cluster-recall-source-max-person-faces",
-                str(person_cluster_recall_source_max_person_faces),
-                "--person-cluster-recall-target-min-person-faces",
-                str(person_cluster_recall_target_min_person_faces),
-                "--person-cluster-recall-max-rounds",
-                str(person_cluster_recall_max_rounds),
-            ]
-        )
-    if person_enable_same_photo_cannot_link:
-        base_cmd.append("--person-enable-same-photo-cannot-link")
-    if max_images is not None:
-        base_cmd.extend(["--max-images", str(max_images)])
-    if not detect_skip_existing:
-        base_cmd.append("--detect-no-skip-existing")
-    detect_cmd = base_cmd + ["--stage", "detect"]
-    if reset_output:
-        detect_cmd.append("--reset-output")
-
-    total_image_count = len(iter_image_files(source_dir))
-    expected_total, _, detect_batch_size = compute_detect_workset_stats(
-        total_images=total_image_count,
-        max_images=max_images,
-        processed_count=0,
-        detect_max_images_per_run=detect_max_images_per_run,
+    print("主流程：detect -> embed -> cluster（基于 DB 续跑）")
+    detect_summary = run_detection_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        insightface_root=insightface_root,
+        detector_model_name=detector_model_name,
+        det_size=det_size,
+        preview_max_side=preview_max_side,
+        detect_restart_interval=detect_restart_interval,
+        refresh_discover=refresh_discover,
     )
-    if detect_max_images_per_run is None:
-        print(f"all 模式：未指定 detect 单次处理上限，使用默认分批大小 {detect_batch_size}")
-
-    detect_cmd.extend(["--detect-max-images-per-run", str(int(detect_batch_size))])
-    while True:
-        subprocess.run(detect_cmd, check=True)
-        db_conn = open_pipeline_db(output_dir / "cache" / "pipeline.db")
-        processed_count = int(
-            db_conn.execute(
-                """
-                SELECT COUNT(*) AS c
-                FROM (
-                    SELECT photo_relpath FROM processed_images
-                    UNION
-                    SELECT DISTINCT photo_relpath FROM detected_faces
-                    UNION
-                    SELECT photo_relpath FROM failed_images
-                ) AS merged
-                """
-            ).fetchone()["c"]
-        )
-        db_conn.close()
-
-        expected_total, remaining, _ = compute_detect_workset_stats(
-            total_images=total_image_count,
-            max_images=max_images,
-            processed_count=processed_count,
-            detect_max_images_per_run=detect_batch_size,
-        )
-        print(f"detect 分批进度：processed={processed_count} / total={expected_total} / remaining={remaining}")
-        if remaining <= 0:
-            break
-    subprocess.run(base_cmd + ["--stage", "embed"], check=True)
-    subprocess.run(base_cmd + ["--stage", "cluster"], check=True)
-
-    manifest = output_dir / "manifest.json"
-    if not manifest.exists():
-        raise RuntimeError("all 模式执行后未找到 manifest.json")
-    return json.loads(manifest.read_text(encoding="utf-8"))
+    embed_summary = run_embedding_stage(
+        output_dir=output_dir,
+        magface_checkpoint=magface_checkpoint,
+        enable_flip_embedding=embedding_enable_flip,
+        flip_weight=embedding_flip_weight,
+    )
+    payload = run_cluster_stage(
+        source_dir=source_dir,
+        output_dir=output_dir,
+        detector_model_name=detector_model_name,
+        det_size=det_size,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        person_merge_threshold=person_merge_threshold,
+        person_rep_top_k=person_rep_top_k,
+        person_knn_k=person_knn_k,
+        person_linkage=person_linkage,
+        person_enable_same_photo_cannot_link=person_enable_same_photo_cannot_link,
+        preview_max_side=preview_max_side,
+        magface_checkpoint=magface_checkpoint,
+        person_consensus_distance_threshold=person_consensus_distance_threshold,
+        person_consensus_margin_threshold=person_consensus_margin_threshold,
+        person_consensus_rep_top_k=person_consensus_rep_top_k,
+        low_quality_micro_cluster_max_size=low_quality_micro_cluster_max_size,
+        low_quality_micro_cluster_top2_weight=low_quality_micro_cluster_top2_weight,
+        low_quality_micro_cluster_min_quality_evidence=low_quality_micro_cluster_min_quality_evidence,
+        face_min_quality_for_assignment=face_min_quality_for_assignment,
+        person_cluster_recall_distance_threshold=person_cluster_recall_distance_threshold,
+        person_cluster_recall_margin_threshold=person_cluster_recall_margin_threshold,
+        person_cluster_recall_top_n=person_cluster_recall_top_n,
+        person_cluster_recall_min_votes=person_cluster_recall_min_votes,
+        person_cluster_recall_source_max_cluster_size=person_cluster_recall_source_max_cluster_size,
+        person_cluster_recall_source_max_person_faces=person_cluster_recall_source_max_person_faces,
+        person_cluster_recall_target_min_person_faces=person_cluster_recall_target_min_person_faces,
+        person_cluster_recall_max_rounds=person_cluster_recall_max_rounds,
+    )
+    payload.setdefault("meta", {})
+    payload["meta"]["detect_summary"] = detect_summary
+    payload["meta"]["embed_summary"] = embed_summary
+    return payload
 
 
 def _parse_args() -> argparse.Namespace:
@@ -2505,28 +3714,31 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--detector-model-name", type=str, default="buffalo_l", help="insightface detector model")
     parser.add_argument("--det-size", type=int, default=640, help="检测分辨率")
     parser.add_argument(
+        "--embedding-enable-flip",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="embed 阶段是否计算水平翻转 embedding；默认开启，可用 --no-embedding-enable-flip 关闭",
+    )
+    parser.add_argument(
+        "--embedding-flip-weight",
+        type=float,
+        default=1.0,
+        help="flip 补充证据开关权重；<=0 视为禁用 flip 补充（当前建议保持 1.0）",
+    )
+    parser.add_argument(
         "--detect-restart-interval",
         type=int,
         default=300,
         help="detect 阶段每处理 N 张图后重启一次 detector，抑制长跑内存增长",
     )
     parser.add_argument(
-        "--detect-no-skip-existing",
+        "--refresh",
         action="store_true",
-        help="detect 阶段不跳过已有检测结果（默认会跳过 detected_faces/failed_images 中已处理图片）",
+        help="显式重新执行 source discover；仅重扫文件系统并为新图片入队，不重置已完成 detect",
     )
-    parser.add_argument(
-        "--detect-max-images-per-run",
-        type=int,
-        default=None,
-        help=(
-            "detect 阶段单进程最多处理的图片数；"
-            "stage=all 时不传会使用默认分批大小，stage=detect 时不传则单次跑完"
-        ),
-    )
-    parser.add_argument("--min-cluster-size", type=int, default=3, help="HDBSCAN min_cluster_size")
-    parser.add_argument("--min-samples", type=int, default=2, help="HDBSCAN min_samples")
-    parser.add_argument("--person-merge-threshold", type=float, default=0.24, help="二阶段 AHC 合并阈值（余弦距离）")
+    parser.add_argument("--min-cluster-size", type=int, default=2, help="HDBSCAN min_cluster_size")
+    parser.add_argument("--min-samples", type=int, default=1, help="HDBSCAN min_samples")
+    parser.add_argument("--person-merge-threshold", type=float, default=0.26, help="二阶段 AHC 合并阈值（余弦距离）")
     parser.add_argument("--person-rep-top-k", type=int, default=3, help="每个微簇用于构建代表向量的高质量样本数")
     parser.add_argument("--person-knn-k", type=int, default=8, help="二阶段只在每个微簇的前 K 近邻上尝试合并")
     parser.add_argument(
@@ -2545,8 +3757,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--person-consensus-distance-threshold",
         type=float,
-        default=None,
-        help="基于 person-consensus 的一阶段噪声回挂最大余弦距离；不传则关闭",
+        default=0.24,
+        help="基于 person-consensus 的一阶段噪声回挂最大余弦距离；默认 0.24，传 <=0 可关闭",
     )
     parser.add_argument(
         "--person-consensus-margin-threshold",
@@ -2575,20 +3787,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--low-quality-micro-cluster-min-quality-evidence",
         type=float,
-        default=None,
-        help="低质量微簇回退阈值；不传则关闭（证据分低于阈值的微簇整体回退到 noise）",
+        default=0.72,
+        help="低质量微簇回退阈值；默认 0.72（证据分低于阈值的微簇整体回退到 noise，传 <=0 可关闭）",
     )
     parser.add_argument(
         "--face-min-quality-for-assignment",
         type=float,
-        default=None,
-        help="face 级质量硬排除阈值；低于该阈值的样本直接标记 low_quality_ignored，不参与自动归属",
+        default=0.25,
+        help="face 级质量硬排除阈值；默认 0.25，低于阈值的样本标记为 low_quality_ignored，传 <=0 可关闭",
     )
     parser.add_argument(
         "--person-cluster-recall-distance-threshold",
         type=float,
-        default=None,
-        help="非-noise 微簇归属召回阈值（top-k 平均余弦距离）；不传则关闭该通道",
+        default=0.32,
+        help="非-noise 微簇归属召回阈值（top-k 平均余弦距离）；默认 0.32，传 <=0 可关闭",
     )
     parser.add_argument(
         "--person-cluster-recall-margin-threshold",
@@ -2611,7 +3823,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--person-cluster-recall-source-max-cluster-size",
         type=int,
-        default=3,
+        default=20,
         help="非-noise 微簇归属召回中，允许移动的最大微簇大小",
     )
     parser.add_argument(
@@ -2632,14 +3844,29 @@ def _parse_args() -> argparse.Namespace:
         default=2,
         help="非-noise 微簇归属召回最大迭代轮数",
     )
-    parser.add_argument("--max-images", type=int, default=None, help="仅处理前 N 张图片（调试）")
-    parser.add_argument("--stage", choices=["all", "detect", "embed", "cluster"], default="all", help="分阶段执行")
-    parser.add_argument("--reset-output", action="store_true", help="执行 detect 时先清空输出目录与数据库")
+    parser.add_argument("--detect-worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--detect-worker-source-key", type=str, default="", help=argparse.SUPPRESS)
+    parser.add_argument("--detect-worker-batch-size", type=int, default=0, help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
 def main() -> int:
     args = _parse_args()
+    if args.detect_worker:
+        if not args.detect_worker_source_key:
+            raise ValueError("detect worker 缺少 source_key")
+        _run_detection_worker_batch(
+            source_dir=args.source,
+            output_dir=args.output,
+            insightface_root=args.insightface_root,
+            detector_model_name=args.detector_model_name,
+            det_size=args.det_size,
+            preview_max_side=args.preview_max_side,
+            source_key=args.detect_worker_source_key,
+            batch_size=max(1, int(args.detect_worker_batch_size)),
+            detect_restart_interval=max(1, int(args.detect_restart_interval)),
+        )
+        return 0
     payload = run_pipeline(
         source_dir=args.source,
         output_dir=args.output,
@@ -2647,9 +3874,10 @@ def main() -> int:
         insightface_root=args.insightface_root,
         detector_model_name=args.detector_model_name,
         det_size=args.det_size,
+        embedding_enable_flip=args.embedding_enable_flip,
+        embedding_flip_weight=args.embedding_flip_weight,
         detect_restart_interval=args.detect_restart_interval,
-        detect_skip_existing=not args.detect_no_skip_existing,
-        detect_max_images_per_run=args.detect_max_images_per_run,
+        refresh_discover=args.refresh,
         min_cluster_size=args.min_cluster_size,
         min_samples=args.min_samples,
         person_merge_threshold=args.person_merge_threshold,
@@ -2673,15 +3901,9 @@ def main() -> int:
         person_cluster_recall_source_max_person_faces=args.person_cluster_recall_source_max_person_faces,
         person_cluster_recall_target_min_person_faces=args.person_cluster_recall_target_min_person_faces,
         person_cluster_recall_max_rounds=args.person_cluster_recall_max_rounds,
-        max_images=args.max_images,
-        stage=args.stage,
-        reset_output=args.reset_output,
     )
 
     meta = payload.get("meta", {})
-    if args.stage in {"detect", "embed"}:
-        print(json.dumps(meta, ensure_ascii=False, indent=2))
-        return 0
 
     print(
         "完成："
@@ -2693,6 +3915,12 @@ def main() -> int:
     )
     print(f"HTML: {args.output / 'review.html'}")
     print(f"JSON: {args.output / 'manifest.json'}")
+    person_pages_manifest = meta.get("person_review_pages_manifest")
+    if isinstance(person_pages_manifest, str) and person_pages_manifest:
+        print(f"Person Pages: {args.output / person_pages_manifest}")
+    large_person_review_index_html = meta.get("large_person_review_index_html")
+    if isinstance(large_person_review_index_html, str) and large_person_review_index_html:
+        print(f"Large Person Review: {args.output / large_person_review_index_html}")
     return 0
 
 
