@@ -88,6 +88,7 @@
 | `root_path` | `TEXT` | `NOT NULL UNIQUE` | 源目录绝对路径 |
 | `label` | `TEXT` | `NOT NULL` | 展示名 |
 | `enabled` | `INTEGER` | `NOT NULL DEFAULT 1 CHECK (enabled IN (0,1))` | 是否启用 |
+| `removed_at` | `TEXT` |  | 软删除时间（非空表示已删除） |
 | `last_discovered_at` | `TEXT` |  | 最近 discover 完成时间 |
 | `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
 | `updated_at` | `TEXT` | `NOT NULL` | 更新时间 |
@@ -95,6 +96,11 @@
 索引：
 
 - `idx_library_source_enabled(enabled)`
+
+规则：
+
+- `root_path` 全局唯一（包含已软删除记录）；同一路径不可重复添加。
+- 删除 source 走软删除：写入 `removed_at` 且强制 `enabled=0`，不做物理删除。
 
 #### `scan_session`
 
@@ -115,10 +121,12 @@
 
 - `idx_scan_session_status(status)`
 - `idx_scan_session_created_at(created_at)`
+- `uniq_scan_session_single_active((1)) WHERE status IN ('running','aborting')`
 
 规则：
 
 - `pending_reassign` 不对应独立 `reassign` 会话类型；其处理并入常规 `scan_*` 会话。
+- 通过部分唯一索引保证全局单活：任意时刻最多只有一个 `running/aborting` 会话。
 
 #### `scan_session_source`
 
