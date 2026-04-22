@@ -1,4 +1,4 @@
-"""扫描执行服务（detect 阶段）。"""
+"""扫描执行服务（discover -> metadata -> detect -> assignment）。"""
 
 from __future__ import annotations
 
@@ -11,8 +11,11 @@ from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
+from hikbox_pictures.product.scan.assignment_stage import AssignmentAbortedError, AssignmentStageService
 from hikbox_pictures.product.scan.detect_stage import DetectStageRepository
 from hikbox_pictures.product.scan.detect_worker import run_detect_worker
+from hikbox_pictures.product.scan.discover_stage import DiscoverStageService
+from hikbox_pictures.product.scan.metadata_stage import MetadataStageService
 from hikbox_pictures.product.scan.session_service import ScanSessionRepository
 
 
@@ -53,14 +56,23 @@ class DetectStageRunResult:
     interrupted: bool
 
 
+@dataclass(frozen=True)
+class ScanSessionRunResult:
+    scan_session_id: int
+    detect_result: DetectStageRunResult
+    assignment_run_id: int
+
+
 class ScanExecutionService:
-    """执行 detect 阶段 claim/dispatch/ack。"""
+    """执行扫描主链路并落地冻结 assignment。"""
 
     def __init__(self, *, db_path: Path, output_root: Path):
         self._db_path = Path(db_path)
         self._output_root = Path(output_root)
         self._detect_repo = DetectStageRepository(self._db_path)
         self._session_repo = ScanSessionRepository(self._db_path)
+        self._discover_service = DiscoverStageService(self._db_path)
+        self._metadata_service = MetadataStageService(self._db_path)
 
     def run_detect_stage(
         self,
@@ -162,6 +174,93 @@ class ScanExecutionService:
                 break
 
         return DetectStageRunResult(claimed_batches=claimed_batches, acked_batches=acked_batches, interrupted=False)
+
+    def run_session(
+        self,
+        *,
+        scan_session_id: int,
+        runtime_defaults: ScanRuntimeDefaults | None = None,
+        detector=None,
+    ) -> ScanSessionRunResult:
+        session = self._session_repo.get_session(scan_session_id)
+        if session.status not in {"running", "aborting"}:
+            raise ValueError(f"scan_session 状态不允许执行主链路: {session.status}")
+
+        effective_defaults = runtime_defaults or build_scan_runtime_defaults()
+        effective_defaults = ScanRuntimeDefaults(
+            det_size=effective_defaults.det_size,
+            batch_size=effective_defaults.batch_size,
+            workers=effective_defaults.workers,
+            preview_max_side=480,
+        )
+
+        detect_result = DetectStageRunResult(claimed_batches=0, acked_batches=0, interrupted=False)
+        try:
+            self._discover_service.run(scan_session_id=scan_session_id)
+            self._metadata_service.run(scan_session_id=scan_session_id)
+            detect_result = self.run_detect_stage(
+                scan_session_id=scan_session_id,
+                runtime_defaults=effective_defaults,
+                detector=detector,
+            )
+            if detect_result.interrupted:
+                return ScanSessionRunResult(
+                    scan_session_id=scan_session_id,
+                    detect_result=detect_result,
+                    assignment_run_id=0,
+                )
+            latest = self._session_repo.get_session(scan_session_id)
+            if latest.status == "aborting":
+                self._session_repo.update_status(
+                    scan_session_id,
+                    status="interrupted",
+                    finished_at=datetime.now().isoformat(timespec="seconds"),
+                )
+                return ScanSessionRunResult(
+                    scan_session_id=scan_session_id,
+                    detect_result=detect_result,
+                    assignment_run_id=0,
+                )
+
+            assignment_service = AssignmentStageService(
+                library_db_path=self._db_path,
+                embedding_db_path=self._db_path.parent / "embedding.db",
+                output_root=self._output_root,
+            )
+            assignment_result = assignment_service.run_frozen_v5_assignment(
+                scan_session_id=scan_session_id,
+                run_kind=session.run_kind,
+            )
+            self._session_repo.update_status(
+                scan_session_id,
+                status="completed",
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+            )
+            return ScanSessionRunResult(
+                scan_session_id=scan_session_id,
+                detect_result=detect_result,
+                assignment_run_id=assignment_result.assignment_run_id,
+            )
+        except AssignmentAbortedError:
+            self._session_repo.update_status(
+                scan_session_id,
+                status="interrupted",
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+                last_error="assignment aborted by user",
+            )
+            return ScanSessionRunResult(
+                scan_session_id=scan_session_id,
+                detect_result=detect_result,
+                assignment_run_id=0,
+            )
+        except Exception as exc:
+            self._session_repo.update_status(
+                scan_session_id,
+                status="failed",
+                finished_at=datetime.now().isoformat(timespec="seconds"),
+                last_error=f"scan session failed: {exc}",
+            )
+            raise
 
     def detect_stage_progress(self, *, scan_session_id: int) -> dict[str, object]:
         conn = self._detect_repo.connect()
