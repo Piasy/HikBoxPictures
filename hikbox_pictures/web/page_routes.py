@@ -5,11 +5,15 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from hikbox_pictures.product.db.connection import connect_sqlite
+from hikbox_pictures.product.export import ExportRunLockError
+from hikbox_pictures.product.export.run_service import assert_people_writes_allowed
+from hikbox_pictures.product.people.service import MergeOperationNotFoundError
 from hikbox_pictures.product.scan.detect_stage import build_scan_runtime_defaults
 
 router = APIRouter()
@@ -325,6 +329,31 @@ def people_index(request: Request) -> HTMLResponse:
     return _render(request, "people_index.html", context)
 
 
+@router.post("/people/actions/merge-batch")
+async def people_merge_batch_form(request: Request) -> RedirectResponse:
+    services = _services(request)
+    try:
+        form_values = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+        selected_person_ids = str(form_values.get("selected_person_ids", [""])[0])
+        assert_people_writes_allowed(services.library_db_path)
+        person_ids = _parse_int_csv(selected_person_ids, field_name="selected_person_ids")
+        services.people_service.merge_people(selected_person_ids=person_ids)
+    except (ValueError, ExportRunLockError):
+        return RedirectResponse(url="/?merge_error=1", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(url="/?merge_ok=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/people/actions/undo-last-merge")
+def people_undo_last_merge_form(request: Request) -> RedirectResponse:
+    services = _services(request)
+    try:
+        assert_people_writes_allowed(services.library_db_path)
+        services.people_service.undo_last_merge()
+    except (MergeOperationNotFoundError, ExportRunLockError):
+        return RedirectResponse(url="/?undo_error=1", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse(url="/?undo_ok=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
 @router.get("/people/{person_id}", response_class=HTMLResponse)
 def people_detail(request: Request, person_id: int) -> HTMLResponse:
     services = _services(request)
@@ -405,3 +434,15 @@ def logs_page(request: Request) -> HTMLResponse:
     services = _services(request)
     events = services.ops_event_service.query_events(limit=50, offset=0)
     return _render(request, "logs.html", {"events": events})
+
+
+def _parse_int_csv(raw: str, *, field_name: str) -> list[int]:
+    values: list[int] = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        values.append(int(token))
+    if not values:
+        raise ValueError(f"{field_name} 不能为空")
+    return values

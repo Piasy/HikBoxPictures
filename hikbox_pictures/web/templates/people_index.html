@@ -2,7 +2,7 @@
 {% block content %}
 <h1>人物库</h1>
 <section>
-  <h2>已命名</h2>
+  <h2>已命名人物</h2>
   <ul>
     {% for person in named_people %}
     <li data-testid="named-person-row" data-person-id="{{ person.person_id }}">
@@ -14,7 +14,7 @@
   </ul>
 </section>
 <section>
-  <h2>匿名</h2>
+  <h2>匿名人物</h2>
   <ul>
     {% for person in anonymous_people %}
     <li data-testid="anonymous-person-row" data-person-id="{{ person.person_id }}">
@@ -24,5 +24,16 @@
     <li class="muted">暂无匿名人物</li>
     {% endfor %}
   </ul>
+</section>
+<section>
+  <h2>合并操作</h2>
+  <form data-testid="merge-batch-form" method="post" action="/people/actions/merge-batch">
+    <label for="merge-selected-person-ids">批量合并</label>
+    <input id="merge-selected-person-ids" name="selected_person_ids" placeholder="11,22,33" />
+    <button type="submit">执行批量合并</button>
+  </form>
+  <form data-testid="undo-last-merge-form" method="post" action="/people/actions/undo-last-merge">
+    <button type="submit">撤销最近一次合并</button>
+  </form>
 </section>
 {% endblock %}

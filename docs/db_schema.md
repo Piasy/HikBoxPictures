@@ -572,3 +572,15 @@
 
 - 本文档替代旧 `pipeline.db` 说明，不再描述旧表 `pipeline_sources/source_images/detected_faces/pipeline_meta`。
 - 首版发布后，任何 schema 变更必须走 migration，并同步维护本文档。
+
+## 9. 验收与回归命令（Task11）
+
+建议在仓库根目录执行：
+
+```bash
+source .venv/bin/activate
+python -m pytest tests/integration/test_productization_acceptance.py -v
+./scripts/run_tests.sh
+```
+
+若当前目录是 task worktree 且本地不存在 `.venv`，`scripts/run_tests.sh` 会自动回退到仓库根目录 `.venv`。

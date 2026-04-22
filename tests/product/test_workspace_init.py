@@ -133,3 +133,17 @@ def test_initialize_workspace_repairs_missing_business_table_in_half_initialized
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='face_embedding'",
         ).fetchone()
     assert restored is not None
+
+
+def test_initialize_workspace_creates_external_artifacts_without_legacy_dirs(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    external_root = tmp_path / "external"
+
+    layout = initialize_workspace(workspace_root=workspace_root, external_root=external_root)
+
+    assert layout.crops_root.exists()
+    assert layout.aligned_root.exists()
+    assert layout.context_root.exists()
+    assert layout.logs_root.exists()
+    assert (layout.external_root / "artifacts" / "thumbs").exists() is False
+    assert (layout.external_root / "artifacts" / "ann").exists() is False

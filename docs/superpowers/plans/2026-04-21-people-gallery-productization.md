@@ -1214,7 +1214,7 @@ Expected: PASS。
 - Test: `tests/integration/test_productization_acceptance.py`
 - Test: `scripts/run_tests.sh`
 
-- [ ] **Step 1: 把 spec 的 22 条验收项拆成 22 个独立测试（AC01-AC22），禁止 `run_check/check_id` 分发与硬编码 helper 返回**
+- [x] **Step 1: 把 spec 的 22 条验收项拆成 22 个独立测试（AC01-AC22），禁止 `run_check/check_id` 分发与硬编码 helper 返回**
 
 ```python
 def test_ac03_detect_defaults_persisted_in_db(workspace):
@@ -1240,7 +1240,7 @@ def test_ac21_cli_lock_and_conflict_codes(cli_bin, prepared_workspace):
     assert "SERVE_BLOCKED_BY_ACTIVE_SCAN" in (run.stdout + run.stderr)
 ```
 
-- [ ] **Step 2: 维护 AC01-AC22 对照表（AC 编号 -> 测试函数 -> 断言来源 + spec 条目）**
+- [x] **Step 2: 维护 AC01-AC22 对照表（AC 编号 -> 测试函数 -> 断言来源 + spec 条目）**
 
 | AC 编号 | 测试函数 | 断言来源（含 spec） |
 | --- | --- | --- |
@@ -1267,22 +1267,22 @@ def test_ac21_cli_lock_and_conflict_codes(cli_bin, prepared_workspace):
 | AC21 | `test_ac21_cli_lock_and_conflict_codes` | CLI（真实退出码与输出），spec §17-21 |
 | AC22 | `test_ac22_db_schema_doc_migration_text` | 文档文件文本（`docs/db_schema.md`），spec §17-22 |
 
-- [ ] **Step 3: 落地 DB 真实断言（`sqlite3` 查询字段、约束、索引与数据结果）**
+- [x] **Step 3: 落地 DB 真实断言（`sqlite3` 查询字段、约束、索引与数据结果）**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py::test_ac01_db_schema_constraints_from_sqlite_pragma tests/integration/test_productization_acceptance.py::test_ac03_detect_defaults_persisted_in_db tests/integration/test_productization_acceptance.py::test_ac07_assignment_source_and_noise_rules_from_db tests/integration/test_productization_acceptance.py::test_ac09_assignment_run_snapshot_from_db -v`
 Expected: PASS，断言均来自真实 SQLite 查询。
 
-- [ ] **Step 4: 落地 AC19 的 API+CLI 合同断言（spec §15.3 全核心端点 + CLI 命令面）**
+- [x] **Step 4: 落地 AC19 的 API+CLI 合同断言（spec §15.3 全核心端点 + CLI 命令面）**
 
 Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 tests/integration/test_productization_acceptance.py::test_ac19_api_cli_contract_routes_and_commands tests/integration/test_productization_acceptance.py::test_ac19_api_data_fields_and_db_side_effect_matrix -v`
 Expected: PASS，`AC19` 必须逐端点断言 spec §15.3 成功 `data` 字段：`{session_id,status,resumed}`、`{session_id,status}`、`{session_id,status:"aborting"}`、`{person_id,display_name,is_named}`、`{person_id,face_observation_id,pending_reassign:1}`、`{person_id,excluded_count}`、`{merge_operation_id,winner_person_id,winner_person_uuid}`、`{merge_operation_id,status:"undone"}`、`{items:[...]}`、`{template_id}`、`{template_id,updated:true}`、`{export_run_id,status:"running"}`、`{items:[...]}`，并对每条成功分支做 DB 联动验证。
 
-- [ ] **Step 5: 落地 CLI 真实断言（执行命令并校验退出码与 stdout/stderr）**
+- [x] **Step 5: 落地 CLI 真实断言（执行命令并校验退出码与 stdout/stderr）**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py::test_ac18_export_run_layout_and_collision tests/integration/test_productization_acceptance.py::test_ac21_cli_lock_and_conflict_codes -v`
 Expected: PASS，使用 `subprocess.run` 调用真实 CLI，校验 returncode 与输出内容。
 
-- [ ] **Step 6: 加防伪造约束检查（禁止回退到 `run_check` 或硬编码 helper）**
+- [x] **Step 6: 加防伪造约束检查（禁止回退到 `run_check` 或硬编码 helper）**
 
 Run: `source .venv/bin/activate && rg -n "run_check\\(|check_id|class AcceptanceContext" tests/integration/test_productization_acceptance.py`
 Expected: 无匹配。
@@ -1290,17 +1290,17 @@ Expected: 无匹配。
 Run: `source .venv/bin/activate && rg -n "sqlite3.connect|TestClient\\(|httpx\\.|subprocess.run" tests/integration/test_productization_acceptance.py`
 Expected: 命中 DB/API/CLI 真实 I/O 调用。
 
-- [ ] **Step 7: 先跑验收集成测试并记录缺口**
+- [x] **Step 7: 先跑验收集成测试并记录缺口**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py -v`
 Expected: 首次 FAIL，暴露未闭环项。
 
-- [ ] **Step 8: 补齐验收缺口并复跑到全绿**
+- [x] **Step 8: 补齐验收缺口并复跑到全绿**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py -v`
 Expected: PASS。
 
-- [ ] **Step 9: 更新 `README.md`（安装、初始化、扫描、serve、人物维护、导出、测试命令）并核对 schema 文档一致性**
+- [x] **Step 9: 更新 `README.md`（安装、初始化、扫描、serve、人物维护、导出、测试命令）并核对 schema 文档一致性**
 
 Run: `source .venv/bin/activate && rg -n "hikbox init|hikbox scan start-or-resume|hikbox serve start|people rename|people merge|export template create|export run|./scripts/run_tests.sh" README.md`
 Expected: 命令与 CLI 一致。
@@ -1308,7 +1308,7 @@ Expected: 命令与 CLI 一致。
 Run: `source .venv/bin/activate && rg -n "scan_session|assignment_run|export_template|scan_audit_item|face_embedding" docs/db_schema.md hikbox_pictures/product/db/sql/*.sql`
 Expected: 表、字段、枚举、索引描述一致。
 
-- [ ] **Step 10: 执行仓库回归测试入口**
+- [x] **Step 10: 执行仓库回归测试入口**
 
 Run: `source .venv/bin/activate && ./scripts/run_tests.sh`
 Expected: 全量测试 PASS，无新增回归。
