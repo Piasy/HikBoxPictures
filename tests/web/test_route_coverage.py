@@ -50,6 +50,12 @@ def test_export_detail_page_route(tmp_path: Path) -> None:
     assert resp.status_code == 200
 
 
+def test_export_run_form_route(tmp_path: Path) -> None:
+    client = _build_client(tmp_path)
+    resp = client.post("/exports/templates/1/actions/run", follow_redirects=False)
+    assert resp.status_code == 303
+
+
 def test_logs_page_route(tmp_path: Path) -> None:
     client = _build_client(tmp_path)
     resp = client.get("/logs")

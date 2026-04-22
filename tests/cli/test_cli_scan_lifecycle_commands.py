@@ -8,7 +8,7 @@ from .conftest import create_scan_session, query_one, run_cli
 
 
 def test_scan_start_or_resume_resumes_latest_interrupted(cli_bin: str, seeded_workspace: Path) -> None:
-    _older_interrupted = create_scan_session(seeded_workspace, status="interrupted", run_kind="scan_resume")
+    older_interrupted = create_scan_session(seeded_workspace, status="interrupted", run_kind="scan_resume")
     latest_interrupted = create_scan_session(seeded_workspace, status="interrupted", run_kind="scan_resume")
     total_before = query_one(seeded_workspace, "SELECT COUNT(*) FROM scan_session")[0]
 
@@ -17,7 +17,7 @@ def test_scan_start_or_resume_resumes_latest_interrupted(cli_bin: str, seeded_wo
     assert resume.returncode == 0
     assert data["resumed"] is True
     assert int(data["session_id"]) == latest_interrupted
-    assert data["status"] == "running"
+    assert data["status"] == "completed"
     assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [latest_interrupted])[0] == data["status"]
     assert query_one(seeded_workspace, "SELECT COUNT(*) FROM scan_session")[0] == total_before
 
@@ -25,8 +25,8 @@ def test_scan_start_or_resume_resumes_latest_interrupted(cli_bin: str, seeded_wo
     data_again = json.loads(resume_again.stdout)["data"]
     assert resume_again.returncode == 0
     assert data_again["resumed"] is True
-    assert int(data_again["session_id"]) == latest_interrupted
-    assert data_again["status"] == query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [latest_interrupted])[0]
+    assert int(data_again["session_id"]) == older_interrupted
+    assert data_again["status"] == query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [older_interrupted])[0]
 
 
 def test_scan_start_new_and_abort_contract(cli_bin: str, seeded_workspace: Path) -> None:
@@ -42,8 +42,10 @@ def test_scan_start_new_and_abort_contract(cli_bin: str, seeded_workspace: Path)
         "SELECT status FROM scan_session WHERE id=?",
         [start_new_data["session_id"]],
     )[0]
+    assert start_new_data["status"] == "completed"
     assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [old_interrupted])[0] == "abandoned"
 
+    running_id = create_scan_session(seeded_workspace, status="running")
     new_conflict = run_cli(cli_bin, "scan", "start-new", "--workspace", str(seeded_workspace))
     assert new_conflict.returncode == 4
     assert "SCAN_ACTIVE_CONFLICT" in (new_conflict.stdout + new_conflict.stderr)
@@ -53,20 +55,22 @@ def test_scan_start_new_and_abort_contract(cli_bin: str, seeded_workspace: Path)
         "--json",
         "scan",
         "abort",
-        str(start_new_data["session_id"]),
+        str(running_id),
         "--workspace",
         str(seeded_workspace),
     )
     assert abort_run.returncode == 0
     abort_data = json.loads(abort_run.stdout)["data"]
-    assert abort_data["session_id"] == start_new_data["session_id"]
+    assert abort_data["session_id"] == running_id
     assert abort_data["status"] == "aborting"
-    assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [start_new_data["session_id"]])[0] == abort_data["status"]
+    assert query_one(seeded_workspace, "SELECT status FROM scan_session WHERE id=?", [running_id])[0] in {
+        "aborting",
+        "interrupted",
+    }
 
 
 def test_scan_abort_then_manual_interrupt_allows_start_new(cli_bin: str, seeded_workspace: Path) -> None:
-    created = run_cli(cli_bin, "--json", "scan", "start-new", "--workspace", str(seeded_workspace))
-    session_id = int(json.loads(created.stdout)["data"]["session_id"])
+    session_id = create_scan_session(seeded_workspace, status="running")
     abort_run = run_cli(cli_bin, "--json", "scan", "abort", str(session_id), "--workspace", str(seeded_workspace))
     assert abort_run.returncode == 0
     assert json.loads(abort_run.stdout)["data"]["status"] == "aborting"

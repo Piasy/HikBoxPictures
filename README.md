@@ -11,10 +11,12 @@ source .venv/bin/activate
 
 ## 2. 工作区初始化
 
+说明：`--workspace`、`--json`、`--quiet` 是全局参数，推荐放在子命令前。
+
 ```bash
-python -m hikbox_pictures.cli init --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli config set-external-root /abs/path/to/external --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli config show --workspace /abs/path/to/workspace
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace init
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace config set-external-root /abs/path/to/external
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace config show
 ```
 
 初始化后会创建：
@@ -28,38 +30,38 @@ python -m hikbox_pictures.cli config show --workspace /abs/path/to/workspace
 ## 3. 扫描与服务
 
 ```bash
-python -m hikbox_pictures.cli source add /abs/path/to/photos --label family --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli scan start-or-resume --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli scan status --latest --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli scan list --limit 20 --workspace /abs/path/to/workspace
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace source add /abs/path/to/photos --label family
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace scan start-or-resume
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace scan status --latest
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace scan list --limit 20
 ```
 
 扫描进行中启动 Web 会直接失败（退出码 `7`）：
 
 ```bash
-python -m hikbox_pictures.cli serve start --workspace /abs/path/to/workspace --host 127.0.0.1 --port 8000
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace serve start --host 127.0.0.1 --port 8000
 ```
 
 ## 4. 人物维护
 
 ```bash
-python -m hikbox_pictures.cli people list --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli people rename 11 张三 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli people exclude 11 --face-observation-id 1001 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli people exclude-batch 11 --face-observation-ids 1001,1002 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli people merge --selected-person-ids 11,22,33 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli people undo-last-merge --workspace /abs/path/to/workspace
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace people list
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace people rename 11 张三
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace people exclude 11 --face-observation-id 1001
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace people exclude-batch 11 --face-observation-ids 1001,1002
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace people merge --selected-person-ids 11,22,33
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace people undo-last-merge
 ```
 
 ## 5. 导出
 
 ```bash
-python -m hikbox_pictures.cli export template list --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli export template create --name 家庭合照 --output-root /abs/path/to/exports --person-ids 11,22 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli export template update 1 --name 新名称 --person-ids 11,22 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli export run 1 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli export run-status 1 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli export run-list --template-id 1 --limit 20 --workspace /abs/path/to/workspace
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace export template list
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace export template create --name 家庭合照 --output-root /abs/path/to/exports --person-ids 11,22
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace export template update 1 --name 新名称 --person-ids 11,22
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace export run 1
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace export run-status 1
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace export run-list --template-id 1 --limit 20
 ```
 
 说明：首版不提供模板删除命令。
@@ -67,9 +69,9 @@ python -m hikbox_pictures.cli export run-list --template-id 1 --limit 20 --works
 ## 6. 审计与维护命令
 
 ```bash
-python -m hikbox_pictures.cli audit list --scan-session-id 1 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli logs list --scan-session-id 1 --workspace /abs/path/to/workspace
-python -m hikbox_pictures.cli db vacuum --workspace /abs/path/to/workspace
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace audit list --scan-session-id 1
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace logs list --scan-session-id 1
+python -m hikbox_pictures.cli --workspace /abs/path/to/workspace db vacuum
 ```
 
 ## 7. 测试命令
@@ -94,12 +96,12 @@ python -m pytest tests/integration/test_productization_acceptance.py -v
 安装后默认 console script 为 `hikbox-pictures`，与 `python -m hikbox_pictures.cli` 等价。
 
 ```bash
-hikbox-pictures init --workspace /abs/path/to/workspace
-hikbox-pictures scan start-or-resume --workspace /abs/path/to/workspace
-hikbox-pictures serve start --workspace /abs/path/to/workspace --host 127.0.0.1 --port 8000
-hikbox-pictures people rename 11 张三 --workspace /abs/path/to/workspace
-hikbox-pictures people merge --selected-person-ids 11,22,33 --workspace /abs/path/to/workspace
-hikbox-pictures export template create --name 家庭合照 --output-root /abs/path/to/exports --person-ids 11,22 --workspace /abs/path/to/workspace
-hikbox-pictures export run 1 --workspace /abs/path/to/workspace
+hikbox-pictures --workspace /abs/path/to/workspace init
+hikbox-pictures --workspace /abs/path/to/workspace scan start-or-resume
+hikbox-pictures --workspace /abs/path/to/workspace serve start --host 127.0.0.1 --port 8000
+hikbox-pictures --workspace /abs/path/to/workspace people rename 11 张三
+hikbox-pictures --workspace /abs/path/to/workspace people merge --selected-person-ids 11,22,33
+hikbox-pictures --workspace /abs/path/to/workspace export template create --name 家庭合照 --output-root /abs/path/to/exports --person-ids 11,22
+hikbox-pictures --workspace /abs/path/to/workspace export run 1
 ./scripts/run_tests.sh
 ```

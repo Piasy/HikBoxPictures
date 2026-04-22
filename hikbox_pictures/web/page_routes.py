@@ -11,7 +11,8 @@ from fastapi import APIRouter, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from hikbox_pictures.product.db.connection import connect_sqlite
-from hikbox_pictures.product.export import ExportRunLockError
+from hikbox_pictures.product.export import ExportRunLockError, ExportValidationError
+from hikbox_pictures.product.export.runner_launcher import launch_export_runner_thread
 from hikbox_pictures.product.export.run_service import assert_people_writes_allowed
 from hikbox_pictures.product.people.service import MergeOperationNotFoundError
 from hikbox_pictures.product.scan.detect_stage import build_scan_runtime_defaults
@@ -408,6 +409,8 @@ def exports_page(request: Request) -> HTMLResponse:
     history = _load_export_history(db_path)
     preview = _load_preview_summary(db_path)
     locked = _is_people_locked(db_path)
+    run_ok = request.query_params.get("run_ok") == "1"
+    run_error = request.query_params.get("run_error") == "1"
 
     return _render(
         request,
@@ -417,8 +420,26 @@ def exports_page(request: Request) -> HTMLResponse:
             "history": history,
             "preview": preview,
             "people_locked": locked,
+            "run_ok": run_ok,
+            "run_error": run_error,
         },
     )
+
+
+@router.post("/exports/templates/{template_id}/actions/run")
+def export_run_form(request: Request, template_id: int) -> RedirectResponse:
+    services = _services(request)
+    try:
+        run = services.export_run_service.start_export_run(template_id=int(template_id))
+    except ExportValidationError:
+        return RedirectResponse(url="/exports?run_error=1", status_code=status.HTTP_303_SEE_OTHER)
+
+    launch_export_runner_thread(
+        library_db_path=services.library_db_path,
+        run_id=run.id,
+        template_id=int(template_id),
+    )
+    return RedirectResponse(url="/exports?run_ok=1", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/exports/{template_id}", response_class=HTMLResponse)

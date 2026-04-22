@@ -1,6 +1,11 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>导出</h1>
+{% if run_ok %}
+<div data-testid="export-run-feedback" data-status="ok">导出任务已启动，可继续使用页面。</div>
+{% elif run_error %}
+<div data-testid="export-run-feedback" data-status="error">导出任务启动失败，请检查模板状态。</div>
+{% endif %}
 
 <div data-testid="export-template-create" data-enabled="true">创建模板入口</div>
 
@@ -15,6 +20,14 @@
       <td>{{ '是' if template.enabled else '否' }}</td>
       <td>
         <a href="/exports/{{ template.template_id }}" data-testid="export-template-edit-{{ template.template_id }}" data-enabled="true">编辑</a>
+        <form method="post" action="/exports/templates/{{ template.template_id }}/actions/run" style="display:inline;">
+          <button
+            type="submit"
+            data-testid="export-template-run-{{ template.template_id }}"
+            data-enabled="{{ 'true' if template.enabled else 'false' }}"
+            {% if not template.enabled %}disabled{% endif %}
+          >执行导出</button>
+        </form>
       </td>
     </tr>
     {% else %}

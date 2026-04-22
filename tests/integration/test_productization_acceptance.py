@@ -14,7 +14,6 @@ from hikbox_pictures.product.audit.service import AssignmentAuditInput, AuditSam
 from hikbox_pictures.product.config import WorkspaceLayout, initialize_workspace
 from hikbox_pictures.product.engine.frozen_v5 import FROZEN_V5_STAGE_SEQUENCE
 from hikbox_pictures.product.export import ensure_export_schema
-from hikbox_pictures.product.export.run_service import ExportRunService
 from hikbox_pictures.product.scan.assignment_stage import (
     AssignmentCandidate,
     AssignmentStageService,
@@ -643,6 +642,14 @@ def test_ac15_exclusion_marks_pending_reassign_for_next_scan(workspace_layout: W
             """,
             (person_id, face_id),
         ).fetchone()
+        any_active_assignment = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM person_face_assignment
+            WHERE face_observation_id=? AND active=1
+            """,
+            (face_id,),
+        ).fetchone()
         latest_scan = conn.execute(
             """
             SELECT run_kind, status
@@ -651,10 +658,12 @@ def test_ac15_exclusion_marks_pending_reassign_for_next_scan(workspace_layout: W
             LIMIT 1
             """
         ).fetchone()
-    assert pending == (1,)
+    assert pending == (0,)
     assert exclusion == (1,)
     assert active_assignment == (0,)
-    assert latest_scan == ("scan_full", "running")
+    assert any_active_assignment is not None
+    assert int(any_active_assignment[0]) >= 1
+    assert latest_scan == ("scan_full", "completed")
 
 
 def test_ac16_homepage_has_merge_actions(app_client: TestClient, workspace_layout: WorkspaceLayout) -> None:
@@ -808,10 +817,8 @@ def test_ac18_export_run_layout_and_collision(workspace_layout: WorkspaceLayout,
     run = _run_cli("--json", "export", "run", str(template_id), "--workspace", str(workspace))
     assert run.returncode == 0
     run_payload = _json_stdout(run)["data"]
-    assert run_payload["status"] == "running"
-    # 当前 CLI run 仅负责启动 run，真实投递由服务执行。
-    finished_run = ExportRunService(workspace_layout.library_db_path).execute_export(template_id=template_id)
-    run_id = finished_run.id
+    assert run_payload["status"] == "completed"
+    run_id = int(run_payload["export_run_id"])
 
     with sqlite3.connect(workspace_layout.library_db_path) as conn:
         rows = conn.execute(

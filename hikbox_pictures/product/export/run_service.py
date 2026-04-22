@@ -78,14 +78,17 @@ class ExportRunService:
 
     def execute_export(self, *, template_id: int) -> ExportRunRecord:
         run = self.start_export_run(template_id=template_id)
+        return self.execute_existing_run(run_id=run.id, template_id=template_id)
+
+    def execute_existing_run(self, *, run_id: int, template_id: int) -> ExportRunRecord:
         summary = _empty_summary()
         try:
-            self._execute_delivery(run_id=run.id, template_id=template_id, counters=summary)
-            return self.finish_export_run(run_id=run.id, status="completed", summary=summary)
+            self._execute_delivery(run_id=run_id, template_id=template_id, counters=summary)
+            return self.finish_export_run(run_id=run_id, status="completed", summary=summary)
         except BaseException as exc:
             terminal_status = "aborted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else "failed"
             try:
-                self.finish_export_run(run_id=run.id, status=terminal_status, summary=summary)
+                self.finish_export_run(run_id=run_id, status=terminal_status, summary=summary)
             except BaseException:
                 # 收尾失败不应覆盖原始业务异常，仍以上游原异常为准。
                 pass

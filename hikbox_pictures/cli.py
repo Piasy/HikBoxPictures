@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from hikbox_pictures.product.scan.errors import (
     ScanSessionNotFoundError,
     ServeBlockedByActiveScanError,
 )
+from hikbox_pictures.product.scan.execution_service import ScanExecutionService
 from hikbox_pictures.product.scan.session_service import (
     SQLiteScanSessionRepository,
     ScanSessionService,
@@ -130,6 +133,8 @@ def _build_parser() -> argparse.ArgumentParser:
     status_group.add_argument("--latest", action="store_true")
     scan_list = scan_sub.add_parser("list", help="会话列表")
     scan_list.add_argument("--limit", type=int, default=20)
+    scan_run_session = scan_sub.add_parser("_run-session", help=argparse.SUPPRESS)
+    scan_run_session.add_argument("--session-id", type=int, required=True)
 
     serve = subparsers.add_parser("serve", help="启动 Web 服务")
     serve_sub = serve.add_subparsers(dest="serve_command", required=True)
@@ -322,12 +327,26 @@ def _cmd_scan(ctx: CliContext, args: argparse.Namespace) -> dict[str, Any]:
     command = str(args.scan_command)
 
     try:
+        if command == "_run-session":
+            session_id = int(args.session_id)
+            lock_path = _scan_runner_lock_path(layout=layout, session_id=session_id)
+            with _scan_runner_lock(lock_path) as locked:
+                if not locked:
+                    return {"session_id": session_id, "status": "skipped_locked"}
+                execution = ScanExecutionService(
+                    library_db_path=layout.library_db_path,
+                    embedding_db_path=layout.embedding_db_path,
+                )
+                status = execution.run_session(session_id=session_id)
+                return {"session_id": session_id, "status": status}
         if command == "start-or-resume":
             session = service.start_or_resume(run_kind="scan_full", triggered_by="manual_cli")
-            return {"session_id": session.id, "status": session.status, "resumed": bool(session.resumed)}
+            terminal_status = _run_scan_session_blocking(layout=layout, session_id=session.id)
+            return {"session_id": session.id, "status": terminal_status, "resumed": bool(session.resumed)}
         if command == "start-new":
             session = service.start_new(run_kind="scan_full", triggered_by="manual_cli")
-            return {"session_id": session.id, "status": session.status, "resumed": False}
+            terminal_status = _run_scan_session_blocking(layout=layout, session_id=session.id)
+            return {"session_id": session.id, "status": terminal_status, "resumed": False}
         if command == "abort":
             session = service.abort(int(args.session_id))
             return {"session_id": session.id, "status": session.status}
@@ -444,7 +463,7 @@ def _cmd_export(ctx: CliContext, args: argparse.Namespace) -> dict[str, Any]:
         if command == "template":
             return _cmd_export_template(layout, template_service, args)
         if command == "run":
-            run = run_service.start_export_run(template_id=int(args.template_id))
+            run = run_service.execute_export(template_id=int(args.template_id))
             return {"export_run_id": run.id, "status": run.status}
         if command == "run-status":
             return _export_run_status(layout.library_db_path, int(args.export_run_id))
@@ -643,6 +662,61 @@ def _write_workspace_config(layout: WorkspaceLayout, external_root: Path) -> Non
     (external_root / "artifacts" / "aligned").mkdir(parents=True, exist_ok=True)
     (external_root / "artifacts" / "context").mkdir(parents=True, exist_ok=True)
     (external_root / "logs").mkdir(parents=True, exist_ok=True)
+
+
+def _run_scan_session_blocking(layout: WorkspaceLayout, *, session_id: int) -> str:
+    lock_path = _scan_runner_lock_path(layout=layout, session_id=session_id)
+    with _scan_runner_lock(lock_path) as locked:
+        if locked:
+            execution = ScanExecutionService(
+                library_db_path=layout.library_db_path,
+                embedding_db_path=layout.embedding_db_path,
+            )
+            return execution.run_session(session_id=int(session_id))
+
+    # 其他进程已接管同一会话时，前台阻塞等待其收敛到终态。
+    return _wait_scan_terminal_status(layout.library_db_path, session_id=int(session_id))
+
+
+def _scan_runner_lock_path(*, layout: WorkspaceLayout, session_id: int) -> Path:
+    return layout.hikbox_root / "runner_locks" / f"scan_session_{int(session_id)}.lock"
+
+
+@contextlib.contextmanager
+def _scan_runner_lock(lock_path: Path):
+    try:
+        import fcntl
+    except ImportError:
+        yield True
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
+def _wait_scan_terminal_status(library_db_path: Path, *, session_id: int) -> str:
+    while True:
+        with connect_sqlite(library_db_path) as conn:
+            row = conn.execute("SELECT status FROM scan_session WHERE id=?", (int(session_id),)).fetchone()
+        if row is None:
+            raise CliError("NOT_FOUND", f"扫描会话不存在: session_id={session_id}", EXIT_NOT_FOUND)
+        status = str(row[0])
+        if status not in {"running", "aborting"}:
+            return status
+        time.sleep(0.2)
 
 
 def _scan_status(library_db_path: Path, *, session_id: int | None, latest: bool) -> dict[str, Any]:

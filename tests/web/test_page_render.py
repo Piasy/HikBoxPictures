@@ -309,6 +309,22 @@ def _seed_exports_data(db_path: Path, tmp_path: Path) -> list[int]:
     return [t1, t2, running]
 
 
+def _seed_single_export_template(db_path: Path, tmp_path: Path) -> int:
+    with sqlite3.connect(db_path) as conn:
+        ensure_export_schema(conn)
+        template_id = int(
+            conn.execute(
+                """
+                INSERT INTO export_template(name, output_root, enabled, created_at, updated_at)
+                VALUES ('单模板', ?, 1, ?, ?)
+                """,
+                (str((tmp_path / "single-out").resolve()), NOW, NOW),
+            ).lastrowid
+        )
+        conn.commit()
+    return template_id
+
+
 def test_sources_audit_page_binds_session_status_source_progress_failure_stats_and_scan_params(tmp_path: Path) -> None:
     client, db_path = _build_client(tmp_path)
     session_id = _seed_sources_audit_data(db_path)
@@ -361,6 +377,7 @@ def test_exports_page_binds_template_list_create_edit_preview_history_and_people
     assert [row["data-template-id"] for row in template_rows] == [str(template_ids[0]), str(template_ids[1])]
     assert dom.select_one('[data-testid="export-template-create"]')["data-enabled"] == "true"
     assert dom.select_one(f'[data-testid="export-template-edit-{template_ids[0]}"]')["data-enabled"] == "true"
+    assert dom.select_one(f'[data-testid="export-template-run-{template_ids[0]}"]')["data-enabled"] == "true"
 
     only_stats = dom.select_one('[data-testid="preview-only-stats"]')
     group_stats = dom.select_one('[data-testid="preview-group-stats"]')
@@ -380,3 +397,31 @@ def test_exports_page_binds_template_list_create_edit_preview_history_and_people
     assert lock_tip is not None
     assert lock_tip["data-locked"] == "true"
     assert "导出进行中，暂不可修改" in lock_tip.text
+
+
+def test_exports_run_form_starts_run_and_launches_background_worker(tmp_path: Path, monkeypatch) -> None:
+    client, db_path = _build_client(tmp_path)
+    template_id = _seed_single_export_template(db_path, tmp_path)
+
+    launches: list[tuple[Path, int, int]] = []
+
+    def _fake_launch(*, library_db_path: Path, run_id: int, template_id: int) -> None:
+        launches.append((library_db_path, run_id, template_id))
+
+    monkeypatch.setattr("hikbox_pictures.web.page_routes.launch_export_runner_thread", _fake_launch)
+
+    resp = client.post(
+        f"/exports/templates/{template_id}/actions/run",
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/exports?run_ok=1"
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT id, template_id, status FROM export_run ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    assert row is not None
+    assert int(row[1]) == template_id
+    assert str(row[2]) == "running"
+    assert launches == [(db_path, int(row[0]), template_id)]

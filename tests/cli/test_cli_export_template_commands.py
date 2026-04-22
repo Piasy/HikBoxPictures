@@ -84,5 +84,5 @@ def test_export_template_list_create_update_and_run(cli_bin: str, seeded_workspa
     assert run_export.returncode == 0
     run_data = json.loads(run_export.stdout)["data"]
     export_run_id = int(run_data["export_run_id"])
-    assert run_data["status"] == "running"
+    assert run_data["status"] == "completed"
     assert query_one(seeded_workspace, "SELECT COUNT(*) FROM export_run WHERE id=? AND template_id=?", [export_run_id, template_id])[0] == 1

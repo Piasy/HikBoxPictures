@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +11,11 @@ from pydantic import BaseModel, Field
 from hikbox_pictures.product.audit.service import ScanAuditItem
 from hikbox_pictures.product.db.connection import connect_sqlite
 from hikbox_pictures.product.export import ExportRunLockError, ExportValidationError
+from hikbox_pictures.product.export.runner_launcher import launch_export_runner_thread
 from hikbox_pictures.product.export.run_service import assert_people_writes_allowed
 from hikbox_pictures.product.people.service import MergeOperationNotFoundError
 from hikbox_pictures.product.scan.errors import ScanActiveConflictError, ScanSessionNotFoundError
+from hikbox_pictures.product.scan.runner_launcher import launch_scan_runner_process
 
 router = APIRouter()
 
@@ -136,6 +139,7 @@ def scan_start_or_resume(request: Request, payload: ScanStartPayload) -> dict[st
     services = _services(request)
     try:
         session = services.scan_session_service.start_or_resume(run_kind=payload.run_kind, triggered_by="manual_webui")
+        _launch_scan_runner_for_webui(services.library_db_path, session.id)
     except ScanActiveConflictError as exc:
         raise _error(409, "SCAN_ACTIVE_CONFLICT", str(exc)) from exc
     except ValueError as exc:
@@ -148,6 +152,7 @@ def scan_start_new(request: Request, payload: ScanStartPayload) -> dict[str, Any
     services = _services(request)
     try:
         session = services.scan_session_service.start_new(run_kind=payload.run_kind, triggered_by="manual_webui")
+        _launch_scan_runner_for_webui(services.library_db_path, session.id)
     except ScanActiveConflictError as exc:
         raise _error(409, "SCAN_ACTIVE_CONFLICT", str(exc)) from exc
     except ValueError as exc:
@@ -332,9 +337,23 @@ def export_template_run(request: Request, template_id: int) -> dict[str, Any]:
         raise _error(404, "EXPORT_TEMPLATE_NOT_FOUND", f"模板不存在: template_id={template_id}")
     try:
         run = services.export_run_service.start_export_run(template_id=template_id)
+        launch_export_runner_thread(
+            library_db_path=services.library_db_path,
+            run_id=run.id,
+            template_id=template_id,
+        )
     except ExportValidationError as exc:
         raise _error(404, "EXPORT_TEMPLATE_NOT_FOUND", str(exc)) from exc
     return _ok({"export_run_id": run.id, "status": run.status})
+
+
+def _launch_scan_runner_for_webui(library_db_path: Path, session_id: int) -> None:
+    workspace_root = library_db_path.parent.parent
+    launch_scan_runner_process(
+        python_executable=sys.executable,
+        workspace_root=workspace_root,
+        session_id=int(session_id),
+    )
 
 
 def _audit_item_to_dict(item: ScanAuditItem) -> dict[str, Any]:
