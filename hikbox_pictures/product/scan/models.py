@@ -1,4 +1,4 @@
-"""扫描会话模型定义。"""
+"""扫描会话与阶段模型定义。"""
 
 from __future__ import annotations
 
@@ -27,3 +27,30 @@ class ScanSessionRecord:
 class ScanStartResult:
     session_id: int
     resumed: bool
+
+
+@dataclass(frozen=True)
+class DiscoverSourceSummary:
+    source_id: int
+    discovered_assets: int
+    processed_assets: int
+    failed_assets: int
+    should_rerun: bool
+
+
+@dataclass(frozen=True)
+class DiscoverStageSummary:
+    by_source: dict[int, DiscoverSourceSummary]
+
+
+@dataclass(frozen=True)
+class MetadataSourceSummary:
+    source_id: int
+    processed_assets: int
+    failed_assets: int
+    live_photo_assets: int
+
+
+@dataclass(frozen=True)
+class MetadataStageSummary:
+    by_source: dict[int, MetadataSourceSummary]

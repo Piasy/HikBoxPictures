@@ -37,3 +37,13 @@ class ServeBlockedByActiveScanError(ScanError):
     def __init__(self, active_session_id: int):
         super().__init__(f"存在活跃扫描会话，禁止启动 serve，session_id={active_session_id}")
         self.active_session_id = active_session_id
+
+
+class StageSchemaMissingError(ScanError):
+    """扫描阶段依赖的表缺失。"""
+
+    def __init__(self, *, stage: str, missing_tables: list[str]):
+        missing = ", ".join(sorted(missing_tables))
+        super().__init__(f"{stage} 阶段缺少必需数据表: {missing}。请重新初始化 workspace。")
+        self.stage = stage
+        self.missing_tables = sorted(missing_tables)

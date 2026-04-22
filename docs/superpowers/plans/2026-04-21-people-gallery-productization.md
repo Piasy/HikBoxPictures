@@ -331,7 +331,7 @@ Expected: PASS。
 - Test: `tests/product/test_metadata_live_photo.py`
 - Test: `tests/product/test_multi_source_discover_flow.py`
 
-- [ ] **Step 1: 写 Live Photo 匹配失败用例（含 `tests/data/live-example` 真实样本，且仅 HEIC/HEIF，支持两种隐藏 MOV 命名）**
+- [x] **Step 1: 写 Live Photo 匹配失败用例（含 `tests/data/live-example` 真实样本，且仅 HEIC/HEIF，支持两种隐藏 MOV 命名）**
 
 ```python
 def test_match_live_photo_hidden_mov_patterns(tmp_path: Path):
@@ -348,12 +348,12 @@ def test_match_live_photo_real_sample_from_tests_data():
     assert matched == base / ".IMG_6576_1771856408444916.MOV"
 ```
 
-- [ ] **Step 2: 写增量判定失败用例（file_size/mtime_ns 任一变化触发全阶段重跑）**
+- [x] **Step 2: 写增量判定失败用例（file_size/mtime_ns 任一变化触发全阶段重跑）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_discover_incremental.py::test_size_or_mtime_change_requires_full_stage_rerun -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 写多 source 闭环失败用例（按 source_id 维度维护 discover 与进度）**
+- [x] **Step 3: 写多 source 闭环失败用例（按 source_id 维度维护 discover 与进度）**
 
 ```python
 def test_discover_tracks_each_source_independently(scan_runner, source_service):
@@ -364,24 +364,24 @@ def test_discover_tracks_each_source_independently(scan_runner, source_service):
     assert summary.by_source[sid2].discovered_assets >= 0
 ```
 
-- [ ] **Step 4: 实现 discover 阶段资产登记与 source 维度状态汇总**
+- [x] **Step 4: 实现 discover 阶段资产登记与 source 维度状态汇总**
 
 ```python
 should_rerun = old.file_size != new.file_size or old.mtime_ns != new.mtime_ns
 ```
 
-- [ ] **Step 5: 实现 metadata 时间解析优先级与 capture_month 生成**
+- [x] **Step 5: 实现 metadata 时间解析优先级与 capture_month 生成**
 
 ```python
 capture_month = parsed_dt.strftime("%Y-%m")
 ```
 
-- [ ] **Step 6: 实现 Live Photo 入库字段写入（metadata 阶段完成，导出阶段只读），并通过真实样本匹配单测**
+- [x] **Step 6: 实现 Live Photo 入库字段写入（metadata 阶段完成，导出阶段只读），并通过真实样本匹配单测**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_metadata_live_photo.py::test_match_live_photo_hidden_mov_patterns tests/product/test_metadata_live_photo.py::test_match_live_photo_real_sample_from_tests_data tests/product/test_metadata_live_photo.py::test_match_live_photo_returns_none_when_mov_missing tests/product/test_multi_source_discover_flow.py -v`
 Expected: PASS，真实样本命中隐藏 MOV，缺失 MOV 返回空值。
 
-- [ ] **Step 7: 同步文档中的 live_mov_* 字段与阶段语义**
+- [x] **Step 7: 同步文档中的 live_mov_* 字段与阶段语义**
 
 Run: `source .venv/bin/activate && rg -n "live_mov_path|metadata|HEIC|HEIF" docs/db_schema.md`
 Expected: 字段与行为描述一致。

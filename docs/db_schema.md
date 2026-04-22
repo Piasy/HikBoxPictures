@@ -46,6 +46,7 @@
 - 初始化 SQL 固定为：
   - `hikbox_pictures/product/db/sql/library_v1.sql`
   - `hikbox_pictures/product/db/sql/embedding_v1.sql`
+- scan 输入阶段依赖表（`scan_session_source`、`photo_asset`）由 `library_v1.sql` 在初始化时一次性建齐；运行时阶段代码不再隐式建表。
 - 初始化策略为“幂等建表 + 固定元信息 upsert”：每次初始化都会写入（或刷新）以下键值：
   - `schema_meta.schema_version = '1'`
   - `schema_meta.product_schema_name = 'people_gallery_v1'`
@@ -145,6 +146,12 @@
 - `UNIQUE(scan_session_id, library_source_id)`
 - `idx_scan_session_source_session(scan_session_id)`
 
+规则：
+
+- discover/metadata 进度按 `library_source_id` 独立维护，`stage_status_json` 至少包含 `discover` 与 `metadata` 两个键。
+- discover 在同一 `source + primary_path` 命中旧记录时，若 `file_size` 或 `mtime_ns` 任一变化（`old.file_size != new.file_size or old.mtime_ns != new.mtime_ns`），则该 source 需要触发后续阶段重跑。
+- discover/metadata 对单资产异常（如 `OSError`、解析失败）按资产级容错：不中断整个 source，累计 `failed_assets` 并回写到 `scan_session_source`。
+
 #### `scan_checkpoint`
 
 | 字段 | 类型 | 约束 | 说明 |
@@ -232,6 +239,9 @@
 规则：
 
 - Live Photo 配对在扫描 `metadata` 阶段完成，结果写入 `live_mov_path/live_mov_size/live_mov_mtime_ns`。
+- Live Photo 仅对 `HEIC/HEIF` 静态图尝试配对，支持隐藏 MOV 命名：`.<still_name>_<token>.MOV` 与 `.<still_stem>_<token>.MOV`。
+- 匹配到多个 MOV 候选时，按 `token` 降序优先；`token` 相同按 `live_mov_mtime_ns` 降序选择。
+- `capture_datetime` 以 ISO8601（含时区 offset）持久化；时间解析优先级为 `DateTimeOriginal > DateTimeDigitized > DateTime > birthtime > mtime`。
 - 导出阶段仅消费已落库的 `live_mov_*` 字段，不再做实时目录配对；缺失时静默跳过 `live_mov` 导出。
 
 #### `face_observation`
