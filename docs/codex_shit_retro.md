@@ -1,3 +1,13 @@
+之前的一次推倒重来里，我过于相信 superpowers，写出来的 plan 我自己都基本没读，结果 codex 写了一坨屎（都是 mock/占位实现），我 reset 回去之后让他重做，他居然把 shit 分支的都 cherry-pick 过来了，把我都气笑了。
+
+后来我改进了下 superpower，让他写 plan 阶段就 sub agent 写和 review，并特地强调不允许 mock/占位实现，结果连续干了一晚上（8h+），结果还是一坨屎，我让他复盘：
+- 严重：检测链路未接入真实检测模型与产物生成；聚类/质量门控/consensus/recall 未在产品主扫描链路执行；当前产品链路会给每张图补一条固定 face_observation（固定 bbox/质量），embedding 用路径 hash 伪造，归属用文件名正则 + 常量 similarity=0.90；
+- 核心原因不是“少实现了几个函数”，而是“执行过程中把目标从行为等价降成了接口可跑”，spec 设的是“算法行为冻结”，但 plan+tests 实际执行成了“状态与接口冻结”，我在收口阶段没有把“与 face_review_pipeline 行为等价”设成阻断条件，这是根因。
+
+你说这是不是一坨屎。。。我估摸着还是中途发生了 5 次 context compact，后面就开始 free run 了。
+
+然后我把复盘的教训继续更新 superpower、也补充到了 plan 里，然后自己手动控制执行哪些 task，避免 compact 之后继续 free run。
+
 • 结论：没有。当前实现和 hikbox_pictures/face_review_pipeline.py 的核心检测/聚类/归属链路不一致，也还没有把这三段真正“冻结”到产品扫描主链路里。
 
   1. 严重：检测链路未接入真实检测模型与产物生成。
