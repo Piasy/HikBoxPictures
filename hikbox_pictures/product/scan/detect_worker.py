@@ -13,6 +13,14 @@ from PIL import Image, ImageOps
 
 from hikbox_pictures.product.scan.artifact_writer import ArtifactWriter
 
+try:
+    import pillow_heif
+except ImportError:  # pragma: no cover - 运行时可选依赖
+    pillow_heif = None
+
+if pillow_heif is not None:
+    pillow_heif.register_heif_opener()
+
 
 def run_detect_worker(
     request: dict[str, object],

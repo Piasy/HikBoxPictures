@@ -473,9 +473,11 @@ photoprism/photoprism:
 - 39,559 star, 高活跃
 - 重点人物 A: 302
 - 重点人物 B: 431
-- person 2: 241
+- person 2: 241，也是重点人物 A，但没合并为同一个人物
 
 immich-app/immich:
 - 98,278 star, 高活跃
 - 重点人物 A: 864
 - 重点人物 B: 556
+
+上述结果，准确率都很好，召回率 immich 比 v5 略优。

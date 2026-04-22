@@ -7,6 +7,7 @@ import json
 import sqlite3
 from pathlib import Path
 
+import numpy as np
 from PIL import Image
 
 from hikbox_pictures.product.config import initialize_workspace
@@ -94,7 +95,11 @@ def test_noise_and_low_quality_ignored_not_persisted_as_assignment(tmp_path: Pat
 
     monkeypatch.setattr("hikbox_pictures.product.scan.assignment_stage.run_frozen_v5_assignment", fake_run)
 
-    run_result = service.run_frozen_v5_assignment(scan_session_id=session_id, run_kind="scan_full")
+    run_result = service.run_frozen_v5_assignment(
+        scan_session_id=session_id,
+        run_kind="scan_full",
+        embedding_calculator=_fake_embedding_calculator,
+    )
     assert run_result.assignment_run_id > 0
 
     conn = sqlite3.connect(layout.library_db)
@@ -206,3 +211,23 @@ def _seed_face_observations(library_db: Path, runtime_root: Path) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _fake_embedding_calculator(aligned_path: Path) -> tuple[list[float], list[float], float]:
+    image = Image.open(aligned_path).convert("L")
+    try:
+        base = np.asarray(image.resize((32, 16), Image.Resampling.BILINEAR), dtype=np.float32).reshape(-1)
+        flip = np.asarray(
+            image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).resize((32, 16), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        ).reshape(-1)
+    finally:
+        image.close()
+
+    base = base[:512] if base.shape[0] >= 512 else np.pad(base, (0, 512 - base.shape[0]), mode="constant")
+    flip = flip[:512] if flip.shape[0] >= 512 else np.pad(flip, (0, 512 - flip.shape[0]), mode="constant")
+    base_norm = float(np.linalg.norm(base))
+    flip_norm = float(np.linalg.norm(flip))
+    base = base if base_norm <= 1e-9 else (base / base_norm)
+    flip = flip if flip_norm <= 1e-9 else (flip / flip_norm)
+    return base.astype(float).tolist(), flip.astype(float).tolist(), max(base_norm, 1e-6)

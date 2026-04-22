@@ -58,7 +58,11 @@ def test_main_and_flip_embeddings_persisted_in_embedding_db(tmp_path: Path, monk
 
     monkeypatch.setattr("hikbox_pictures.product.scan.assignment_stage.run_frozen_v5_assignment", fake_cluster)
 
-    service.run_frozen_v5_assignment(scan_session_id=session.id, run_kind="scan_full")
+    service.run_frozen_v5_assignment(
+        scan_session_id=session.id,
+        run_kind="scan_full",
+        embedding_calculator=_fake_embedding_calculator,
+    )
 
     conn = sqlite3.connect(layout.embedding_db)
     try:
@@ -101,7 +105,7 @@ def test_runtime_consensus_uses_late_fusion_max_main_flip(tmp_path: Path, monkey
     vec_b_flip = np.zeros(512, dtype=np.float32)
     vec_b_flip[1] = 1.0
 
-    def fake_inputs(self, *, scan_session_id: int, embedding_calculator=None):
+    def fake_inputs(self, *, scan_session_id: int, param_snapshot, embedding_calculator=None):
         return [
             {
                 "face_observation_id": 101,
@@ -194,3 +198,23 @@ def _seed_minimal_observation(library_db: Path, runtime_root: Path, scan_session
     finally:
         conn.close()
     return obs_id
+
+
+def _fake_embedding_calculator(aligned_path: Path) -> tuple[list[float], list[float], float]:
+    image = Image.open(aligned_path).convert("L")
+    try:
+        base = np.asarray(image.resize((32, 16), Image.Resampling.BILINEAR), dtype=np.float32).reshape(-1)
+        flip = np.asarray(
+            image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).resize((32, 16), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        ).reshape(-1)
+    finally:
+        image.close()
+
+    base = base[:512] if base.shape[0] >= 512 else np.pad(base, (0, 512 - base.shape[0]), mode="constant")
+    flip = flip[:512] if flip.shape[0] >= 512 else np.pad(flip, (0, 512 - flip.shape[0]), mode="constant")
+    base_norm = float(np.linalg.norm(base))
+    flip_norm = float(np.linalg.norm(flip))
+    base = base if base_norm <= 1e-9 else (base / base_norm)
+    flip = flip if flip_norm <= 1e-9 else (flip / flip_norm)
+    return base.astype(float).tolist(), flip.astype(float).tolist(), max(base_norm, 1e-6)

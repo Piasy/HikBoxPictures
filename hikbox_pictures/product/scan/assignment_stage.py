@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import json
 import sqlite3
 import uuid
@@ -9,15 +10,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import numpy as np
-from PIL import Image
 
 from hikbox_pictures.product.db.connection import connect_sqlite
 from hikbox_pictures.product.engine.param_snapshot import build_frozen_v5_param_snapshot
 from hikbox_pictures.product.engine.frozen_v5 import run_frozen_v5_assignment
+from hikbox_pictures.face_review_pipeline import MagFaceEmbedder
 
 ALLOWED_ASSIGNMENT_SOURCES = {"hdbscan", "person_consensus", "merge", "undo"}
 UNASSIGNED_SOURCES = {"noise", "low_quality_ignored"}
+EMBEDDING_MODEL_KEY = "magface_iresnet100_ms1mv2"
+MAGFACE_CHECKPOINT_ENV = "HIKBOX_MAGFACE_CHECKPOINT"
+MAGFACE_CHECKPOINT_DEFAULT = Path(".cache/magface/magface_iresnet100_ms1mv2.pth")
 
 
 @dataclass(frozen=True)
@@ -84,7 +89,11 @@ class AssignmentStageService:
         started = self.start_assignment_run(scan_session_id=scan_session_id, run_kind=run_kind)
         try:
             self._ensure_not_aborting(scan_session_id=scan_session_id)
-            faces = self._build_face_inputs(scan_session_id=scan_session_id, embedding_calculator=embedding_calculator)
+            faces = self._build_face_inputs(
+                scan_session_id=scan_session_id,
+                param_snapshot=started.param_snapshot,
+                embedding_calculator=embedding_calculator,
+            )
             self._persist_embeddings(scan_session_id=scan_session_id, faces=faces)
             self._ensure_not_aborting(scan_session_id=scan_session_id)
 
@@ -93,6 +102,7 @@ class AssignmentStageService:
             person_count, assignment_count = self._persist_assignment_outcome(
                 scan_session_id=scan_session_id,
                 assignment_run_id=started.assignment_run_id,
+                face_rows=faces,
                 person_rows=list(runtime_result.get("persons", [])),
                 assignment_rows=list(runtime_result.get("faces", [])),
             )
@@ -105,7 +115,13 @@ class AssignmentStageService:
             self._complete_assignment_run(assignment_run_id=started.assignment_run_id, status="failed")
             raise
 
-    def _build_face_inputs(self, *, scan_session_id: int, embedding_calculator=None) -> list[dict[str, object]]:
+    def _build_face_inputs(
+        self,
+        *,
+        scan_session_id: int,
+        param_snapshot: dict[str, object],
+        embedding_calculator=None,
+    ) -> list[dict[str, object]]:
         conn = connect_sqlite(self._library_db_path)
         try:
             rows = conn.execute(
@@ -114,7 +130,10 @@ class AssignmentStageService:
                   f.id,
                   f.photo_asset_id,
                   f.aligned_relpath,
-                  f.quality_score
+                  f.detector_confidence,
+                  f.face_area_ratio,
+                  p.primary_path,
+                  p.library_source_id
                 FROM face_observation AS f
                 INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
                 INNER JOIN scan_session_source AS s
@@ -129,22 +148,34 @@ class AssignmentStageService:
             conn.close()
 
         faces: list[dict[str, object]] = []
-        calculator = embedding_calculator or _default_embedding_calculator
+        calculator = embedding_calculator or _build_default_embedding_calculator(param_snapshot=param_snapshot)
         for row in rows:
             observation_id = int(row[0])
             photo_asset_id = int(row[1])
             aligned_relpath = str(row[2])
-            quality_score = float(row[3])
+            detector_confidence = float(row[3])
+            face_area_ratio = float(row[4])
+            primary_path = str(row[5])
+            library_source_id = int(row[6])
             aligned_path = self._output_root / aligned_relpath
-            embedding_main, embedding_flip = calculator(aligned_path)
+            embedding_main, embedding_flip, magface_quality = _run_embedding_calculator(
+                calculator=calculator,
+                aligned_path=aligned_path,
+            )
+            quality_score = float(
+                magface_quality * max(0.05, detector_confidence) * np.sqrt(max(face_area_ratio, 1e-9))
+            )
             faces.append(
                 {
                     "face_observation_id": observation_id,
                     "photo_asset_id": photo_asset_id,
-                    "photo_relpath": f"asset-{photo_asset_id}",
+                    "photo_relpath": f"{library_source_id}/{primary_path}",
                     "quality_score": quality_score,
                     "embedding_main": embedding_main,
                     "embedding_flip": embedding_flip,
+                    "magface_quality": float(magface_quality),
+                    "detector_confidence": detector_confidence,
+                    "face_area_ratio": face_area_ratio,
                 }
             )
         return faces
@@ -163,12 +194,24 @@ class AssignmentStageService:
                     variant="main",
                     vector=np.asarray(row["embedding_main"], dtype=np.float32),
                 )
-                self._upsert_embedding_row(
-                    conn,
-                    face_observation_id=face_observation_id,
-                    variant="flip",
-                    vector=np.asarray(row["embedding_flip"], dtype=np.float32),
-                )
+                if row.get("embedding_flip") is not None:
+                    self._upsert_embedding_row(
+                        conn,
+                        face_observation_id=face_observation_id,
+                        variant="flip",
+                        vector=np.asarray(row["embedding_flip"], dtype=np.float32),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        DELETE FROM face_embedding
+                        WHERE face_observation_id=?
+                          AND feature_type='face'
+                          AND model_key=?
+                          AND variant='flip'
+                        """,
+                        (face_observation_id, EMBEDDING_MODEL_KEY),
+                    )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -182,7 +225,7 @@ class AssignmentStageService:
             """
             INSERT INTO face_embedding(
               face_observation_id, feature_type, model_key, variant, dim, dtype, vector_blob, created_at
-            ) VALUES (?, 'face', 'frozen_v5_pixel_v1', ?, 512, 'float32', ?, CURRENT_TIMESTAMP)
+            ) VALUES (?, 'face', ?, ?, 512, 'float32', ?, CURRENT_TIMESTAMP)
             ON CONFLICT(face_observation_id, feature_type, model_key, variant)
             DO UPDATE SET
               vector_blob=excluded.vector_blob,
@@ -190,10 +233,29 @@ class AssignmentStageService:
             """,
             (
                 int(face_observation_id),
+                EMBEDDING_MODEL_KEY,
                 str(variant),
                 safe_vector.astype(np.float32).tobytes(),
             ),
         )
+
+    def _persist_face_quality_scores(self, *, conn: sqlite3.Connection, face_rows: list[dict[str, object]]) -> None:
+        for row in face_rows:
+            observation_id = int(row.get("face_observation_id") or 0)
+            if observation_id <= 0:
+                continue
+            magface_quality = float(row.get("magface_quality") or 0.0)
+            quality_score = float(row.get("quality_score") or 0.0)
+            conn.execute(
+                """
+                UPDATE face_observation
+                SET magface_quality=?,
+                    quality_score=?,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (magface_quality, quality_score, observation_id),
+            )
 
     def _upsert_persons(self, person_rows: list[dict[str, object]], *, conn: sqlite3.Connection) -> dict[str, int]:
         person_map: dict[str, int] = {}
@@ -318,6 +380,7 @@ class AssignmentStageService:
         *,
         scan_session_id: int,
         assignment_run_id: int,
+        face_rows: list[dict[str, object]],
         person_rows: list[dict[str, object]],
         assignment_rows: list[dict[str, object]],
     ) -> tuple[int, int]:
@@ -325,6 +388,7 @@ class AssignmentStageService:
         try:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_not_aborting(scan_session_id=scan_session_id, conn=conn)
+            self._persist_face_quality_scores(conn=conn, face_rows=face_rows)
             person_map = self._upsert_persons(person_rows, conn=conn)
             assignment_count = self._persist_assignments(
                 scan_session_id=scan_session_id,
@@ -358,22 +422,65 @@ class AssignmentStageService:
                 db.close()
 
 
-def _default_embedding_calculator(aligned_path: Path) -> tuple[list[float], list[float]]:
-    if not aligned_path.exists():
-        raise FileNotFoundError(f"aligned 文件不存在: {aligned_path}")
-    image = Image.open(aligned_path).convert("L")
-    try:
-        base = image.resize((32, 16), Image.Resampling.BILINEAR)
-        main = np.asarray(base, dtype=np.float32).reshape(-1)
+def _resolve_magface_checkpoint(*, param_snapshot: dict[str, object]) -> Path:
+    snapshot_path = str(param_snapshot.get("magface_checkpoint") or "").strip()
+    if snapshot_path:
+        return Path(snapshot_path).expanduser().resolve()
 
-        flip_img = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).resize((32, 16), Image.Resampling.BILINEAR)
-        flip = np.asarray(flip_img, dtype=np.float32).reshape(-1)
+    env_path = str(os.environ.get(MAGFACE_CHECKPOINT_ENV, "")).strip()
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    return MAGFACE_CHECKPOINT_DEFAULT.expanduser().resolve()
 
-        main = _normalize_vector(main)
-        flip = _normalize_vector(flip)
-        return main.astype(float).tolist(), flip.astype(float).tolist()
-    finally:
-        image.close()
+
+def _build_default_embedding_calculator(*, param_snapshot: dict[str, object]):
+    checkpoint_path = _resolve_magface_checkpoint(param_snapshot=param_snapshot)
+    enable_flip = bool(param_snapshot.get("embedding_enable_flip", True))
+    flip_weight = float(param_snapshot.get("embedding_flip_weight", 1.0))
+    enable_flip = enable_flip and flip_weight > 0
+    embedder = MagFaceEmbedder(checkpoint_path=checkpoint_path)
+
+    def _calculator(aligned_path: Path):
+        if not aligned_path.exists():
+            raise FileNotFoundError(f"aligned 文件不存在: {aligned_path}")
+        aligned_bgr = cv2.imread(str(aligned_path), cv2.IMREAD_COLOR)
+        if aligned_bgr is None:
+            raise FileNotFoundError(f"aligned 文件不存在或无法读取: {aligned_path}")
+
+        embedding_main, magface_quality = embedder.embed(aligned_bgr)
+        embedding_flip: list[float] | None = None
+        if enable_flip:
+            aligned_bgr_flip = cv2.flip(aligned_bgr, 1)
+            embedding_flip, _ = embedder.embed(aligned_bgr_flip)
+        return embedding_main, embedding_flip, float(magface_quality)
+
+    return _calculator
+
+
+def _run_embedding_calculator(
+    *,
+    calculator,
+    aligned_path: Path,
+) -> tuple[list[float], list[float] | None, float]:
+    result = calculator(aligned_path)
+    if not isinstance(result, tuple):
+        raise ValueError("embedding_calculator 返回值必须是 tuple")
+
+    if len(result) == 3:
+        raw_main, raw_flip, raw_magface_quality = result
+        magface_quality = float(raw_magface_quality)
+    elif len(result) == 2:
+        raw_main, raw_flip = result
+        magface_quality = float(np.linalg.norm(np.asarray(raw_main, dtype=np.float32)))
+    else:
+        raise ValueError("embedding_calculator 返回值必须是 (main, flip) 或 (main, flip, magface_quality)")
+
+    main_vector = _normalize_vector(np.asarray(raw_main, dtype=np.float32)).astype(float).tolist()
+    if raw_flip is None:
+        flip_vector = None
+    else:
+        flip_vector = _normalize_vector(np.asarray(raw_flip, dtype=np.float32)).astype(float).tolist()
+    return main_vector, flip_vector, magface_quality
 
 
 def _normalize_vector(vector: np.ndarray) -> np.ndarray:

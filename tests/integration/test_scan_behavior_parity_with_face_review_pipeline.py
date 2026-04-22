@@ -48,7 +48,11 @@ def test_scan_behavior_parity_with_face_review_pipeline_sample(tmp_path: Path, m
     layout, session_id = _seed_workspace_for_parity(tmp_path)
     service = ScanExecutionService(db_path=layout.library_db, output_root=tmp_path / "runtime")
 
-    service.run_session(scan_session_id=session_id, detector=_parity_detector)
+    service.run_session(
+        scan_session_id=session_id,
+        detector=_parity_detector,
+        embedding_calculator=_test_embedding_calculator,
+    )
 
     product_person_count, product_assignment_count, source_dist = _load_product_stats(layout.library_db)
     baseline_person_count, baseline_assignment_count = _build_pipeline_baseline(layout.library_db, layout.embedding_db)
@@ -62,7 +66,11 @@ def test_scan_behavior_parity_with_face_review_pipeline_sample(tmp_path: Path, m
 def test_scan_behavior_parity_with_face_review_pipeline_sample_without_hdbscan_stub(tmp_path: Path) -> None:
     layout, session_id = _seed_workspace_for_parity(tmp_path)
     service = ScanExecutionService(db_path=layout.library_db, output_root=tmp_path / "runtime")
-    service.run_session(scan_session_id=session_id, detector=_parity_detector)
+    service.run_session(
+        scan_session_id=session_id,
+        detector=_parity_detector,
+        embedding_calculator=_test_embedding_calculator,
+    )
 
     product_person_count, product_assignment_count, source_dist = _load_product_stats(layout.library_db)
     baseline_person_count, baseline_assignment_count = _build_pipeline_baseline(layout.library_db, layout.embedding_db)
@@ -243,3 +251,23 @@ def _parity_detector(image: np.ndarray) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def _test_embedding_calculator(aligned_path: Path) -> tuple[list[float], list[float], float]:
+    image = Image.open(aligned_path).convert("L")
+    try:
+        base = np.asarray(image.resize((32, 16), Image.Resampling.BILINEAR), dtype=np.float32).reshape(-1)
+        flip = np.asarray(
+            image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).resize((32, 16), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        ).reshape(-1)
+    finally:
+        image.close()
+
+    base = base[:512] if base.shape[0] >= 512 else np.pad(base, (0, 512 - base.shape[0]), mode="constant")
+    flip = flip[:512] if flip.shape[0] >= 512 else np.pad(flip, (0, 512 - flip.shape[0]), mode="constant")
+    base_norm = float(np.linalg.norm(base))
+    flip_norm = float(np.linalg.norm(flip))
+    base = base if base_norm <= 1e-9 else (base / base_norm)
+    flip = flip if flip_norm <= 1e-9 else (flip / flip_norm)
+    return base.astype(float).tolist(), flip.astype(float).tolist(), max(base_norm, 1e-6)

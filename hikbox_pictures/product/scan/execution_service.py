@@ -181,6 +181,7 @@ class ScanExecutionService:
         scan_session_id: int,
         runtime_defaults: ScanRuntimeDefaults | None = None,
         detector=None,
+        embedding_calculator=None,
     ) -> ScanSessionRunResult:
         session = self._session_repo.get_session(scan_session_id)
         if session.status not in {"running", "aborting"}:
@@ -230,6 +231,7 @@ class ScanExecutionService:
             assignment_result = assignment_service.run_frozen_v5_assignment(
                 scan_session_id=scan_session_id,
                 run_kind=session.run_kind,
+                embedding_calculator=embedding_calculator,
             )
             self._session_repo.update_status(
                 scan_session_id,

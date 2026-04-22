@@ -27,6 +27,7 @@ def test_scan_session_runs_frozen_v5_end_to_end(tmp_path: Path) -> None:
     run_result = service.run_session(
         scan_session_id=session_id,
         detector=_detector_with_multi_faces,
+        embedding_calculator=_test_embedding_calculator,
     )
 
     assert run_result.assignment_run_id > 0
@@ -73,7 +74,11 @@ def test_scan_main_chain_calls_run_frozen_v5_assignment(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(AssignmentStageService, "run_frozen_v5_assignment", wrapped)
 
-    service.run_session(scan_session_id=session_id, detector=_detector_with_multi_faces)
+    service.run_session(
+        scan_session_id=session_id,
+        detector=_detector_with_multi_faces,
+        embedding_calculator=_test_embedding_calculator,
+    )
     assert called["count"] == 1
 
 
@@ -89,7 +94,11 @@ def test_scan_runtime_rejects_synthetic_observation_embedding_assignment(tmp_pat
 
     monkeypatch.setattr(frozen_v5_engine, "_cluster_with_hdbscan", fake_hdbscan)
 
-    service.run_session(scan_session_id=session_id, detector=_detector_with_multi_faces)
+    service.run_session(
+        scan_session_id=session_id,
+        detector=_detector_with_multi_faces,
+        embedding_calculator=_test_embedding_calculator,
+    )
 
     conn = sqlite3.connect(layout.library_db)
     try:
@@ -133,7 +142,11 @@ def test_abort_between_detect_and_assignment_interrupts_without_assignment(tmp_p
     monkeypatch.setattr(ScanExecutionService, "run_detect_stage", fake_detect)
     monkeypatch.setattr(AssignmentStageService, "run_frozen_v5_assignment", should_not_run_assignment)
 
-    result = service.run_session(scan_session_id=session_id, detector=_detector_with_multi_faces)
+    result = service.run_session(
+        scan_session_id=session_id,
+        detector=_detector_with_multi_faces,
+        embedding_calculator=_test_embedding_calculator,
+    )
     assert result.assignment_run_id == 0
 
     conn = sqlite3.connect(layout.library_db)
@@ -158,7 +171,11 @@ def test_abort_during_assignment_marks_assignment_run_failed_and_session_interru
         ScanSessionRepository(layout.library_db).update_status(scan_session_id, status="aborting")
 
     monkeypatch.setattr(AssignmentStageService, "_persist_embeddings", aborting_persist_embeddings)
-    result = service.run_session(scan_session_id=session_id, detector=_detector_with_multi_faces)
+    result = service.run_session(
+        scan_session_id=session_id,
+        detector=_detector_with_multi_faces,
+        embedding_calculator=_test_embedding_calculator,
+    )
     assert result.assignment_run_id == 0
 
     conn = sqlite3.connect(layout.library_db)
@@ -219,3 +236,23 @@ def _detector_with_multi_faces(image: np.ndarray) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def _test_embedding_calculator(aligned_path: Path) -> tuple[list[float], list[float], float]:
+    image = Image.open(aligned_path).convert("L")
+    try:
+        base = np.asarray(image.resize((32, 16), Image.Resampling.BILINEAR), dtype=np.float32).reshape(-1)
+        flip = np.asarray(
+            image.transpose(Image.Transpose.FLIP_LEFT_RIGHT).resize((32, 16), Image.Resampling.BILINEAR),
+            dtype=np.float32,
+        ).reshape(-1)
+    finally:
+        image.close()
+
+    base = base[:512] if base.shape[0] >= 512 else np.pad(base, (0, 512 - base.shape[0]), mode="constant")
+    flip = flip[:512] if flip.shape[0] >= 512 else np.pad(flip, (0, 512 - flip.shape[0]), mode="constant")
+    base_norm = float(np.linalg.norm(base))
+    flip_norm = float(np.linalg.norm(flip))
+    base = base if base_norm <= 1e-9 else (base / base_norm)
+    flip = flip if flip_norm <= 1e-9 else (flip / flip_norm)
+    return base.astype(float).tolist(), flip.astype(float).tolist(), max(base_norm, 1e-6)
