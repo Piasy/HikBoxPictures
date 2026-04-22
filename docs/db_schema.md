@@ -315,6 +315,7 @@
 | `started_at` | `TEXT` | `NOT NULL` | 开始时间 |
 | `finished_at` | `TEXT` |  | 结束时间 |
 | `status` | `TEXT` | `NOT NULL CHECK (status IN ('running','completed','failed'))` | 状态 |
+| `updated_at` | `TEXT` | `NOT NULL` | 更新时间 |
 
 索引：
 
@@ -324,6 +325,33 @@
 规则：
 
 - 若扫描在 assignment 阶段被用户中止，运行中的 `assignment_run.status` 记为 `failed`（原因由 `last_error`/事件日志记录）。
+- `param_snapshot_json` 必须完整覆盖冻结参数（spec §7.2），包含：
+  - `det_size=640`
+  - `preview_max_side=480`
+  - `min_cluster_size=2`
+  - `min_samples=1`
+  - `person_merge_threshold=0.26`
+  - `person_linkage='single'`
+  - `person_rep_top_k=3`
+  - `person_knn_k=8`
+  - `person_enable_same_photo_cannot_link=false`
+  - `embedding_enable_flip=true`
+  - `person_consensus_distance_threshold=0.24`
+  - `person_consensus_margin_threshold=0.04`
+  - `person_consensus_rep_top_k=3`
+  - `face_min_quality_for_assignment=0.25`
+  - `low_quality_micro_cluster_max_size=3`
+  - `low_quality_micro_cluster_top2_weight=0.5`
+  - `low_quality_micro_cluster_min_quality_evidence=0.72`
+  - `person_cluster_recall_distance_threshold=0.32`
+  - `person_cluster_recall_margin_threshold=0.04`
+  - `person_cluster_recall_top_n=5`
+  - `person_cluster_recall_min_votes=3`
+  - `person_cluster_recall_source_max_cluster_size=20`
+  - `person_cluster_recall_source_max_person_faces=8`
+  - `person_cluster_recall_target_min_person_faces=40`
+  - `person_cluster_recall_max_rounds=2`
+- `param_snapshot_json` 中不允许出现 `embedding_flip_weight`。
 
 #### `person_face_assignment`
 
@@ -344,6 +372,7 @@
 
 - 自动来源：`hdbscan|person_consensus`；不存在 `manual`。
 - `noise` 与 `low_quality_ignored` 不写入 `person_face_assignment`。
+- 允许值仅 `hdbscan|person_consensus|merge|undo`。
 - partial unique：`UNIQUE(face_observation_id) WHERE active=1`。
 - `idx_assignment_person(person_id, active)`。
 - `idx_assignment_run(assignment_run_id)`。
