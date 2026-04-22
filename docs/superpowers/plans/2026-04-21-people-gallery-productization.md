@@ -48,35 +48,35 @@
 - 可并行任务：无。
 - 执行任务：Task 1。
 - 原因：Task 1 建立产品目录与双库初始化能力，后续任务共享。
-- 阻塞任务：Task 2-11。
+- 阻塞任务：Task 2-12。
 - 解锁条件：Task 1 完成。
 
 ### Wave B（扫描会话）
 - 可并行任务：无。
 - 执行任务：Task 2。
 - 原因：Task 2 先建立单活状态机与会话编排，Task 3-5 依赖其语义。
-- 阻塞任务：Task 3-11。
+- 阻塞任务：Task 3-12。
 - 解锁条件：Task 2 完成。
 
 ### Wave C（扫描输入阶段）
 - 可并行任务：无。
 - 执行任务：Task 3。
 - 原因：metadata/fingerprint/live photo 结果是 detect 与 assignment 输入前提。
-- 阻塞任务：Task 4-11。
+- 阻塞任务：Task 4-12。
 - 解锁条件：Task 3 完成。
 
 ### Wave D（detect 阶段）
 - 可并行任务：无。
 - 执行任务：Task 4。
 - 原因：必须先把 detect 做成“真实模型 + 真实产物 + 真实落库”，后续 embedding/assignment 才有可信输入。
-- 阻塞任务：Task 5-11。
+- 阻塞任务：Task 5-12。
 - 解锁条件：Task 4 完成。
 
 ### Wave E（冻结引擎接入）
 - 可并行任务：无。
 - 执行任务：Task 5。
 - 原因：人物/导出/审计依赖的不只是 `assignment_run` 字段，还依赖冻结链路真实执行与主链路接线完成。
-- 阻塞任务：Task 6-11。
+- 阻塞任务：Task 6-12。
 - 解锁条件：Task 5 完成。
 
 ### Wave F（业务域并行）
@@ -86,27 +86,34 @@
   - Task 8（审计采样与 ops 日志）
 - 并行理由：三者分别落到 `people/`、`export/`、`audit/` 与对应测试目录，可并发开发。共享装配文件 `hikbox_pictures/product/service_registry.py` 仅允许 Task 8 修改，Task 6 与 Task 7 禁止触碰该文件。
 - 冲突回退顺序：若执行中出现共享依赖装配冲突，按 Task 6 -> Task 7 -> Task 8 顺序串行合并。
-- 阻塞任务：Task 9-11。
+- 阻塞任务：Task 9-12。
 - 解锁条件：Task 6、Task 7、Task 8 完成。
 
 ### Wave G（Web 收口）
 - 可并行任务：无。
 - 执行任务：Task 9。
 - 原因：页面与 API 需要绑定 Task 6-8 的服务接口，必须在其后统一集成。
-- 阻塞任务：Task 10-11。
+- 阻塞任务：Task 10-12。
 - 解锁条件：Task 9 完成。
 
 ### Wave H（CLI 收口）
 - 可并行任务：无。
 - 执行任务：Task 10。
 - 原因：CLI `serve start` 依赖 Web app factory；其余命令依赖完整服务层。
-- 阻塞任务：Task 11。
+- 阻塞任务：Task 11-12。
 - 解锁条件：Task 10 完成。
 
 ### Wave I（验收与文档）
 - 可并行任务：无。
 - 执行任务：Task 11。
 - 原因：需要基于全量功能做集成验收、文档同步与最终回归。
+- 阻塞任务：Task 12。
+- 解锁条件：Task 11 完成。
+
+### Wave J（真实数据回归）
+- 可并行任务：无。
+- 执行任务：Task 12。
+- 原因：必须使用仓库内真实样本完成“完整全链路集成测试”收口，阻断仅用合成样本的伪通过。
 - 阻塞任务：无。
 
 ### Task 1: 产品骨架与双库初始化
@@ -324,7 +331,7 @@ Expected: PASS。
 - Test: `tests/product/test_metadata_live_photo.py`
 - Test: `tests/product/test_multi_source_discover_flow.py`
 
-- [ ] **Step 1: 写 Live Photo 匹配失败用例（仅 HEIC/HEIF，支持两种隐藏 MOV 命名）**
+- [ ] **Step 1: 写 Live Photo 匹配失败用例（含 `tests/data/live-example` 真实样本，且仅 HEIC/HEIF，支持两种隐藏 MOV 命名）**
 
 ```python
 def test_match_live_photo_hidden_mov_patterns(tmp_path: Path):
@@ -333,6 +340,12 @@ def test_match_live_photo_hidden_mov_patterns(tmp_path: Path):
     still.write_bytes(b"x"); mov.write_bytes(b"y")
     result = match_live_mov(still)
     assert result.name == mov.name
+
+def test_match_live_photo_real_sample_from_tests_data():
+    base = Path("tests/data/live-example")
+    still = base / "IMG_6576.HEIC"
+    matched = match_live_mov(still)
+    assert matched == base / ".IMG_6576_1771856408444916.MOV"
 ```
 
 - [ ] **Step 2: 写增量判定失败用例（file_size/mtime_ns 任一变化触发全阶段重跑）**
@@ -363,10 +376,10 @@ should_rerun = old.file_size != new.file_size or old.mtime_ns != new.mtime_ns
 capture_month = parsed_dt.strftime("%Y-%m")
 ```
 
-- [ ] **Step 6: 实现 Live Photo 入库字段写入（metadata 阶段完成，导出阶段只读）**
+- [ ] **Step 6: 实现 Live Photo 入库字段写入（metadata 阶段完成，导出阶段只读），并通过真实样本匹配单测**
 
-Run: `source .venv/bin/activate && pytest tests/product/test_metadata_live_photo.py tests/product/test_multi_source_discover_flow.py -v`
-Expected: PASS。
+Run: `source .venv/bin/activate && pytest tests/product/test_metadata_live_photo.py::test_match_live_photo_hidden_mov_patterns tests/product/test_metadata_live_photo.py::test_match_live_photo_real_sample_from_tests_data tests/product/test_metadata_live_photo.py::test_match_live_photo_returns_none_when_mov_missing tests/product/test_multi_source_discover_flow.py -v`
+Expected: PASS，真实样本命中隐藏 MOV，缺失 MOV 返回空值。
 
 - [ ] **Step 7: 同步文档中的 live_mov_* 字段与阶段语义**
 
@@ -1392,3 +1405,70 @@ Expected: 表、字段、枚举、索引描述一致。
 
 Run: `source .venv/bin/activate && ./scripts/run_tests.sh`
 Expected: 全量测试 PASS，无新增回归。
+
+### Task 12: 真实样本全链路集成收口
+
+**Depends on:** Task 11
+
+**Scope Budget:**
+- Max files: 20
+- Estimated files touched: 5
+- Max added lines: 1000
+- Estimated added lines: 360
+
+**Files:**
+- Create: `tests/integration/test_real_data_e2e_face_input.py`
+- Modify: `tests/integration/test_productization_acceptance.py`
+- Modify: `scripts/run_tests.sh`
+- Modify: `README.md`
+- Test: `tests/integration/test_real_data_e2e_face_input.py`
+
+- [ ] **Step 1: 写真实全链路集成失败用例（强制使用 `tests/data/e2e-face-input`，通过公共入口触发完整扫描链路）**
+
+```python
+REAL_E2E_DATASET = Path("tests/data/e2e-face-input").resolve()
+
+def test_real_dataset_scan_runs_full_pipeline_and_persists_results(cli_bin, tmp_path: Path):
+    workspace = bootstrap_workspace_with_source(tmp_path, REAL_E2E_DATASET)
+    session_id = run_cli_scan_start_new_and_wait(cli_bin, workspace)
+    with sqlite3.connect(workspace / ".hikbox" / "library.db") as conn:
+        stage = conn.execute(
+            "SELECT discover_status, metadata_status, detect_status, embed_status, cluster_status, assignment_status "
+            "FROM scan_session WHERE id=?",
+            [session_id],
+        ).fetchone()
+        photo_count, obs_count, assign_count = conn.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM photo_asset WHERE active=1),"
+            "(SELECT COUNT(*) FROM face_observation WHERE active=1),"
+            "(SELECT COUNT(*) FROM person_face_assignment WHERE active=1)"
+        ).fetchone()
+    assert stage == ("completed", "completed", "completed", "completed", "completed", "completed")
+    assert photo_count == 38
+    assert obs_count > 0 and assign_count > 0
+```
+
+- [ ] **Step 2: 跑真实全链路失败用例，确认当前实现未满足前先失败**
+
+Run: `source .venv/bin/activate && pytest tests/integration/test_real_data_e2e_face_input.py::test_real_dataset_scan_runs_full_pipeline_and_persists_results -v`
+Expected: FAIL（未完成真实链路接线或断言尚未满足时必须失败）。
+
+- [ ] **Step 3: 实现真实数据夹具与全链路断言（读取 `manifest.json`、校验阶段推进、校验非占位分布）**
+
+Run: `source .venv/bin/activate && pytest tests/integration/test_real_data_e2e_face_input.py -v`
+Expected: PASS，且断言至少覆盖：`manifest` 样本计数、`scan_session` 六阶段完成、`face_observation`/`person_face_assignment` 真实落库、bbox/quality 非常量分布。
+
+- [ ] **Step 4: 把真实全链路用例接入 AC11/验收映射，禁止“仅合成样本通过”**
+
+Run: `source .venv/bin/activate && rg -n "real_data_e2e_face_input|tests/data/e2e-face-input|AC11" tests/integration/test_productization_acceptance.py`
+Expected: 命中真实样本链路引用，AC11 验收包含该用例或等价断言。
+
+- [ ] **Step 5: 更新测试入口与文档，确保真实 `e2e-face-input` 用例纳入标准回归**
+
+Run: `source .venv/bin/activate && rg -n "test_real_data_e2e_face_input|tests/data/e2e-face-input" scripts/run_tests.sh README.md`
+Expected: 命中测试入口与说明，开发者按文档可直接复现真实全链路集成测试。
+
+- [ ] **Step 6: 执行本任务收口回归（仅真实全链路集成）**
+
+Run: `source .venv/bin/activate && pytest tests/integration/test_real_data_e2e_face_input.py -v`
+Expected: PASS，真实完整链路由仓库内 `e2e-face-input` 数据覆盖。
