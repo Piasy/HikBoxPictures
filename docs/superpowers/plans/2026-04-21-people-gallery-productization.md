@@ -412,7 +412,7 @@ Expected: 字段与行为描述一致。
 - Test: `tests/product/test_detect_payload_ingest.py`
 - Test: `tests/integration/test_detect_runtime_parity.py`
 
-- [ ] **Step 1: 写失败用例（默认 det_size/workers/batch_size 与批次切分规则）**
+- [x] **Step 1: 写失败用例（默认 det_size/workers/batch_size 与批次切分规则）**
 
 ```python
 defaults = build_scan_runtime_defaults(cpu_count=8)
@@ -424,7 +424,7 @@ assert split_batch(total=300, workers=3) == [100, 100, 100]
 assert split_batch(total=302, workers=3) == [101, 101, 100]
 ```
 
-- [ ] **Step 2: 写失败用例（worker payload 必须包含真实 face 明细，不允许 done-only）**
+- [x] **Step 2: 写失败用例（worker payload 必须包含真实 face 明细，不允许 done-only）**
 
 ```python
 payload = run_worker_for_fixture(...)
@@ -432,35 +432,35 @@ assert "faces" in payload["results"][0]
 assert {"bbox", "detector_confidence", "face_area_ratio", "crop_relpath", "aligned_relpath", "context_relpath"} <= payload["results"][0]["faces"][0].keys()
 ```
 
-- [ ] **Step 3: 写失败用例（ack 必须消费 worker payload 并真实写入 face_observation）**
+- [x] **Step 3: 写失败用例（ack 必须消费 worker payload 并真实写入 face_observation）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_detect_payload_ingest.py::test_ack_ingests_worker_faces_into_face_observation -v`
 Expected: FAIL（当前实现尚未落库真实检测结果）。
 
-- [ ] **Step 4: 实现主进程 claim/dispatch/ack 流程和 scan_batch/scan_batch_item 状态推进**
+- [x] **Step 4: 实现主进程 claim/dispatch/ack 流程和 scan_batch/scan_batch_item 状态推进**
 
 ```python
 with repo.transaction():
     batch_id = repo.claim_detect_batch(...)
 ```
 
-- [ ] **Step 5: 实现子进程真实检测输出协议与临时文件+rename 产物写入**
+- [x] **Step 5: 实现子进程真实检测输出协议与临时文件+rename 产物写入**
 
 ```python
 tmp_path.replace(final_path)
 ```
 
-- [ ] **Step 6: 在 `ack_detect_batch` 中强制消费 payload 并落库 observation（禁止无 payload 自动 done）**
+- [x] **Step 6: 在 `ack_detect_batch` 中强制消费 payload 并落库 observation（禁止无 payload 自动 done）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_detect_payload_ingest.py::test_ack_without_payload_is_rejected tests/product/test_detect_payload_ingest.py::test_ack_ingests_worker_faces_into_face_observation -v`
 Expected: PASS。
 
-- [ ] **Step 7: 实现 abort 场景下未 ack 批次回退与 interrupted 迁移**
+- [x] **Step 7: 实现 abort 场景下未 ack 批次回退与 interrupted 迁移**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_detect_batch_claim_ack.py::test_abort_rolls_back_unacked_batches -v`
 Expected: PASS。
 
-- [ ] **Step 8: 跑 detect 阶段回归并校验“非占位”约束**
+- [x] **Step 8: 跑 detect 阶段回归并校验“非占位”约束**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_detect_batch_claim_ack.py tests/product/test_detect_worker_contract.py tests/product/test_detect_payload_ingest.py -v`
 Expected: PASS。
@@ -468,7 +468,7 @@ Expected: PASS。
 Run: `source .venv/bin/activate && rg -n "0\\.1, 0\\.1, 0\\.9, 0\\.9|status['\"]:\\s*['\"]done['\"]\\s*[,}]\\s*$" hikbox_pictures/product/scan -S`
 Expected: 不得命中固定 bbox 占位写库逻辑；`status=done` 只能作为单 item 状态，不得成为唯一输出载荷。
 
-- [ ] **Step 9: 增加 detect 基线对齐测试（与 `face_review_pipeline` 同样本对比）**
+- [x] **Step 9: 增加 detect 基线对齐测试（与 `face_review_pipeline` 同样本对比）**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_detect_runtime_parity.py::test_detect_stage_parity_with_face_review_pipeline_sample -v`
 Expected: PASS，且至少满足：人脸总数偏差在阈值内、bbox 非常量分布、`quality_score` 非常量分布；若出现“每图 1 脸 + 固定 bbox/质量”则必须 FAIL。

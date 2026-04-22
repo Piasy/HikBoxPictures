@@ -191,6 +191,8 @@
 规则：
 
 - `scan_batch` 仅用于 `detect + aligned + crop/context` 产物阶段；其他阶段不走 claim/ack。
+- `claim_token` 由主进程在 claim 时校验；只有 `status='running'` 且 token 匹配的批次允许 ack。
+- `aborting` 场景下，未 ack 的 `claimed/running` 批次必须回退并标记失败，`scan_session` 迁移为 `interrupted`。
 
 #### `scan_batch_item`
 
@@ -274,6 +276,11 @@
 - `CHECK (bbox_x2 > bbox_x1 AND bbox_y2 > bbox_y1)`
 - `idx_face_observation_asset(photo_asset_id)`
 - `idx_face_observation_pending_reassign(pending_reassign)`
+
+规则：
+
+- `ack_detect_batch` 必须消费 worker payload 中的 `faces` 明细并写入 `face_observation`；禁止“无 payload 自动 done”。
+- detect 产物（`crop/aligned/context`）采用临时文件写入后 `tmp_path.replace(final_path)` 原子落盘，避免半写入状态。
 
 ### 4.3 人物、归属、排除
 

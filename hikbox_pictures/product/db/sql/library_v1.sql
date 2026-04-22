@@ -99,3 +99,67 @@ ON photo_asset(primary_fingerprint);
 
 CREATE INDEX IF NOT EXISTS idx_photo_asset_capture_month
 ON photo_asset(capture_month);
+
+CREATE TABLE IF NOT EXISTS scan_batch (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_session_id INTEGER NOT NULL REFERENCES scan_session(id),
+  stage TEXT NOT NULL CHECK (stage='detect'),
+  worker_slot INTEGER NOT NULL,
+  claim_token TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('claimed','running','acked','failed')),
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  started_at TEXT,
+  acked_at TEXT,
+  error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_batch_session
+ON scan_batch(scan_session_id);
+
+CREATE INDEX IF NOT EXISTS idx_scan_batch_status
+ON scan_batch(status);
+
+CREATE TABLE IF NOT EXISTS scan_batch_item (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_batch_id INTEGER NOT NULL REFERENCES scan_batch(id),
+  photo_asset_id INTEGER NOT NULL REFERENCES photo_asset(id),
+  item_order INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending','running','done','failed')),
+  error_message TEXT,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(scan_batch_id, item_order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_batch_item_asset
+ON scan_batch_item(photo_asset_id);
+
+CREATE TABLE IF NOT EXISTS face_observation (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  photo_asset_id INTEGER NOT NULL REFERENCES photo_asset(id),
+  face_index INTEGER NOT NULL,
+  crop_relpath TEXT NOT NULL,
+  aligned_relpath TEXT NOT NULL,
+  context_relpath TEXT NOT NULL,
+  bbox_x1 REAL NOT NULL,
+  bbox_y1 REAL NOT NULL,
+  bbox_x2 REAL NOT NULL,
+  bbox_y2 REAL NOT NULL,
+  detector_confidence REAL NOT NULL,
+  face_area_ratio REAL NOT NULL,
+  magface_quality REAL NOT NULL,
+  quality_score REAL NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0,1)),
+  inactive_reason TEXT CHECK (inactive_reason IN ('asset_deleted','re_detect_replaced','manual_drop') OR inactive_reason IS NULL),
+  pending_reassign INTEGER NOT NULL DEFAULT 0 CHECK (pending_reassign IN (0,1)),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(photo_asset_id, face_index),
+  CHECK (bbox_x2 > bbox_x1 AND bbox_y2 > bbox_y1)
+);
+
+CREATE INDEX IF NOT EXISTS idx_face_observation_asset
+ON face_observation(photo_asset_id);
+
+CREATE INDEX IF NOT EXISTS idx_face_observation_pending_reassign
+ON face_observation(pending_reassign);
