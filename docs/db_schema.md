@@ -42,6 +42,16 @@
 
 - 应用启动时若 DB 不存在，直接按本文创建全量 schema。
 - 不支持对旧 prototype schema 自动 `ALTER TABLE` 兜底。
+- 初始化入口为 `hikbox_pictures.product.config.initialize_workspace`。
+- 初始化 SQL 固定为：
+  - `hikbox_pictures/product/db/sql/library_v1.sql`
+  - `hikbox_pictures/product/db/sql/embedding_v1.sql`
+- 初始化策略为“幂等建表 + 固定元信息 upsert”：每次初始化都会写入（或刷新）以下键值：
+  - `schema_meta.schema_version = '1'`
+  - `schema_meta.product_schema_name = 'people_gallery_v1'`
+  - `embedding_meta.schema_version = '1'`
+  - `embedding_meta.vector_dim = '512'`
+  - `embedding_meta.vector_dtype = 'float32'`
 
 ### 3.2 后续版本（schema_version>=2）
 

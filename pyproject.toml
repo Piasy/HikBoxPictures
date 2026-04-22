@@ -40,6 +40,7 @@ hikbox-face-review = "hikbox_pictures.face_review_pipeline:main"
 hikbox_pictures = [
   "web/templates/*.html",
   "web/static/*",
+  "product/db/sql/*.sql",
 ]
 
 [tool.pytest.ini_options]
