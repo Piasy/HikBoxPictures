@@ -6,7 +6,7 @@ import sqlite3
 
 from hikbox_pictures.product.config import initialize_workspace
 from hikbox_pictures.product.scan.discover_stage import DiscoverStageService
-from hikbox_pictures.product.scan.errors import StageSchemaMissingError
+from hikbox_pictures.product.scan.errors import SessionNotFoundError, StageSchemaMissingError
 from hikbox_pictures.product.scan.session_service import ScanSessionRepository
 from hikbox_pictures.product.source.repository import SourceRepository
 from hikbox_pictures.product.source.service import SourceService
@@ -135,3 +135,17 @@ def test_discover_raises_clear_error_when_scan_session_table_missing(tmp_path: P
 
     with pytest.raises(StageSchemaMissingError, match="scan_session"):
         DiscoverStageService(layout.library_db).run(scan_session_id=1)
+
+
+def test_discover_raises_domain_error_when_scan_session_not_found(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    external_root = tmp_path / "external"
+    source_root = tmp_path / "photos"
+    source_root.mkdir(parents=True)
+    (source_root / "IMG_0012.HEIC").write_bytes(b"x")
+
+    layout = initialize_workspace(workspace_root=workspace_root, external_root=external_root)
+    SourceService(SourceRepository(layout.library_db)).add_source(str(source_root), label="family")
+
+    with pytest.raises(SessionNotFoundError, match="session_id=9999"):
+        DiscoverStageService(layout.library_db).run(scan_session_id=9999)

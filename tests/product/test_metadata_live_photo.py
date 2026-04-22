@@ -8,7 +8,7 @@ import pytest
 
 from hikbox_pictures.product.config import initialize_workspace
 from hikbox_pictures.product.scan.discover_stage import DiscoverStageService
-from hikbox_pictures.product.scan.errors import StageSchemaMissingError
+from hikbox_pictures.product.scan.errors import SessionNotFoundError, StageSchemaMissingError
 from hikbox_pictures.product.scan.live_photo import match_live_mov
 from hikbox_pictures.product.scan.metadata_stage import MetadataStageService, parse_capture_datetime
 from hikbox_pictures.product.scan.session_service import ScanSessionRepository
@@ -249,3 +249,64 @@ def test_metadata_raises_clear_error_when_scan_session_table_missing(tmp_path: P
 
     with pytest.raises(StageSchemaMissingError, match="scan_session"):
         MetadataStageService(layout.library_db).run(scan_session_id=1)
+
+
+def test_metadata_raises_domain_error_when_scan_session_not_found(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    external_root = tmp_path / "external"
+    source_root = tmp_path / "photos"
+    source_root.mkdir(parents=True)
+    (source_root / "IMG_C.HEIC").write_bytes(b"x")
+
+    layout = initialize_workspace(workspace_root=workspace_root, external_root=external_root)
+    SourceService(SourceRepository(layout.library_db)).add_source(str(source_root), label="family")
+
+    with pytest.raises(SessionNotFoundError, match="session_id=9999"):
+        MetadataStageService(layout.library_db).run(scan_session_id=9999)
+
+
+def test_metadata_marks_missing_asset_and_counts_failed_assets(tmp_path: Path) -> None:
+    workspace_root = tmp_path / "workspace"
+    external_root = tmp_path / "external"
+    source_root = tmp_path / "photos"
+    source_root.mkdir(parents=True)
+    still = source_root / "IMG_MISSING.HEIC"
+    still.write_bytes(b"x")
+
+    layout = initialize_workspace(workspace_root=workspace_root, external_root=external_root)
+    source = SourceService(SourceRepository(layout.library_db)).add_source(str(source_root), label="family")
+    session = ScanSessionRepository(layout.library_db).create_session(
+        run_kind="scan_full",
+        status="running",
+        triggered_by="manual_cli",
+    )
+    DiscoverStageService(layout.library_db).run(scan_session_id=session.id)
+    still.unlink()
+
+    summary = MetadataStageService(layout.library_db).run(scan_session_id=session.id)
+    assert summary.by_source[source.id].failed_assets == 1
+    assert summary.by_source[source.id].processed_assets == 0
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        asset_row = conn.execute(
+            """
+            SELECT asset_status
+            FROM photo_asset
+            WHERE library_source_id = ? AND primary_path = 'IMG_MISSING.HEIC'
+            """,
+            (source.id,),
+        ).fetchone()
+        progress_row = conn.execute(
+            """
+            SELECT failed_assets
+            FROM scan_session_source
+            WHERE scan_session_id = ? AND library_source_id = ?
+            """,
+            (session.id, source.id),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert asset_row == ("missing",)
+    assert progress_row == (1,)

@@ -10,7 +10,7 @@ from pathlib import Path
 from PIL import Image
 
 from hikbox_pictures.product.db.connection import connect_sqlite
-from hikbox_pictures.product.scan.errors import StageSchemaMissingError
+from hikbox_pictures.product.scan.errors import SessionNotFoundError, StageSchemaMissingError
 from hikbox_pictures.product.scan.live_photo import pick_best_live_mov
 from hikbox_pictures.product.scan.models import MetadataSourceSummary, MetadataStageSummary
 
@@ -57,6 +57,7 @@ class MetadataStageService:
         conn.row_factory = sqlite3.Row
         try:
             self._assert_required_tables(conn)
+            self._assert_scan_session_exists(conn, scan_session_id=scan_session_id)
             sources = conn.execute(
                 """
                 SELECT id, root_path
@@ -101,6 +102,16 @@ class MetadataStageService:
             mtime_ns = int(row[2])
             full_path = source_root / rel_path
             if not full_path.exists():
+                conn.execute(
+                    """
+                    UPDATE photo_asset
+                    SET asset_status = 'missing',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (asset_id,),
+                )
+                failed_assets += 1
                 continue
 
             try:
@@ -219,6 +230,18 @@ class MetadataStageService:
         missing = sorted(REQUIRED_TABLES - existing)
         if missing:
             raise StageSchemaMissingError(stage="metadata", missing_tables=missing)
+
+    def _assert_scan_session_exists(self, conn: sqlite3.Connection, *, scan_session_id: int) -> None:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM scan_session
+            WHERE id = ?
+            """,
+            (scan_session_id,),
+        ).fetchone()
+        if row is None:
+            raise SessionNotFoundError(scan_session_id)
 
 
 def _resolve_asset_capture_datetime(

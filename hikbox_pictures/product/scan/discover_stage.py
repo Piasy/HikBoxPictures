@@ -7,7 +7,7 @@ import sqlite3
 from pathlib import Path
 
 from hikbox_pictures.product.db.connection import connect_sqlite
-from hikbox_pictures.product.scan.errors import StageSchemaMissingError
+from hikbox_pictures.product.scan.errors import SessionNotFoundError, StageSchemaMissingError
 from hikbox_pictures.product.scan.fingerprint import sha256_file
 from hikbox_pictures.product.scan.models import DiscoverSourceSummary, DiscoverStageSummary
 
@@ -31,6 +31,7 @@ class DiscoverStageService:
         conn.row_factory = sqlite3.Row
         try:
             self._assert_required_tables(conn)
+            self._assert_scan_session_exists(conn, scan_session_id=scan_session_id)
             source_rows = conn.execute(
                 """
                 SELECT id, root_path
@@ -229,3 +230,15 @@ class DiscoverStageService:
         missing = sorted(REQUIRED_TABLES - existing)
         if missing:
             raise StageSchemaMissingError(stage="discover", missing_tables=missing)
+
+    def _assert_scan_session_exists(self, conn: sqlite3.Connection, *, scan_session_id: int) -> None:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM scan_session
+            WHERE id = ?
+            """,
+            (scan_session_id,),
+        ).fetchone()
+        if row is None:
+            raise SessionNotFoundError(scan_session_id)
