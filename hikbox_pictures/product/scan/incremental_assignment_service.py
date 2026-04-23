@@ -234,8 +234,14 @@ class IncrementalAssignmentService:
         face_embedding = self._load_face_embedding(face_observation_id)
         if face_embedding is None:
             return None
+        excluded_person_ids = self._load_active_excluded_person_ids(
+            face_observation_ids=[face_observation_id],
+            conn=conn,
+        ).get(int(face_observation_id), set())
         recalled_scores: list[dict[str, object]] = []
         for cluster in self._cluster_repo.list_active_clusters(conn=conn):
+            if int(cluster.person_id) in excluded_person_ids:
+                continue
             rep_ids = self._filter_active_face_ids(
                 [item.face_observation_id for item in self._cluster_repo.list_cluster_rep_faces(cluster.id, conn=conn)],
                 conn=conn,
@@ -465,6 +471,10 @@ class IncrementalAssignmentService:
             face_observation_ids=sorted(subset_face_ids - set(batch_face_ids)),
             conn=conn,
         )
+        excluded_person_ids_by_face = self._load_active_excluded_person_ids(
+            face_observation_ids=batch_face_ids,
+            conn=conn,
+        )
         assigned_face_ids: set[int] = set()
         batch_face_id_set = set(batch_face_ids)
         for group_face_ids in person_groups.values():
@@ -484,24 +494,46 @@ class IncrementalAssignmentService:
             }
             if len(existing_person_ids) == 1:
                 target_person_id = next(iter(existing_person_ids))
-                self._assign_faces_to_person(
-                    conn=conn,
-                    face_observation_ids=candidate_group_ids,
-                    person_id=target_person_id,
-                    assignment_run_id=assignment_run_id,
-                    assignment_source="merge",
-                )
-                self._cluster_repo.create_cluster_for_person(
-                    person_id=target_person_id,
-                    assignment_run_id=assignment_run_id,
-                    member_face_ids=candidate_group_ids,
-                    representative_face_ids=[],
-                    face_quality_by_id=face_quality_by_id,
-                    conn=conn,
-                    rebuild_scope="local",
-                )
-                assigned_face_ids.update(candidate_group_ids)
-                continue
+                allowed_face_ids = [
+                    int(face_id)
+                    for face_id in candidate_group_ids
+                    if target_person_id not in excluded_person_ids_by_face.get(int(face_id), set())
+                ]
+                blocked_face_ids = [
+                    int(face_id)
+                    for face_id in candidate_group_ids
+                    if target_person_id in excluded_person_ids_by_face.get(int(face_id), set())
+                ]
+                if allowed_face_ids:
+                    self._assign_faces_to_person(
+                        conn=conn,
+                        face_observation_ids=allowed_face_ids,
+                        person_id=target_person_id,
+                        assignment_run_id=assignment_run_id,
+                        assignment_source="merge",
+                    )
+                    self._cluster_repo.create_cluster_for_person(
+                        person_id=target_person_id,
+                        assignment_run_id=assignment_run_id,
+                        member_face_ids=allowed_face_ids,
+                        representative_face_ids=[],
+                        face_quality_by_id=face_quality_by_id,
+                        conn=conn,
+                        rebuild_scope="local",
+                    )
+                    assigned_face_ids.update(allowed_face_ids)
+                if blocked_face_ids:
+                    assigned_face_ids.update(
+                        self._create_new_person_cluster(
+                            conn=conn,
+                            member_face_ids=blocked_face_ids,
+                            representative_face_ids=[],
+                            assignment_run_id=assignment_run_id,
+                            face_quality_by_id=face_quality_by_id,
+                        )
+                    )
+                if allowed_face_ids or blocked_face_ids:
+                    continue
             if existing_person_ids:
                 continue
             assigned_face_ids.update(
@@ -775,6 +807,37 @@ class IncrementalAssignmentService:
             (int(limit),),
         ).fetchall()
         return {int(row[0]) for row in rows}
+
+    def _load_active_excluded_person_ids(
+        self,
+        *,
+        face_observation_ids: list[int],
+        conn: sqlite3.Connection | None,
+    ) -> dict[int, set[int]]:
+        unique_ids = sorted({int(face_id) for face_id in face_observation_ids if int(face_id) > 0})
+        if not unique_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in unique_ids)
+        managed_conn = conn is None
+        db = conn or connect_sqlite(self._library_db_path)
+        try:
+            rows = db.execute(
+                f"""
+                SELECT face_observation_id, person_id
+                FROM person_face_exclusion
+                WHERE active=1
+                  AND face_observation_id IN ({placeholders})
+                ORDER BY face_observation_id ASC, person_id ASC
+                """,
+                tuple(unique_ids),
+            ).fetchall()
+        finally:
+            if managed_conn:
+                db.close()
+        excluded_person_ids_by_face: dict[int, set[int]] = {}
+        for face_observation_id, person_id in rows:
+            excluded_person_ids_by_face.setdefault(int(face_observation_id), set()).add(int(person_id))
+        return excluded_person_ids_by_face
 
     def _filter_active_face_ids(
         self,
