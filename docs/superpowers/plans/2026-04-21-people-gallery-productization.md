@@ -671,7 +671,7 @@ Expected: PASS。
 - Test: `tests/product/test_people_exclusion_reassign.py`
 - Test: `tests/product/test_people_merge_undo.py`
 
-- [ ] **Step 1: 写失败用例（排除事务必须同时停用 assignment、激活 exclusion、置 pending_reassign=1）**
+- [x] **Step 1: 写失败用例（排除事务必须同时停用 assignment、激活 exclusion、置 pending_reassign=1）**
 
 ```python
 assert row.active_assignment == 0
@@ -679,28 +679,28 @@ assert row.active_exclusion == 1
 assert row.pending_reassign == 1
 ```
 
-- [ ] **Step 2: 写失败用例（merge 时迁移 loser exclusion，undo 回滚 delta）**
+- [x] **Step 2: 写失败用例（merge 时迁移 loser exclusion，undo 回滚 delta）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_people_merge_undo.py::test_merge_migrates_exclusions_and_undo_restores -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现 rename（允许重名）与单条/批量 exclude API 服务函数**
+- [x] **Step 3: 实现 rename（允许重名）与单条/批量 exclude API 服务函数**
 
 ```python
 def rename_person(person_id: int, display_name: str) -> PersonView: ...
 ```
 
-- [ ] **Step 4: 实现 merge winner 规则（样本数优先，平局 selected_person_ids[0]）与 delta 快照写入**
+- [x] **Step 4: 实现 merge winner 规则（样本数优先，平局 selected_person_ids[0]）与 delta 快照写入**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_people_merge_undo.py::test_tie_break_uses_first_selected_person_id -v`
 Expected: PASS。
 
-- [ ] **Step 5: 实现 undo-last-merge 仅回滚“全局最近一次且未撤销”操作**
+- [x] **Step 5: 实现 undo-last-merge 仅回滚“全局最近一次且未撤销”操作**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_people_merge_undo.py::test_only_last_merge_can_be_undone -v`
 Expected: PASS。
 
-- [ ] **Step 6: 校验现有 schema 已满足人物维护约束（不在本任务改 schema）**
+- [x] **Step 6: 校验现有 schema 已满足人物维护约束（不在本任务改 schema）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_people_exclusion_reassign.py tests/product/test_people_merge_undo.py -v`
 Expected: PASS，且无需新增 schema 变更。
