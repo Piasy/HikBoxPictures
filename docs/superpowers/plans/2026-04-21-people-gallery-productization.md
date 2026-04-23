@@ -782,7 +782,7 @@ Expected: PASS。
 - Create: `tests/product/test_ops_event_query.py`
 - Test: `tests/product/test_audit_sampling.py`
 
-- [ ] **Step 1: 写失败用例（assignment_run 后必须至少产出三类 audit_type 样本）**
+- [x] **Step 1: 写失败用例（assignment_run 后必须至少产出三类 audit_type 样本）**
 
 ```python
 assert {i.audit_type for i in items} >= {
@@ -790,23 +790,23 @@ assert {i.audit_type for i in items} >= {
 }
 ```
 
-- [ ] **Step 2: 写失败用例（ops_event 支持 scan/export 维度过滤）**
+- [x] **Step 2: 写失败用例（ops_event 支持 scan/export 维度过滤）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_ops_event_query.py::test_filter_by_scan_session_and_export_run -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现审计采样服务并落库 `scan_audit_item`**
+- [x] **Step 3: 实现审计采样服务并落库 `scan_audit_item`**
 
 ```python
 def build_audit_items(run_id: int, assignments: list[Assignment]) -> list[AuditItem]: ...
 ```
 
-- [ ] **Step 4: 实现事件记录与分页查询接口（severity/event_type），供 Task 10 的 Web/CLI 装配层复用**
+- [x] **Step 4: 实现事件记录与分页查询接口（severity/event_type），供 Task 10 的 Web/CLI 装配层复用**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_ops_event_query.py -v`
 Expected: PASS。
 
-- [ ] **Step 5: 校验审计功能无需新增 schema 变更（文档统一在 Task 12 收口）**
+- [x] **Step 5: 校验审计功能无需新增 schema 变更（文档统一在 Task 12 收口）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_audit_sampling.py tests/product/test_ops_event_query.py -v`
 Expected: PASS，且 schema 文件无需在本任务修改。
