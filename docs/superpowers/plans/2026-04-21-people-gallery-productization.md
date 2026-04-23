@@ -1017,7 +1017,7 @@ Expected: 模板路径仍可被打包。
 - Test: `tests/cli/test_cli_output_modes.py`
 - Test: `tests/cli/test_cli_db_commands.py`
 
-- [ ] **Step 1: 写 `init` 与 `serve start` 失败用例（必须执行真实命令并断言退出码+stdout/stderr）**
+- [x] **Step 1: 写 `init` 与 `serve start` 失败用例（必须执行真实命令并断言退出码+stdout/stderr）**
 
 ```python
 def test_init_creates_workspace_files(cli_bin, tmp_path):
@@ -1053,7 +1053,7 @@ def test_serve_start_blocked_when_scan_active(cli_bin, prepared_workspace_with_a
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_init_serve_commands.py::test_init_creates_workspace_files tests/cli/test_cli_init_serve_commands.py::test_serve_start_success_path tests/cli/test_cli_init_serve_commands.py::test_serve_start_blocked_when_scan_active -v`
 Expected: FAIL。
 
-- [ ] **Step 2: 写 `people` 命令失败用例（list/show/rename/exclude/exclude-batch/merge/undo-last-merge）并做 JSON 字段与 DB 真值逐项比对**
+- [x] **Step 2: 写 `people` 命令失败用例（list/show/rename/exclude/exclude-batch/merge/undo-last-merge）并做 JSON 字段与 DB 真值逐项比对**
 
 ```python
 def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
@@ -1116,7 +1116,7 @@ def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_people_commands.py::test_people_commands_have_real_effects -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 写 `audit list`、`source list`、`export template list/create/update`、`export run` 失败用例（结构化字段与 DB 真值比对，禁止固定输出，并显式断言不存在 `export template delete`）**
+- [x] **Step 3: 写 `audit list`、`source list`、`export template list/create/update`、`export run` 失败用例（结构化字段与 DB 真值比对，禁止固定输出，并显式断言不存在 `export template delete`）**
 
 ```python
 def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
@@ -1169,7 +1169,7 @@ def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py::test_audit_source_export_template_and_run -v`
 Expected: FAIL。
 
-- [ ] **Step 4: 写 `config/source/scan status|list/export run-status|run-list/logs/db` 失败用例（命令签名严格对齐 spec 15.5）**
+- [x] **Step 4: 写 `config/source/scan status|list/export run-status|run-list/logs/db` 失败用例（命令签名严格对齐 spec 15.5）**
 
 ```python
 def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
@@ -1320,7 +1320,7 @@ def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_db_commands.py tests/cli/test_cli_output_modes.py -v`
 Expected: FAIL。
 
-- [ ] **Step 5: 写 `scan start-or-resume` / `scan start-new` / `scan abort <session_id>` 失败用例（含 interrupted 恢复与 abandoned 契约）**
+- [x] **Step 5: 写 `scan start-or-resume` / `scan start-new` / `scan abort <session_id>` 失败用例（含 interrupted 恢复与 abandoned 契约）**
 
 ```python
 def test_scan_start_or_resume_resumes_latest_interrupted(cli_bin, seeded_workspace):
@@ -1364,7 +1364,7 @@ def test_scan_start_new_and_abort_contract(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_scan_lifecycle_commands.py::test_scan_start_or_resume_resumes_latest_interrupted tests/cli/test_cli_scan_lifecycle_commands.py::test_scan_start_new_and_abort_contract -v`
 Expected: FAIL。
 
-- [ ] **Step 6: 实现 scan 三命令最小真实语义（第二段闭环：最小真实实现）**
+- [x] **Step 6: 实现 scan 三命令最小真实语义（第二段闭环：最小真实实现）**
 
 实现要求：
 - `scan start-or-resume`：无 active 且存在最近 `interrupted` 会话时，必须恢复该会话（`session_id` 不变），并把 DB 状态 `interrupted -> running`。
@@ -1375,17 +1375,17 @@ Expected: FAIL。
 - `scan start-new`：存在 `running|aborting` 会话时返回冲突错误码 `4`。
 - `scan abort <session_id>`：仅对活动会话置 `aborting` 并记录 `updated_at`；不存在返回 `3`。
 
-- [ ] **Step 7: 跑 scan 三命令通过用例（第三段闭环：通过用例）**
+- [x] **Step 7: 跑 scan 三命令通过用例（第三段闭环：通过用例）**
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_scan_lifecycle_commands.py -v`
 Expected: PASS，包含 `start-or-resume` 的 `interrupted -> running` 迁移、`resumed=true`、返回最近 interrupted 的 `session_id`、active 场景复用同 `session_id`，以及 `start-new` 的 `interrupted -> abandoned` + 新会话断言。
 
-- [ ] **Step 8: 做 scan 三命令命令行验证（第四段闭环：退出码+输出+DB 状态）**
+- [x] **Step 8: 做 scan 三命令命令行验证（第四段闭环：退出码+输出+DB 状态）**
 
 Run: `source .venv/bin/activate && python - <<'PY'\nimport json\nimport sqlite3\nimport subprocess\nimport tomllib\nfrom pathlib import Path\n\npyproject = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))\nscripts = pyproject.get('project', {}).get('scripts', {})\ncli_name = next((k for k, v in scripts.items() if v == 'hikbox_pictures.cli:cli_entry'), None)\nassert cli_name, 'pyproject 未声明 hikbox_pictures.cli:cli_entry 脚本入口'\ncli_bin = str(Path('.venv/bin') / cli_name)\nassert Path(cli_bin).exists(), f'CLI 二进制不存在: {cli_bin}'\n\nws = Path('.tmp/cli/scan-lifecycle-ws')\nsubprocess.run([cli_bin, 'init', '--workspace', str(ws)], check=True, text=True)\nlib_db = ws / '.hikbox' / 'library.db'\nconn = sqlite3.connect(lib_db)\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nlatest_interrupted_id = conn.execute(\"SELECT id FROM scan_session WHERE status='interrupted' ORDER BY id DESC LIMIT 1\").fetchone()[0]\ncount_before_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.commit()\nconn.close()\n\nresume = subprocess.run([cli_bin, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume.returncode == 0\nresume_data = json.loads(resume.stdout)['data']\nassert resume_data['resumed'] is True\nassert resume_data['session_id'] == latest_interrupted_id\nconn = sqlite3.connect(lib_db)\nstatus_after_resume = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\ncount_after_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.close()\nassert status_after_resume == 'running'\nassert count_after_resume == count_before_resume\n\nresume_again = subprocess.run([cli_bin, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume_again.returncode == 0\nresume_again_data = json.loads(resume_again.stdout)['data']\nassert resume_again_data['session_id'] == latest_interrupted_id\nassert resume_again_data['resumed'] is True\n\nnew_conflict = subprocess.run([cli_bin, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert new_conflict.returncode == 4\nassert 'SCAN_ACTIVE_CONFLICT' in (new_conflict.stdout + new_conflict.stderr)\n\nabort = subprocess.run([cli_bin, '--json', 'scan', 'abort', str(latest_interrupted_id), '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert abort.returncode == 0\nconn = sqlite3.connect(lib_db)\naborted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nold_interrupted_for_start_new = conn.execute(\"SELECT id FROM scan_session WHERE status='interrupted' ORDER BY id DESC LIMIT 1\").fetchone()[0]\nconn.commit()\nconn.close()\nassert aborted_status in {'aborting', 'interrupted', 'failed'}\n\nstart_new = subprocess.run([cli_bin, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert start_new.returncode == 0\nstart_new_data = json.loads(start_new.stdout)['data']\nassert start_new_data['resumed'] is False\nassert start_new_data['session_id'] != old_interrupted_for_start_new\nconn = sqlite3.connect(lib_db)\nold_interrupted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [old_interrupted_for_start_new]).fetchone()[0]\nnew_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [start_new_data['session_id']]).fetchone()[0]\nconn.close()\nassert old_interrupted_status == 'abandoned'\nassert new_status in {'pending', 'running'}\nprint('OK')\nPY`
 Expected: 当无 active 且存在 `interrupted` 时，`start-or-resume` 退出码 `0`，返回 `resumed=true` 且 `session_id` 命中最近 interrupted，会话状态 `interrupted -> running` 且不新增会话行；active 时再次 `start-or-resume` 返回同一 `session_id`；active 时 `start-new` 退出码 `4` 且输出 `SCAN_ACTIVE_CONFLICT`；`abort` 退出码 `0`；无 active 且存在 interrupted 时 `start-new` 退出码 `0`，旧 interrupted 变 `abandoned`，并创建不同 `session_id` 新会话。
 
-- [ ] **Step 9: 实现 `cli_entry` 与 spec 15.5 全命令树（禁止 no-op 命令壳，逐项核对 config/source/scan/serve/people/export/logs/audit/db，且不存在 `export template delete`）**
+- [x] **Step 9: 实现 `cli_entry` 与 spec 15.5 全命令树（禁止 no-op 命令壳，逐项核对 config/source/scan/serve/people/export/logs/audit/db，且不存在 `export template delete`）**
 
 ```python
 def cli_entry(argv: list[str] | None = None) -> int: ...
@@ -1408,22 +1408,22 @@ SPEC_15_5_COMMANDS = [
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 -v`
 Expected: PASS，命令签名与 spec 15.5 逐项一致，且帮助输出与解析器均不暴露 `export template delete`。
 
-- [ ] **Step 10: 实现 `serve start` 成功路径与阻断路径、错误到退出码映射（2/3/4/5/6/7）及 `--json`/`--quiet` 输出切换**
+- [x] **Step 10: 实现 `serve start` 成功路径与阻断路径、错误到退出码映射（2/3/4/5/6/7）及 `--json`/`--quiet` 输出切换**
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_exit_codes.py::test_validation_not_found_scan_conflict_export_lock_illegal_state_and_serve_block_codes -v`
 Expected: PASS。
 
-- [ ] **Step 11: 跑关键行为套件（init/serve/people/audit/source/export-template/export/config/scan/db）**
+- [x] **Step 11: 跑关键行为套件（init/serve/people/audit/source/export-template/export/config/scan/db）**
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_people_commands.py tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py tests/cli/test_cli_scan_lifecycle_commands.py tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_db_commands.py -v`
 Expected: PASS，且每个命令都校验退出码与真实状态变更/查询结果。
 
-- [ ] **Step 12: 校验 `pyproject.toml` 脚本入口与实际模块一致**
+- [x] **Step 12: 校验 `pyproject.toml` 脚本入口与实际模块一致**
 
 Run: `source .venv/bin/activate && python -c "import hikbox_pictures.cli as c; print(hasattr(c,'cli_entry'))"`
 Expected: 输出 `True`。
 
-- [ ] **Step 13: 跑 CLI 全量测试**
+- [x] **Step 13: 跑 CLI 全量测试**
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_commands.py tests/cli/test_cli_exit_codes.py tests/cli/test_cli_init_serve_commands.py tests/cli/test_cli_people_commands.py tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py tests/cli/test_cli_scan_lifecycle_commands.py tests/cli/test_cli_source_commands.py tests/cli/test_cli_scan_export_commands.py tests/cli/test_cli_output_modes.py tests/cli/test_cli_db_commands.py -v`
 Expected: PASS。

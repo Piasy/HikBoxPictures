@@ -6,7 +6,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from hikbox_pictures.product.audit.service import AuditSamplingService
 from hikbox_pictures.product.config import WorkspaceLayout
@@ -16,10 +16,28 @@ from hikbox_pictures.product.export.template_service import ExportTemplateServic
 from hikbox_pictures.product.ops_event import OpsEventService
 from hikbox_pictures.product.people.repository import PeopleRepository
 from hikbox_pictures.product.people.service import PeopleService
-from hikbox_pictures.product.scan.execution_service import ScanExecutionService
 from hikbox_pictures.product.scan.session_service import ScanSessionRepository, ScanSessionService
 from hikbox_pictures.product.source.repository import SourceRepository
 from hikbox_pictures.product.source.service import SourceService
+
+if TYPE_CHECKING:
+    from hikbox_pictures.product.scan.execution_service import ScanExecutionService
+
+
+class LazyScanExecutionService:
+    """按需加载扫描执行服务，避免轻量 CLI 路径导入重依赖。"""
+
+    def __init__(self, factory: Callable[[], "ScanExecutionService"]) -> None:
+        self._factory = factory
+        self._instance: ScanExecutionService | None = None
+
+    def _get_instance(self) -> "ScanExecutionService":
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._get_instance(), name)
 
 
 class WebReadModel:
@@ -455,7 +473,7 @@ class ServiceContainer:
     people: PeopleService
     scan_sessions: ScanSessionService
     scan_session_repo: ScanSessionRepository
-    scan_execution: ScanExecutionService
+    scan_execution: Any
     sources: SourceService
     export_templates: ExportTemplateService
     export_runs: ExportRunService
@@ -472,9 +490,11 @@ def build_service_container(layout: WorkspaceLayout) -> ServiceContainer:
         people=PeopleService(PeopleRepository(layout.library_db)),
         scan_sessions=ScanSessionService(ScanSessionRepository(layout.library_db)),
         scan_session_repo=ScanSessionRepository(layout.library_db),
-        scan_execution=ScanExecutionService(
-            db_path=layout.library_db,
-            output_root=layout.workspace_root,
+        scan_execution=LazyScanExecutionService(
+            lambda: _build_scan_execution_service(
+                db_path=layout.library_db,
+                output_root=layout.workspace_root,
+            )
         ),
         sources=SourceService(SourceRepository(layout.library_db)),
         export_templates=ExportTemplateService(layout.library_db),
@@ -482,4 +502,13 @@ def build_service_container(layout: WorkspaceLayout) -> ServiceContainer:
         audit=AuditSamplingService(layout.library_db),
         ops_events=OpsEventService(layout.library_db),
         read_model=WebReadModel(layout.library_db),
+    )
+
+
+def _build_scan_execution_service(*, db_path: Path, output_root: Path) -> "ScanExecutionService":
+    from hikbox_pictures.product.scan.execution_service import ScanExecutionService
+
+    return ScanExecutionService(
+        db_path=db_path,
+        output_root=output_root,
     )
