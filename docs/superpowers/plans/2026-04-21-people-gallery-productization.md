@@ -35,7 +35,7 @@
 - 人物服务：`hikbox_pictures/product/people/`
 - 导出服务：`hikbox_pictures/product/export/`
 - 审计与运行日志：`hikbox_pictures/product/audit/`、`hikbox_pictures/product/ops_event.py`
-- 服务装配：`hikbox_pictures/product/service_registry.py`
+- 服务装配：`hikbox_pictures/product/service_registry.py`（由 Task 10 创建 `ServiceContainer` / `build_service_container()`，供 Web/CLI 复用）
 - Web 层：`hikbox_pictures/web/` + `hikbox_pictures/web/templates/`
 - CLI 入口：`hikbox_pictures/cli.py`
 - 测试：`tests/product/`、`tests/web/`、`tests/cli/`、`tests/integration/`
@@ -91,7 +91,7 @@
   - Task 7（人物维护、排除、合并撤销）
   - Task 8（导出模板与导出执行）
   - Task 9（审计采样与 ops 日志）
-- 并行理由：三者分别落到 `people/`、`export/`、`audit/` 与对应测试目录，可并发开发。共享装配文件 `hikbox_pictures/product/service_registry.py` 仅允许 Task 9 修改，Task 7 与 Task 8 禁止触碰该文件。
+- 并行理由：三者分别落到 `people/`、`export/`、`audit/` 与对应测试目录，可并发开发。共享装配文件 `hikbox_pictures/product/service_registry.py` 延后到 Task 10 统一创建，Task 7/8/9 在本 wave 内都禁止触碰该文件。
 - 冲突回退顺序：若执行中出现共享依赖装配冲突，按 Task 7 -> Task 8 -> Task 9 顺序串行合并。
 - 阻塞任务：Task 10-13。
 - 解锁条件：Task 7、Task 8、Task 9 完成。
@@ -738,23 +738,28 @@ with pytest.raises(ValidationError):
 Run: `source .venv/bin/activate && pytest tests/product/test_export_bucket_rules.py::test_group_bucket_threshold_rule -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 实现模板 create/list/update（无 delete）与 run 启动**
+- [ ] **Step 3: 写失败用例（照片必须命中全部 selected persons，`YYYY-MM` 优先取 `capture_datetime`，缺失时回退文件 `mtime`）**
+
+Run: `source .venv/bin/activate && pytest tests/product/test_export_delivery_collision.py::test_export_requires_all_selected_persons_and_month_falls_back_to_mtime -v`
+Expected: FAIL。
+
+- [ ] **Step 4: 实现模板 create/list/update（无 delete）与 run 启动，明确 API/CLI 均不暴露 delete 能力**
 
 ```python
 assert "delete_template" not in ExportTemplateService.__dict__
 ```
 
-- [ ] **Step 4: 实现导出执行（目录 `only/group/YYYY-MM` + 同名冲突 `skipped_exists`）**
+- [ ] **Step 5: 实现导出执行（命中全部 selected persons + 目录 `only/group/YYYY-MM` + 同名冲突 `skipped_exists` + 月份回退规则）**
 
-Run: `source .venv/bin/activate && pytest tests/product/test_export_delivery_collision.py -v`
+Run: `source .venv/bin/activate && pytest tests/product/test_export_bucket_rules.py tests/product/test_export_delivery_collision.py -v`
 Expected: PASS。
 
-- [ ] **Step 5: 实现 Live Photo 联动导出与缺失 MOV 静默跳过**
+- [ ] **Step 6: 实现 Live Photo 联动导出与缺失 MOV 静默跳过**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_export_run_locking.py::test_missing_live_mov_is_silently_skipped -v`
 Expected: PASS。
 
-- [ ] **Step 6: 实现导出运行锁（导出进行中阻断人物归属/合并写）**
+- [ ] **Step 7: 实现导出运行锁（导出进行中阻断人物归属/合并写）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_export_run_locking.py::test_people_writes_blocked_while_export_running -v`
 Expected: PASS。
@@ -775,7 +780,6 @@ Expected: PASS。
 - Create: `hikbox_pictures/product/ops_event.py`
 - Create: `tests/product/test_audit_sampling.py`
 - Create: `tests/product/test_ops_event_query.py`
-- Modify: `hikbox_pictures/product/service_registry.py`
 - Test: `tests/product/test_audit_sampling.py`
 
 - [ ] **Step 1: 写失败用例（assignment_run 后必须至少产出三类 audit_type 样本）**
@@ -797,7 +801,7 @@ Expected: FAIL。
 def build_audit_items(run_id: int, assignments: list[Assignment]) -> list[AuditItem]: ...
 ```
 
-- [ ] **Step 4: 实现事件记录与分页查询接口（severity/event_type），并在 service_registry 完成审计服务装配**
+- [ ] **Step 4: 实现事件记录与分页查询接口（severity/event_type），供 Task 10 的 Web/CLI 装配层复用**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_ops_event_query.py -v`
 Expected: PASS。
@@ -813,11 +817,12 @@ Expected: PASS，且 schema 文件无需在本任务修改。
 
 **Scope Budget:**
 - Max files: 20
-- Estimated files touched: 19
+- Estimated files touched: 20
 - Max added lines: 1000
-- Estimated added lines: 980
+- Estimated added lines: 1000
 
 **Files:**
+- Create: `hikbox_pictures/product/service_registry.py`
 - Create: `hikbox_pictures/web/__init__.py`
 - Create: `hikbox_pictures/web/app.py`
 - Create: `hikbox_pictures/web/page_routes.py`
@@ -858,9 +863,32 @@ Expected: PASS，且 schema 文件无需在本任务修改。
 Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect -v`
 Expected: FAIL。
 
-- [ ] **Step 2: 写页面失败用例（覆盖 spec 15.1 全量页面路由 + spec §12.5/§12.6 关键交互字段）**
+- [ ] **Step 2: 写页面失败用例（覆盖 spec §15.1 全量页面路由 + spec §12.3/§12.4/§12.5/§12.6/§12.7 关键交互字段）**
 
 ```python
+home_resp = client.get("/")
+home_dom = BeautifulSoup(home_resp.text, "html.parser")
+assert home_dom.select_one('[data-testid="named-people-section"]') is not None
+assert home_dom.select_one('[data-testid="anonymous-people-section"]') is not None
+assert home_dom.select_one('[data-testid="people-search-form"]') is None
+assert home_dom.select_one('[data-testid="merge-selected-action"]')["data-enabled"] == "true"
+assert home_dom.select_one('[data-testid="undo-last-merge-action"]')["data-enabled"] == "true"
+
+people_resp = client.get("/people/3")
+people_dom = BeautifulSoup(people_resp.text, "html.parser")
+assert people_dom.select_one('[data-testid="person-detail-topbar"]') is not None
+assert people_dom.select_one('[data-testid="person-detail-panel"]') is not None
+assert people_dom.select_one('[data-testid="person-samples"]')["class"] == ["face-grid"]
+sample_cards = people_dom.select('[data-testid="person-sample-card"]')
+assert sample_cards[0]["id"] == "sample-101"
+assert sample_cards[0]["data-default-view"] == "context"
+assert sample_cards[0]["data-live"] == "true"
+assert sample_cards[0].select_one('[data-testid="sample-context-link"]') is not None
+assert sample_cards[0].select_one('[data-testid="sample-thumb-grid"]')["class"] == ["thumb-grid"]
+assert sample_cards[0].select_one('[data-testid="sample-expand-toggle"]')["data-target"] == "crop-context"
+assert sample_cards[0].select_one('[data-testid="sample-exclude-action"]')["data-face-observation-id"] == "101"
+assert people_dom.select_one('[data-testid="sample-batch-exclude-action"]')["data-selected-count"] == "2"
+
 audit_resp = client.get(f"/sources/{session_id}/audit")
 audit_dom = BeautifulSoup(audit_resp.text, "html.parser")
 session_node = audit_dom.select_one('[data-testid="scan-session-state"]')
@@ -879,6 +907,8 @@ assert params["data-batch-size"] == "300"
 assert audit_dom.select_one('[data-testid="scan-action-resume"]')["data-enabled"] == "false"
 assert audit_dom.select_one('[data-testid="scan-action-abort"]')["data-enabled"] == "true"
 assert audit_dom.select_one('[data-testid="scan-action-abandon-new"]')["data-enabled"] == "true"
+jump_link = audit_dom.select_one('[data-testid="audit-jump-to-person"]')
+assert jump_link["href"] == "/people/3#sample-101"
 
 exports_resp = client.get("/exports")
 exports_dom = BeautifulSoup(exports_resp.text, "html.parser")
@@ -899,28 +929,53 @@ assert exports_dom.select_one('[data-testid="people-merge-action"]')["data-enabl
 lock_tip = exports_dom.select_one('[data-testid="people-write-lock-tip"]')
 assert lock_tip["data-locked"] == "true"
 assert "导出运行中" in lock_tip.text
+
+logs_resp = client.get("/logs?scan_session_id=31&export_run_id=52&severity=warning")
+logs_dom = BeautifulSoup(logs_resp.text, "html.parser")
+filters = logs_dom.select_one('[data-testid="logs-filter"]')
+assert filters["data-scan-session-id"] == "31"
+assert filters["data-export-run-id"] == "52"
+assert filters["data-severity"] == "warning"
+log_rows = logs_dom.select('[data-testid="log-row"]')
+assert log_rows[0]["data-scan-session-id"] == "31"
+assert log_rows[0]["data-export-run-id"] == "52"
+assert log_rows[0]["data-severity"] == "warning"
 ```
 
-Run: `source .venv/bin/activate && pytest tests/web/test_page_render.py::test_sources_audit_page_binds_session_status_source_progress_failure_stats_and_scan_params tests/web/test_page_render.py::test_sources_audit_page_binds_resume_abort_abandon_new_action_states tests/web/test_page_render.py::test_exports_page_binds_template_list_create_edit_preview_history_and_people_lock_semantics tests/web/test_route_coverage.py::test_home_page_route tests/web/test_route_coverage.py::test_people_detail_page_route tests/web/test_route_coverage.py::test_sources_page_route tests/web/test_route_coverage.py::test_sources_audit_page_route tests/web/test_route_coverage.py::test_exports_page_route tests/web/test_route_coverage.py::test_export_detail_page_route tests/web/test_route_coverage.py::test_logs_page_route -v`
+Run: `source .venv/bin/activate && pytest tests/web/test_page_render.py::test_home_page_binds_named_anonymous_sections_without_search_and_merge_controls tests/web/test_page_render.py::test_people_detail_page_uses_review_style_reimplementation_and_expand_exclude_controls tests/web/test_page_render.py::test_sources_audit_page_binds_session_status_source_progress_failure_stats_and_scan_params tests/web/test_page_render.py::test_sources_audit_page_binds_resume_abort_abandon_new_action_states tests/web/test_page_render.py::test_sources_audit_page_exposes_jump_to_person_detail_anchor tests/web/test_page_render.py::test_exports_page_binds_template_list_create_edit_preview_history_and_people_lock_semantics tests/web/test_page_render.py::test_logs_page_binds_run_filters_and_rows tests/web/test_route_coverage.py::test_home_page_route tests/web/test_route_coverage.py::test_people_detail_page_route tests/web/test_route_coverage.py::test_sources_page_route tests/web/test_route_coverage.py::test_sources_audit_page_route tests/web/test_route_coverage.py::test_exports_page_route tests/web/test_route_coverage.py::test_export_detail_page_route tests/web/test_route_coverage.py::test_logs_page_route -v`
 Expected: FAIL（未绑定真实数据或交互状态时必须失败）。
 
-- [ ] **Step 3: 实现 FastAPI app factory 与页面路由**
+- [ ] **Step 3: 实现 `ServiceContainer`、FastAPI app factory 与页面路由骨架**
 
 ```python
+def build_service_container(layout: WorkspaceLayout) -> ServiceContainer: ...
 def create_app(services: ServiceContainer) -> FastAPI: ...
 ```
 
-- [ ] **Step 4: 实现核心动作 API（scan/people/export/audit）与错误码映射，逐端点保证“字段合同 + DB 副作用”**
+- [ ] **Step 4: 实现核心动作 API（scan/people/export/audit）与错误码映射，逐端点保证“字段合同 + DB 副作用”，并确保无 `DELETE /api/export/templates/{id}` 路由**
 
 Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect -v`
 Expected: PASS，所有成功路径都按 spec §15.3 的字段断言：`{session_id,status,resumed}`、`{session_id,status}`、`{session_id,status:"aborting"}`、`{person_id,display_name,is_named}`、`{person_id,face_observation_id,pending_reassign:1}`、`{person_id,excluded_count}`、`{merge_operation_id,winner_person_id,winner_person_uuid}`、`{merge_operation_id,status:"undone"}`、`{items:[...]}`、`{template_id}`、`{template_id,updated:true}`、`{export_run_id,status:"running"}`、`{items:[...]}`，并逐条联动 DB 查询。
 
-- [ ] **Step 5: 实现导出中禁用人物修改入口、扫描审计摘要展示，并通过 spec 15.1 + spec §12.5/§12.6 页面断言**
+- [ ] **Step 5: 实现人物详情页（按 `hikbox_pictures/face_review_pipeline.py` 生成 HTML 的视觉/交互风格重写，而不是直接复用函数）**
 
-Run: `source .venv/bin/activate && pytest tests/web/test_page_render.py::test_sources_audit_page_binds_session_status_source_progress_failure_stats_and_scan_params tests/web/test_page_render.py::test_sources_audit_page_binds_resume_abort_abandon_new_action_states tests/web/test_page_render.py::test_exports_page_binds_template_list_create_edit_preview_history_and_people_lock_semantics tests/web/test_route_coverage.py::test_home_page_route tests/web/test_route_coverage.py::test_people_detail_page_route tests/web/test_route_coverage.py::test_sources_page_route tests/web/test_route_coverage.py::test_sources_audit_page_route tests/web/test_route_coverage.py::test_exports_page_route tests/web/test_route_coverage.py::test_export_detail_page_route tests/web/test_route_coverage.py::test_logs_page_route -v`
-Expected: PASS，页面断言必须基于注入测试数据后的 HTML 结构 / `data-*` 字段：扫描页验证会话状态、source 进度、失败统计、`det_size/workers/batch_size` 当前值与恢复/停止/放弃并新建入口状态；导出页验证模板列表、创建/编辑入口、only/group 预览统计与样例、执行历史、导出运行中禁用人物归属/合并入口与提示文案。
+实现要求：
+- 允许复制 `render_review_html` 中的 CSS/DOM 片段到 `hikbox_pictures/web/templates/people_detail.html`，但禁止直接 `import`/调用 `face_review_pipeline.py` 的 `render_review_html`、`_render_face_cards` 或其他 HTML 生成函数。
+- 详情页样式需沿用其 `topbar`、`panel`、`details` 折叠块、`face-grid`、`thumb-grid`、卡片信息密度与展开/收起按钮语义。
+- 交互语义需对齐 spec §12.4：默认只展示 `context`，点击后展开 `crop + context`，Live 样本在 context 位置显式标记 `Live`，并提供单条/批量排除入口。
+- 审计跳转锚点统一落在 `#sample-<face_observation_id>`，保证 `/sources/{session_id}/audit` 可直达详情页对应样本。
 
-- [ ] **Step 6: 校验 package-data 覆盖模板目录**
+- [ ] **Step 6: 实现首页分区/无搜索、导出中禁用人物修改入口、扫描审计摘要跳转、运行日志 run 维度过滤，并通过 spec §15.1 + spec §12.3/§12.4/§12.5/§12.6/§12.7 页面断言**
+
+Run: `source .venv/bin/activate && pytest tests/web/test_page_render.py::test_home_page_binds_named_anonymous_sections_without_search_and_merge_controls tests/web/test_page_render.py::test_people_detail_page_uses_review_style_reimplementation_and_expand_exclude_controls tests/web/test_page_render.py::test_sources_audit_page_binds_session_status_source_progress_failure_stats_and_scan_params tests/web/test_page_render.py::test_sources_audit_page_binds_resume_abort_abandon_new_action_states tests/web/test_page_render.py::test_sources_audit_page_exposes_jump_to_person_detail_anchor tests/web/test_page_render.py::test_exports_page_binds_template_list_create_edit_preview_history_and_people_lock_semantics tests/web/test_page_render.py::test_logs_page_binds_run_filters_and_rows tests/web/test_route_coverage.py::test_home_page_route tests/web/test_route_coverage.py::test_people_detail_page_route tests/web/test_route_coverage.py::test_sources_page_route tests/web/test_route_coverage.py::test_sources_audit_page_route tests/web/test_route_coverage.py::test_exports_page_route tests/web/test_route_coverage.py::test_export_detail_page_route tests/web/test_route_coverage.py::test_logs_page_route -v`
+Expected: PASS，页面断言必须基于注入测试数据后的 HTML 结构 / `data-*` 字段：首页验证已命名/匿名分区、无搜索筛选、批量合并与“撤销最近一次合并”入口；人物详情页验证 `face_review_pipeline.py` 同风格重写后的 `topbar/panel/details/face-grid/thumb-grid` 结构、默认 `context` 视图、展开 `crop + context`、Live 标记、单条/批量排除入口；扫描页验证会话状态、source 进度、失败统计、`det_size/workers/batch_size` 当前值与恢复/停止/放弃并新建入口状态；审计页验证跳转到 `/people/{id}#sample-<obs_id>`；导出页验证模板列表、创建/编辑入口、only/group 预览统计与样例、执行历史、导出运行中禁用人物归属/合并入口与提示文案；日志页验证 run 维度过滤控件与结果行绑定。
+
+- [ ] **Step 7: 校验 `web/` 层未直接引用 `face_review_pipeline.py` 的 HTML 生成函数**
+
+Run: `source .venv/bin/activate && rg -n "from hikbox_pictures\\.face_review_pipeline import|render_review_html\\(|_render_face_cards\\(" hikbox_pictures/web -S`
+Expected: 无匹配。
+
+- [ ] **Step 8: 校验 package-data 覆盖模板目录**
 
 Run: `source .venv/bin/activate && rg -n "web/templates" pyproject.toml`
 Expected: 模板路径仍可被打包。
@@ -936,7 +991,7 @@ Expected: 模板路径仍可被打包。
 - Estimated added lines: 980
 
 **Files:**
-- Create: `hikbox_pictures/cli.py`
+- Modify: `hikbox_pictures/cli.py`
 - Create: `tests/cli/test_cli_commands.py`
 - Create: `tests/cli/test_cli_exit_codes.py`
 - Create: `tests/cli/test_cli_init_serve_commands.py`
@@ -1061,7 +1116,7 @@ def test_people_commands_have_real_effects(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_people_commands.py::test_people_commands_have_real_effects -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 写 `audit list`、`source list`、`export template list/create/update`、`export run` 失败用例（结构化字段与 DB 真值比对，禁止固定输出）**
+- [ ] **Step 3: 写 `audit list`、`source list`、`export template list/create/update`、`export run` 失败用例（结构化字段与 DB 真值比对，禁止固定输出，并显式断言不存在 `export template delete`）**
 
 ```python
 def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
@@ -1330,7 +1385,7 @@ Expected: PASS，包含 `start-or-resume` 的 `interrupted -> running` 迁移、
 Run: `source .venv/bin/activate && python - <<'PY'\nimport json\nimport sqlite3\nimport subprocess\nimport tomllib\nfrom pathlib import Path\n\npyproject = tomllib.loads(Path('pyproject.toml').read_text(encoding='utf-8'))\nscripts = pyproject.get('project', {}).get('scripts', {})\ncli_name = next((k for k, v in scripts.items() if v == 'hikbox_pictures.cli:cli_entry'), None)\nassert cli_name, 'pyproject 未声明 hikbox_pictures.cli:cli_entry 脚本入口'\ncli_bin = str(Path('.venv/bin') / cli_name)\nassert Path(cli_bin).exists(), f'CLI 二进制不存在: {cli_bin}'\n\nws = Path('.tmp/cli/scan-lifecycle-ws')\nsubprocess.run([cli_bin, 'init', '--workspace', str(ws)], check=True, text=True)\nlib_db = ws / '.hikbox' / 'library.db'\nconn = sqlite3.connect(lib_db)\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nlatest_interrupted_id = conn.execute(\"SELECT id FROM scan_session WHERE status='interrupted' ORDER BY id DESC LIMIT 1\").fetchone()[0]\ncount_before_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.commit()\nconn.close()\n\nresume = subprocess.run([cli_bin, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume.returncode == 0\nresume_data = json.loads(resume.stdout)['data']\nassert resume_data['resumed'] is True\nassert resume_data['session_id'] == latest_interrupted_id\nconn = sqlite3.connect(lib_db)\nstatus_after_resume = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\ncount_after_resume = conn.execute('SELECT COUNT(*) FROM scan_session').fetchone()[0]\nconn.close()\nassert status_after_resume == 'running'\nassert count_after_resume == count_before_resume\n\nresume_again = subprocess.run([cli_bin, '--json', 'scan', 'start-or-resume', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert resume_again.returncode == 0\nresume_again_data = json.loads(resume_again.stdout)['data']\nassert resume_again_data['session_id'] == latest_interrupted_id\nassert resume_again_data['resumed'] is True\n\nnew_conflict = subprocess.run([cli_bin, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert new_conflict.returncode == 4\nassert 'SCAN_ACTIVE_CONFLICT' in (new_conflict.stdout + new_conflict.stderr)\n\nabort = subprocess.run([cli_bin, '--json', 'scan', 'abort', str(latest_interrupted_id), '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert abort.returncode == 0\nconn = sqlite3.connect(lib_db)\naborted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [latest_interrupted_id]).fetchone()[0]\nconn.execute(\"INSERT INTO scan_session(run_kind,status,triggered_by,created_at,updated_at) VALUES ('scan_resume','interrupted','manual_cli',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)\")\nold_interrupted_for_start_new = conn.execute(\"SELECT id FROM scan_session WHERE status='interrupted' ORDER BY id DESC LIMIT 1\").fetchone()[0]\nconn.commit()\nconn.close()\nassert aborted_status in {'aborting', 'interrupted', 'failed'}\n\nstart_new = subprocess.run([cli_bin, '--json', 'scan', 'start-new', '--workspace', str(ws)], text=True, capture_output=True, check=False)\nassert start_new.returncode == 0\nstart_new_data = json.loads(start_new.stdout)['data']\nassert start_new_data['resumed'] is False\nassert start_new_data['session_id'] != old_interrupted_for_start_new\nconn = sqlite3.connect(lib_db)\nold_interrupted_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [old_interrupted_for_start_new]).fetchone()[0]\nnew_status = conn.execute('SELECT status FROM scan_session WHERE id=?', [start_new_data['session_id']]).fetchone()[0]\nconn.close()\nassert old_interrupted_status == 'abandoned'\nassert new_status in {'pending', 'running'}\nprint('OK')\nPY`
 Expected: 当无 active 且存在 `interrupted` 时，`start-or-resume` 退出码 `0`，返回 `resumed=true` 且 `session_id` 命中最近 interrupted，会话状态 `interrupted -> running` 且不新增会话行；active 时再次 `start-or-resume` 返回同一 `session_id`；active 时 `start-new` 退出码 `4` 且输出 `SCAN_ACTIVE_CONFLICT`；`abort` 退出码 `0`；无 active 且存在 interrupted 时 `start-new` 退出码 `0`，旧 interrupted 变 `abandoned`，并创建不同 `session_id` 新会话。
 
-- [ ] **Step 9: 实现 `cli_entry` 与 spec 15.5 全命令树（禁止 no-op 命令壳，逐项核对 config/source/scan/serve/audit/db）**
+- [ ] **Step 9: 实现 `cli_entry` 与 spec 15.5 全命令树（禁止 no-op 命令壳，逐项核对 config/source/scan/serve/people/export/logs/audit/db，且不存在 `export template delete`）**
 
 ```python
 def cli_entry(argv: list[str] | None = None) -> int: ...
@@ -1341,13 +1396,17 @@ SPEC_15_5_COMMANDS = [
     "source list|add|remove|enable|disable|relabel",
     "scan start-or-resume|start-new|abort|status|list",
     "serve start [--host] [--port]",
+    "people list|show|rename|exclude|exclude-batch|merge|undo-last-merge",
+    "export template list|create|update",
+    "export run|run-status|run-list",
+    "logs list [--scan-session-id <id>] [--export-run-id <id>] [--severity info|warning|error] [--limit <n>]",
     "audit list --scan-session-id <id>",
     "db vacuum [--library] [--embedding]",
 ]
 ```
 
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 -v`
-Expected: PASS，命令签名与 spec 15.5 逐项一致。
+Expected: PASS，命令签名与 spec 15.5 逐项一致，且帮助输出与解析器均不暴露 `export template delete`。
 
 - [ ] **Step 10: 实现 `serve start` 成功路径与阻断路径、错误到退出码映射（2/3/4/5/6/7）及 `--json`/`--quiet` 输出切换**
 
@@ -1433,14 +1492,14 @@ def test_ac11_scan_main_chain_uses_frozen_v5_runtime(workspace):
 | AC10 | `test_ac10_param_snapshot_full_frozen_params` | DB（快照 JSON 全参数覆盖 spec §7.2），spec §17-10 |
 | AC11 | `test_ac11_scan_main_chain_uses_frozen_v5_runtime` | CLI 触发 scan + DB/产物 + 与 `face_review_pipeline` 基线统计对比（主链路真实执行冻结链路），spec §17-11 |
 | AC12 | `test_ac12_live_photo_pairing_written_in_metadata` | DB（`photo_asset.live_mov_*`），spec §17-12 |
-| AC13 | `test_ac13_homepage_sections_visible` | API（`TestClient GET /`），spec §17-13 |
+| AC13 | `test_ac13_homepage_named_anonymous_sections_without_search` | API（`TestClient GET /`），spec §17-13 |
 | AC14 | `test_ac14_nav_items_removed` | API（`TestClient GET /`），spec §17-14 |
 | AC15 | `test_ac15_exclusion_reassign_happens_in_next_scan` | CLI + DB（真实命令+真实表），spec §17-15 |
-| AC16 | `test_ac16_homepage_has_merge_actions` | API（`TestClient GET /`），spec §17-16 |
+| AC16 | `test_ac16_homepage_has_merge_and_undo_last_merge_actions` | API（`TestClient GET /`），spec §17-16 |
 | AC17 | `test_ac17_merge_and_undo_restore_exclusion_delta` | CLI + DB（`merge_operation_*_delta`），spec §17-17 |
-| AC18 | `test_ac18_export_run_layout_and_collision` | CLI + 文件系统 + DB，spec §17-18 |
-| AC19 | `test_ac19_api_cli_contract_routes_and_commands` | API + CLI（真实路由/命令），spec §17-19 |
-| AC20 | `test_ac20_audit_items_three_types` | API + DB（`scan_audit_item`），spec §17-20 |
+| AC18 | `test_ac18_export_run_layout_and_collision` | CLI + 文件系统 + DB（仅命中全部 selected persons、`YYYY-MM` 优先 `capture_datetime` 缺失回退 `mtime`、同名冲突跳过），spec §17-18 |
+| AC19 | `test_ac19_export_template_delete_not_exposed_in_api_or_cli` | API + CLI（真实路由/命令帮助输出均无 delete 入口），spec §17-19 |
+| AC20 | `test_ac20_audit_items_three_types_and_jump_targets` | API + DB + 页面（`scan_audit_item` 三类样本 + `/people/{id}#sample-<obs_id>` 跳转），spec §17-20 |
 | AC21 | `test_ac21_cli_lock_and_conflict_codes` | CLI（真实退出码与输出），spec §17-21 |
 | AC22 | `test_ac22_db_schema_doc_migration_text` | 文档文件文本（`docs/db_schema.md`），spec §17-22 |
 
@@ -1449,17 +1508,22 @@ def test_ac11_scan_main_chain_uses_frozen_v5_runtime(workspace):
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py::test_ac01_db_schema_constraints_from_sqlite_pragma tests/integration/test_productization_acceptance.py::test_ac03_detect_defaults_persisted_in_db tests/integration/test_productization_acceptance.py::test_ac07_assignment_source_and_noise_rules_from_db tests/integration/test_productization_acceptance.py::test_ac09_assignment_run_snapshot_from_db tests/integration/test_productization_acceptance.py::test_ac10_param_snapshot_full_frozen_params tests/integration/test_productization_acceptance.py::test_ac11_scan_main_chain_uses_frozen_v5_runtime tests/integration/test_scan_behavior_parity_with_face_review_pipeline.py::test_scan_behavior_parity_with_face_review_pipeline_sample -v`
 Expected: PASS，断言来自真实 scan 运行结果，不允许仅靠静态插表通过。
 
-- [ ] **Step 4: 落地 AC19 的 API+CLI 合同断言（spec §15.3 全核心端点 + CLI 命令面）**
+- [ ] **Step 4: 落地 API+CLI 合同断言（spec §15.3 全核心端点 + spec §15.5 命令面，不占用 AC19）**
 
-Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 tests/integration/test_productization_acceptance.py::test_ac19_api_cli_contract_routes_and_commands tests/integration/test_productization_acceptance.py::test_ac19_api_data_fields_and_db_side_effect_matrix -v`
-Expected: PASS，`AC19` 必须逐端点断言 spec §15.3 成功 `data` 字段：`{session_id,status,resumed}`、`{session_id,status}`、`{session_id,status:"aborting"}`、`{person_id,display_name,is_named}`、`{person_id,face_observation_id,pending_reassign:1}`、`{person_id,excluded_count}`、`{merge_operation_id,winner_person_id,winner_person_uuid}`、`{merge_operation_id,status:"undone"}`、`{items:[...]}`、`{template_id}`、`{template_id,updated:true}`、`{export_run_id,status:"running"}`、`{items:[...]}`，并对每条成功分支做 DB 联动验证。
+Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 tests/integration/test_productization_acceptance.py::test_api_cli_contract_routes_and_commands tests/integration/test_productization_acceptance.py::test_api_data_fields_and_db_side_effect_matrix -v`
+Expected: PASS，必须逐端点断言 spec §15.3 成功 `data` 字段：`{session_id,status,resumed}`、`{session_id,status}`、`{session_id,status:"aborting"}`、`{person_id,display_name,is_named}`、`{person_id,face_observation_id,pending_reassign:1}`、`{person_id,excluded_count}`、`{merge_operation_id,winner_person_id,winner_person_uuid}`、`{merge_operation_id,status:"undone"}`、`{items:[...]}`、`{template_id}`、`{template_id,updated:true}`、`{export_run_id,status:"running"}`、`{items:[...]}`，并对每条成功分支做 DB 联动验证。
 
-- [ ] **Step 5: 落地 CLI 真实断言（执行命令并校验退出码与 stdout/stderr）**
+- [ ] **Step 5: 落地 AC19（模板删除能力不存在）断言**
+
+Run: `source .venv/bin/activate && pytest tests/cli/test_cli_commands.py::test_cli_has_no_export_template_delete_command tests/integration/test_productization_acceptance.py::test_ac19_export_template_delete_not_exposed_in_api_or_cli -v`
+Expected: PASS，CLI 帮助输出、命令解析与 Web/API 路由均不存在删除模板入口。
+
+- [ ] **Step 6: 落地 CLI 真实断言（执行命令并校验退出码与 stdout/stderr）**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py::test_ac18_export_run_layout_and_collision tests/integration/test_productization_acceptance.py::test_ac21_cli_lock_and_conflict_codes -v`
 Expected: PASS，使用 `subprocess.run` 调用真实 CLI，校验 returncode 与输出内容。
 
-- [ ] **Step 6: 加防伪造约束检查（禁止回退到 `run_check`、占位 observation/embedding/assignment）**
+- [ ] **Step 7: 加防伪造约束检查（禁止回退到 `run_check`、占位 observation/embedding/assignment）**
 
 Run: `source .venv/bin/activate && rg -n "run_check\\(|check_id|class AcceptanceContext" tests/integration/test_productization_acceptance.py`
 Expected: 无匹配。
@@ -1473,17 +1537,17 @@ Expected: 无匹配。
 Run: `source .venv/bin/activate && python - <<'PY'\nimport sqlite3\nfrom pathlib import Path\n\ndb = Path('.tmp/parity/workspace/.hikbox/library.db')\nif db.exists():\n    with sqlite3.connect(db) as conn:\n        row = conn.execute(\"\"\"\n            SELECT COUNT(*),\n                   COUNT(DISTINCT printf('%.6f,%.6f,%.6f,%.6f', bbox_x1,bbox_y1,bbox_x2,bbox_y2)),\n                   COUNT(DISTINCT printf('%.6f', quality_score))\n            FROM face_observation\n            WHERE active=1\n        \"\"\").fetchone()\n    print(row)\nPY`
 Expected: 若存在 parity 工作区，则第二、三列必须大于 1；否则视为检测退化风险，阻断合入。
 
-- [ ] **Step 7: 先跑验收集成测试并记录缺口**
+- [ ] **Step 8: 先跑验收集成测试并记录缺口**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py -v`
 Expected: 首次 FAIL，暴露未闭环项。
 
-- [ ] **Step 8: 补齐验收缺口并复跑到全绿**
+- [ ] **Step 9: 补齐验收缺口并复跑到全绿**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py -v`
 Expected: PASS。
 
-- [ ] **Step 9: 更新 `README.md`（安装、初始化、扫描、serve、人物维护、导出、测试命令）并核对 schema 文档一致性**
+- [ ] **Step 10: 更新 `README.md`（安装、初始化、扫描、serve、人物维护、导出、测试命令）并核对 schema 文档一致性**
 
 Run: `source .venv/bin/activate && rg -n "hikbox init|hikbox scan start-or-resume|hikbox serve start|people rename|people merge|export template create|export run|./scripts/run_tests.sh" README.md`
 Expected: 命令与 CLI 一致。
@@ -1491,7 +1555,7 @@ Expected: 命令与 CLI 一致。
 Run: `source .venv/bin/activate && rg -n "scan_session|assignment_run|export_template|scan_audit_item|face_embedding" docs/db_schema.md hikbox_pictures/product/db/sql/*.sql`
 Expected: 表、字段、枚举、索引描述一致。
 
-- [ ] **Step 10: 执行仓库回归测试入口**
+- [ ] **Step 11: 执行仓库回归测试入口**
 
 Run: `source .venv/bin/activate && ./scripts/run_tests.sh`
 Expected: 全量测试 PASS，无新增回归。
