@@ -6,7 +6,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from hikbox_pictures.face_review_pipeline import (
+from hikbox_pictures.product.engine.frozen_v5_primitives import (
     _cluster_with_hdbscan,
     attach_micro_clusters_to_existing_persons,
     attach_noise_faces_to_person_consensus,
@@ -167,6 +167,40 @@ def run_frozen_v5_assignment(*, faces: list[dict[str, object]], params: dict[str
             }
         )
 
+    quality_by_face_id = {
+        int(face["face_observation_id"]): float(face["quality_score"])
+        for face in faces
+        if int(face["face_observation_id"]) > 0
+    }
+    cluster_members: dict[tuple[int, str], list[int]] = defaultdict(list)
+    for row in result_faces:
+        cluster_label = int(row["cluster_label"])
+        person_temp_key = str(row.get("person_temp_key") or "")
+        face_id = int(row["face_observation_id"])
+        if cluster_label == -1 or not person_temp_key or face_id <= 0:
+            continue
+        cluster_members[(cluster_label, person_temp_key)].append(face_id)
+
+    result_clusters = []
+    rep_top_k = max(1, int(params.get("person_rep_top_k", 3)))
+    for (cluster_label, person_temp_key), observation_ids in sorted(
+        cluster_members.items(),
+        key=lambda item: (item[0][1], item[0][0]),
+    ):
+        member_ids = sorted(set(int(face_id) for face_id in observation_ids if int(face_id) > 0))
+        rep_ids = sorted(
+            member_ids,
+            key=lambda face_id: (-quality_by_face_id.get(face_id, 0.0), face_id),
+        )[:rep_top_k]
+        result_clusters.append(
+            {
+                "cluster_label": int(cluster_label),
+                "person_temp_key": person_temp_key,
+                "member_face_observation_ids": member_ids,
+                "representative_face_observation_ids": rep_ids,
+            }
+        )
+
     assignment_count = sum(
         1
         for row in result_faces
@@ -175,6 +209,7 @@ def run_frozen_v5_assignment(*, faces: list[dict[str, object]], params: dict[str
     return {
         "faces": result_faces,
         "persons": result_persons,
+        "clusters": result_clusters,
         "stats": {
             "person_count": len(result_persons),
             "assignment_count": int(assignment_count),

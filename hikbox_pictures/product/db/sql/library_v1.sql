@@ -193,6 +193,46 @@ ON assignment_run(started_at);
 CREATE INDEX IF NOT EXISTS idx_assignment_run_scan_session
 ON assignment_run(scan_session_id, started_at);
 
+CREATE TABLE IF NOT EXISTS face_cluster (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cluster_uuid TEXT NOT NULL UNIQUE,
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  status TEXT NOT NULL CHECK (status IN ('active', 'replaced')),
+  rebuild_scope TEXT NOT NULL CHECK (rebuild_scope IN ('full', 'local')),
+  created_assignment_run_id INTEGER NOT NULL REFERENCES assignment_run(id),
+  updated_assignment_run_id INTEGER NOT NULL REFERENCES assignment_run(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_face_cluster_status
+ON face_cluster(status, person_id);
+
+CREATE TABLE IF NOT EXISTS face_cluster_member (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  face_cluster_id INTEGER NOT NULL REFERENCES face_cluster(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  assignment_run_id INTEGER NOT NULL REFERENCES assignment_run(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(face_cluster_id, face_observation_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_face_cluster_member_face
+ON face_cluster_member(face_observation_id);
+
+CREATE TABLE IF NOT EXISTS face_cluster_rep_face (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  face_cluster_id INTEGER NOT NULL REFERENCES face_cluster(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  rep_rank INTEGER NOT NULL,
+  assignment_run_id INTEGER NOT NULL REFERENCES assignment_run(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(face_cluster_id, rep_rank)
+);
+
+CREATE INDEX IF NOT EXISTS idx_face_cluster_rep_face_obs
+ON face_cluster_rep_face(face_observation_id);
+
 CREATE TABLE IF NOT EXISTS person_face_assignment (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id INTEGER NOT NULL REFERENCES person(id),

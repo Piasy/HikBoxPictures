@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+import ast
 import json
 import sqlite3
 from pathlib import Path
@@ -15,6 +16,25 @@ from hikbox_pictures.product.scan.assignment_stage import AssignmentStageService
 from hikbox_pictures.product.scan.session_service import ScanSessionRepository
 from hikbox_pictures.product.source.repository import SourceRepository
 from hikbox_pictures.product.source.service import SourceService
+
+
+def test_product_runtime_modules_do_not_import_face_review_pipeline() -> None:
+    runtime_files = [
+        Path("hikbox_pictures/product/engine/frozen_v5.py"),
+        Path("hikbox_pictures/product/scan/assignment_stage.py"),
+    ]
+    repo_root = Path(__file__).resolve().parents[2]
+    forbidden_module = "hikbox_pictures.face_review_pipeline"
+
+    for relpath in runtime_files:
+        module = ast.parse((repo_root / relpath).read_text(encoding="utf-8"))
+        imported_modules = set()
+        for node in ast.walk(module):
+            if isinstance(node, ast.Import):
+                imported_modules.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.add(node.module)
+        assert forbidden_module not in imported_modules, f"{relpath} 不应依赖 {forbidden_module}"
 
 
 def test_param_snapshot_full_frozen_params(tmp_path: Path) -> None:
@@ -113,6 +133,185 @@ def test_noise_and_low_quality_ignored_not_persisted_as_assignment(tmp_path: Pat
 
     sources = [str(row[0]) for row in rows]
     assert sources == ["hdbscan"]
+
+
+def test_full_rebuild_reuses_existing_active_person_instead_of_accumulating_duplicates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    layout, session_id, runtime_root = _seed_runtime_workspace(tmp_path)
+    _seed_face_observations(layout.library_db, runtime_root)
+
+    service = AssignmentStageService(
+        library_db_path=layout.library_db,
+        embedding_db_path=layout.embedding_db,
+        output_root=runtime_root,
+    )
+
+    def fake_run(*, faces, params):
+        person_face_ids = [int(face["face_observation_id"]) for face in faces[:2]]
+        return {
+            "faces": [
+                {
+                    "face_observation_id": person_face_ids[0],
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.93,
+                },
+                {
+                    "face_observation_id": person_face_ids[1],
+                    "person_temp_key": "p0",
+                    "assignment_source": "merge",
+                    "probability": 0.91,
+                },
+            ],
+            "persons": [{"person_temp_key": "p0", "face_observation_ids": person_face_ids}],
+            "clusters": [
+                {
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "member_face_observation_ids": person_face_ids,
+                    "representative_face_observation_ids": [person_face_ids[0]],
+                }
+            ],
+            "stats": {"person_count": 1, "assignment_count": 2},
+        }
+
+    monkeypatch.setattr("hikbox_pictures.product.scan.assignment_stage.run_frozen_v5_assignment", fake_run)
+
+    first_run = service.run_frozen_v5_assignment(
+        scan_session_id=session_id,
+        run_kind="scan_full",
+        embedding_calculator=_fake_embedding_calculator,
+    )
+    second_run = service.run_frozen_v5_assignment(
+        scan_session_id=session_id,
+        run_kind="scan_full",
+        embedding_calculator=_fake_embedding_calculator,
+    )
+
+    assert first_run.person_count == 1
+    assert second_run.person_count == 1
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        active_persons = conn.execute(
+            """
+            SELECT id, status
+            FROM person
+            WHERE status='active'
+            ORDER BY id ASC
+            """
+        ).fetchall()
+        active_assignments = conn.execute(
+            """
+            SELECT person_id, face_observation_id
+            FROM person_face_assignment
+            WHERE active=1
+            ORDER BY face_observation_id ASC
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(active_persons) == 1
+    assert {int(row[0]) for row in active_assignments} == {int(active_persons[0][0])}
+    assert [int(row[1]) for row in active_assignments] == [1, 2]
+
+
+def test_full_rebuild_clears_pending_reassign_and_prevents_incremental_requeue(
+    tmp_path: Path, monkeypatch
+) -> None:
+    layout, session_id, runtime_root = _seed_runtime_workspace(tmp_path)
+    _seed_face_observations(layout.library_db, runtime_root)
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        conn.execute(
+            "UPDATE face_observation SET pending_reassign=1, updated_at=CURRENT_TIMESTAMP WHERE id=1"
+        )
+        source_id = int(conn.execute("SELECT id FROM library_source ORDER BY id ASC LIMIT 1").fetchone()[0])
+        conn.commit()
+    finally:
+        conn.close()
+
+    service = AssignmentStageService(
+        library_db_path=layout.library_db,
+        embedding_db_path=layout.embedding_db,
+        output_root=runtime_root,
+    )
+
+    def fake_run(*, faces, params):
+        target_face_id = int(faces[0]["face_observation_id"])
+        return {
+            "faces": [
+                {
+                    "face_observation_id": target_face_id,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.93,
+                }
+            ],
+            "persons": [{"person_temp_key": "p0", "face_observation_ids": [target_face_id]}],
+            "clusters": [
+                {
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "member_face_observation_ids": [target_face_id],
+                    "representative_face_observation_ids": [target_face_id],
+                }
+            ],
+            "stats": {"person_count": 1, "assignment_count": 1},
+        }
+
+    monkeypatch.setattr("hikbox_pictures.product.scan.assignment_stage.run_frozen_v5_assignment", fake_run)
+
+    run_result = service.run_frozen_v5_assignment(
+        scan_session_id=session_id,
+        run_kind="scan_full",
+        embedding_calculator=_fake_embedding_calculator,
+    )
+    ScanSessionRepository(layout.library_db).update_status(session_id, status="completed")
+
+    incremental_session = ScanSessionRepository(layout.library_db).create_session(
+        run_kind="scan_incremental",
+        status="running",
+        triggered_by="manual_cli",
+    )
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        conn.execute(
+            """
+            INSERT INTO scan_session_source(
+              scan_session_id, library_source_id, stage_status_json, processed_assets, failed_assets, updated_at
+            ) VALUES (?, ?, ?, 1, 0, CURRENT_TIMESTAMP)
+            """,
+            (
+                incremental_session.id,
+                source_id,
+                json.dumps(
+                    {
+                        "discover": "done",
+                        "metadata": "done",
+                        "detect": "done",
+                        "embed": "pending",
+                        "cluster": "pending",
+                        "assignment": "pending",
+                    }
+                ),
+            ),
+        )
+        pending_reassign = int(conn.execute("SELECT pending_reassign FROM face_observation WHERE id=1").fetchone()[0])
+        candidate_ids = service._list_incremental_candidate_face_ids(
+            scan_session_id=incremental_session.id,
+            conn=conn,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert run_result.assignment_run_id > 0
+    assert pending_reassign == 0
+    assert 1 not in candidate_ids
 
 
 def _seed_runtime_workspace(tmp_path: Path) -> tuple[object, int, Path]:

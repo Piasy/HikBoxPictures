@@ -6,6 +6,7 @@ import os
 import json
 import sqlite3
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,9 +15,11 @@ import cv2
 import numpy as np
 
 from hikbox_pictures.product.db.connection import connect_sqlite
+from hikbox_pictures.product.engine.magface_embedder import MagFaceEmbedder
 from hikbox_pictures.product.engine.param_snapshot import build_frozen_v5_param_snapshot
 from hikbox_pictures.product.engine.frozen_v5 import run_frozen_v5_assignment
-from hikbox_pictures.face_review_pipeline import MagFaceEmbedder
+from hikbox_pictures.product.scan.cluster_repository import ClusterRepository
+from hikbox_pictures.product.scan.incremental_assignment_service import IncrementalAssignmentService
 
 ALLOWED_ASSIGNMENT_SOURCES = {"hdbscan", "person_consensus", "merge", "undo"}
 UNASSIGNED_SOURCES = {"noise", "low_quality_ignored"}
@@ -55,9 +58,16 @@ class AssignmentStageService:
         self._library_db_path = Path(library_db_path)
         self._embedding_db_path = Path(embedding_db_path)
         self._output_root = Path(output_root)
+        self._cluster_repo = ClusterRepository(self._library_db_path)
 
-    def start_assignment_run(self, *, scan_session_id: int, run_kind: str) -> AssignmentRunStart:
-        snapshot = build_frozen_v5_param_snapshot()
+    def start_assignment_run(
+        self,
+        *,
+        scan_session_id: int,
+        run_kind: str,
+        param_snapshot: dict[str, object] | None = None,
+    ) -> AssignmentRunStart:
+        snapshot = dict(param_snapshot or build_frozen_v5_param_snapshot())
         conn = connect_sqlite(self._library_db_path)
         try:
             cursor = conn.execute(
@@ -86,26 +96,48 @@ class AssignmentStageService:
         run_kind: str,
         embedding_calculator=None,
     ) -> AssignmentStageResult:
-        started = self.start_assignment_run(scan_session_id=scan_session_id, run_kind=run_kind)
+        param_snapshot = build_frozen_v5_param_snapshot()
+        use_incremental = self._should_run_incremental(
+            scan_session_id=scan_session_id,
+            run_kind=run_kind,
+            param_snapshot=param_snapshot,
+        )
+        effective_run_kind = "scan_full" if str(run_kind) == "scan_incremental" and not use_incremental else str(run_kind)
+        started = self.start_assignment_run(
+            scan_session_id=scan_session_id,
+            run_kind=effective_run_kind,
+            param_snapshot=param_snapshot,
+        )
         try:
             self._ensure_not_aborting(scan_session_id=scan_session_id)
             faces = self._build_face_inputs(
                 scan_session_id=scan_session_id,
                 param_snapshot=started.param_snapshot,
                 embedding_calculator=embedding_calculator,
+                include_all_active_sources=bool(str(run_kind) == "scan_incremental" and not use_incremental),
             )
             self._persist_embeddings(scan_session_id=scan_session_id, faces=faces)
             self._ensure_not_aborting(scan_session_id=scan_session_id)
 
-            runtime_result = run_frozen_v5_assignment(faces=faces, params=started.param_snapshot)
-            self._ensure_not_aborting(scan_session_id=scan_session_id)
-            person_count, assignment_count = self._persist_assignment_outcome(
-                scan_session_id=scan_session_id,
-                assignment_run_id=started.assignment_run_id,
-                face_rows=faces,
-                person_rows=list(runtime_result.get("persons", [])),
-                assignment_rows=list(runtime_result.get("faces", [])),
-            )
+            if use_incremental:
+                person_count, assignment_count = self._persist_incremental_assignment_outcome(
+                    scan_session_id=scan_session_id,
+                    assignment_run_id=started.assignment_run_id,
+                    face_rows=faces,
+                )
+            else:
+                runtime_result = run_frozen_v5_assignment(faces=faces, params=started.param_snapshot)
+                self._ensure_not_aborting(scan_session_id=scan_session_id)
+                person_count, assignment_count = self._persist_assignment_outcome(
+                    scan_session_id=scan_session_id,
+                    assignment_run_id=started.assignment_run_id,
+                    run_kind=effective_run_kind,
+                    face_rows=faces,
+                    person_rows=list(runtime_result.get("persons", [])),
+                    assignment_rows=list(runtime_result.get("faces", [])),
+                    cluster_rows=list(runtime_result.get("clusters", [])),
+                    rebuild_scope="full",
+                )
             return AssignmentStageResult(
                 assignment_run_id=started.assignment_run_id,
                 person_count=int(person_count),
@@ -121,29 +153,50 @@ class AssignmentStageService:
         scan_session_id: int,
         param_snapshot: dict[str, object],
         embedding_calculator=None,
+        include_all_active_sources: bool = False,
     ) -> list[dict[str, object]]:
         conn = connect_sqlite(self._library_db_path)
         try:
-            rows = conn.execute(
-                """
-                SELECT
-                  f.id,
-                  f.photo_asset_id,
-                  f.aligned_relpath,
-                  f.detector_confidence,
-                  f.face_area_ratio,
-                  p.primary_path,
-                  p.library_source_id
-                FROM face_observation AS f
-                INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
-                INNER JOIN scan_session_source AS s
-                  ON s.library_source_id = p.library_source_id
-                 AND s.scan_session_id = ?
-                WHERE f.active=1
-                ORDER BY f.id ASC
-                """,
-                (int(scan_session_id),),
-            ).fetchall()
+            if include_all_active_sources:
+                rows = conn.execute(
+                    """
+                    SELECT
+                      f.id,
+                      f.photo_asset_id,
+                      f.aligned_relpath,
+                      f.detector_confidence,
+                      f.face_area_ratio,
+                      p.primary_path,
+                      p.library_source_id
+                    FROM face_observation AS f
+                    INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
+                    WHERE f.active=1
+                      AND p.asset_status='active'
+                    ORDER BY f.id ASC
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT
+                      f.id,
+                      f.photo_asset_id,
+                      f.aligned_relpath,
+                      f.detector_confidence,
+                      f.face_area_ratio,
+                      p.primary_path,
+                      p.library_source_id
+                    FROM face_observation AS f
+                    INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
+                    INNER JOIN scan_session_source AS s
+                      ON s.library_source_id = p.library_source_id
+                     AND s.scan_session_id = ?
+                    WHERE f.active=1
+                      AND p.asset_status='active'
+                    ORDER BY f.id ASC
+                    """,
+                    (int(scan_session_id),),
+                ).fetchall()
         finally:
             conn.close()
 
@@ -257,22 +310,120 @@ class AssignmentStageService:
                 (magface_quality, quality_score, observation_id),
             )
 
-    def _upsert_persons(self, person_rows: list[dict[str, object]], *, conn: sqlite3.Connection) -> dict[str, int]:
+    def _load_active_person_signatures(self, *, conn: sqlite3.Connection) -> dict[int, tuple[int, ...]]:
+        person_rows = conn.execute("SELECT id FROM person WHERE status='active' ORDER BY id ASC").fetchall()
+        signatures: dict[int, list[int]] = {int(row[0]): [] for row in person_rows}
+        assignment_rows = conn.execute(
+            """
+            SELECT a.person_id, a.face_observation_id
+            FROM person_face_assignment
+            AS a
+            INNER JOIN face_observation AS f ON f.id = a.face_observation_id
+            INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
+            WHERE a.active=1
+              AND f.active=1
+              AND p.asset_status='active'
+            ORDER BY a.person_id ASC, a.face_observation_id ASC
+            """
+        ).fetchall()
+        for row in assignment_rows:
+            person_id = int(row[0])
+            if person_id not in signatures:
+                continue
+            signatures[person_id].append(int(row[1]))
+        return {
+            person_id: tuple(sorted({int(face_observation_id) for face_observation_id in face_ids if int(face_observation_id) > 0}))
+            for person_id, face_ids in signatures.items()
+        }
+
+    def _build_person_signature(
+        self,
+        row: dict[str, object],
+        *,
+        conn: sqlite3.Connection,
+    ) -> tuple[int, ...]:
+        raw_face_ids = row.get("face_observation_ids") or []
+        if not isinstance(raw_face_ids, list):
+            return ()
+        active_face_ids = self._filter_active_face_ids(
+            face_ids=[int(face_id) for face_id in raw_face_ids if int(face_id) > 0],
+            conn=conn,
+        )
+        return tuple(sorted(active_face_ids))
+
+    def _deactivate_active_assignments(self, *, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE person_face_assignment SET active=0, updated_at=CURRENT_TIMESTAMP WHERE active=1"
+        )
+
+    def _retire_unreused_active_persons(
+        self,
+        *,
+        existing_person_ids: set[int],
+        reused_person_ids: set[int],
+        conn: sqlite3.Connection,
+    ) -> None:
+        retired_person_ids = sorted(existing_person_ids - reused_person_ids)
+        for person_id in retired_person_ids:
+            conn.execute(
+                """
+                UPDATE person
+                SET status='merged',
+                    merged_into_person_id=NULL,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (person_id,),
+            )
+
+    def _upsert_persons(
+        self,
+        person_rows: list[dict[str, object]],
+        *,
+        run_kind: str,
+        existing_active_signatures: dict[int, tuple[int, ...]] | None,
+        conn: sqlite3.Connection,
+    ) -> tuple[dict[str, int], set[int]]:
         person_map: dict[str, int] = {}
+        reused_person_ids: set[int] = set()
+        reusable_person_ids_by_signature: dict[tuple[int, ...], list[int]] = defaultdict(list)
+        if str(run_kind) == "scan_full":
+            for person_id, signature in (existing_active_signatures or {}).items():
+                reusable_person_ids_by_signature[signature].append(int(person_id))
+
         for row in person_rows:
             person_temp_key = str(row.get("person_temp_key") or "")
             if not person_temp_key:
                 continue
-            cursor = conn.execute(
-                """
-                INSERT INTO person(
-                  person_uuid, display_name, is_named, status, merged_into_person_id, created_at, updated_at
-                ) VALUES (?, NULL, 0, 'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """,
-                (str(uuid.uuid4()),),
-            )
-            person_map[person_temp_key] = int(cursor.lastrowid)
-        return person_map
+            person_id = 0
+            if str(run_kind) == "scan_full":
+                signature = self._build_person_signature(row, conn=conn)
+                reusable_person_ids = reusable_person_ids_by_signature.get(signature) or []
+                if reusable_person_ids:
+                    person_id = int(reusable_person_ids.pop(0))
+                    reused_person_ids.add(person_id)
+                    conn.execute(
+                        """
+                        UPDATE person
+                        SET status='active',
+                            merged_into_person_id=NULL,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=?
+                        """,
+                        (person_id,),
+                    )
+            if person_id <= 0:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO person(
+                      person_uuid, display_name, is_named, status, merged_into_person_id, created_at, updated_at
+                    ) VALUES (?, NULL, 0, 'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (str(uuid.uuid4()),),
+                )
+                person_id = int(cursor.lastrowid)
+            person_map[person_temp_key] = person_id
+        return person_map, reused_person_ids
 
     def _persist_assignments(
         self,
@@ -320,6 +471,32 @@ class AssignmentStageService:
             )
             count += 1
         return count
+
+    def _clear_pending_reassign_for_faces(
+        self,
+        *,
+        face_rows: list[dict[str, object]],
+        conn: sqlite3.Connection,
+    ) -> None:
+        face_ids = sorted(
+            {
+                int(row.get("face_observation_id") or 0)
+                for row in face_rows
+                if int(row.get("face_observation_id") or 0) > 0
+            }
+        )
+        if not face_ids:
+            return
+        placeholders = ", ".join("?" for _ in face_ids)
+        conn.execute(
+            f"""
+            UPDATE face_observation
+            SET pending_reassign=0,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id IN ({placeholders})
+            """,
+            tuple(face_ids),
+        )
 
     def _complete_assignment_run(
         self,
@@ -380,22 +557,49 @@ class AssignmentStageService:
         *,
         scan_session_id: int,
         assignment_run_id: int,
+        run_kind: str,
         face_rows: list[dict[str, object]],
         person_rows: list[dict[str, object]],
         assignment_rows: list[dict[str, object]],
+        cluster_rows: list[dict[str, object]],
+        rebuild_scope: str,
     ) -> tuple[int, int]:
         conn = connect_sqlite(self._library_db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
             self._ensure_not_aborting(scan_session_id=scan_session_id, conn=conn)
             self._persist_face_quality_scores(conn=conn, face_rows=face_rows)
-            person_map = self._upsert_persons(person_rows, conn=conn)
+            existing_active_signatures: dict[int, tuple[int, ...]] | None = None
+            if str(run_kind) == "scan_full":
+                existing_active_signatures = self._load_active_person_signatures(conn=conn)
+                self._deactivate_active_assignments(conn=conn)
+            person_map, reused_person_ids = self._upsert_persons(
+                person_rows,
+                run_kind=run_kind,
+                existing_active_signatures=existing_active_signatures,
+                conn=conn,
+            )
             assignment_count = self._persist_assignments(
                 scan_session_id=scan_session_id,
                 assignment_rows=assignment_rows,
                 assignment_run_id=assignment_run_id,
                 person_map=person_map,
                 conn=conn,
+            )
+            if str(run_kind) == "scan_full":
+                self._clear_pending_reassign_for_faces(face_rows=face_rows, conn=conn)
+                self._retire_unreused_active_persons(
+                    existing_person_ids=set((existing_active_signatures or {}).keys()),
+                    reused_person_ids=reused_person_ids,
+                    conn=conn,
+                )
+            self._cluster_repo.replace_all_clusters(
+                assignment_run_id=assignment_run_id,
+                cluster_rows=cluster_rows,
+                person_id_by_temp_key=person_map,
+                face_quality_by_id=self._face_quality_by_id(face_rows),
+                conn=conn,
+                rebuild_scope=rebuild_scope,
             )
             self._mark_session_sources_stage_done(scan_session_id=scan_session_id, conn=conn)
             self._complete_assignment_run(assignment_run_id=assignment_run_id, status="completed", conn=conn)
@@ -406,6 +610,128 @@ class AssignmentStageService:
             raise
         finally:
             conn.close()
+
+    def _persist_incremental_assignment_outcome(
+        self,
+        *,
+        scan_session_id: int,
+        assignment_run_id: int,
+        face_rows: list[dict[str, object]],
+    ) -> tuple[int, int]:
+        conn = connect_sqlite(self._library_db_path)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            self._ensure_not_aborting(scan_session_id=scan_session_id, conn=conn)
+            self._persist_face_quality_scores(conn=conn, face_rows=face_rows)
+            candidate_face_ids = self._list_incremental_candidate_face_ids(scan_session_id=scan_session_id, conn=conn)
+            incremental_service = IncrementalAssignmentService(
+                library_db_path=self._library_db_path,
+                embedding_db_path=self._embedding_db_path,
+                cluster_repo=self._cluster_repo,
+            )
+            result = incremental_service.run(
+                assignment_run_id=assignment_run_id,
+                face_observation_ids=candidate_face_ids,
+                conn=conn,
+                abort_checker=lambda: self._ensure_not_aborting(scan_session_id=scan_session_id, conn=conn),
+            )
+            self._mark_session_sources_stage_done(scan_session_id=scan_session_id, conn=conn)
+            self._complete_assignment_run(assignment_run_id=assignment_run_id, status="completed", conn=conn)
+            conn.commit()
+            return int(result.person_count), int(result.attached_count)
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def _should_run_incremental(
+        self,
+        *,
+        scan_session_id: int,
+        run_kind: str,
+        param_snapshot: dict[str, object],
+    ) -> bool:
+        if str(run_kind) != "scan_incremental":
+            return False
+        conn = connect_sqlite(self._library_db_path)
+        try:
+            if not self._cluster_repo.has_active_clusters(conn=conn):
+                return False
+            row = conn.execute(
+                """
+                SELECT param_snapshot_json
+                FROM assignment_run
+                WHERE scan_session_id <> ?
+                  AND status='completed'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (int(scan_session_id),),
+            ).fetchone()
+            if row is None:
+                return False
+            latest_snapshot = json.loads(str(row[0]))
+            return latest_snapshot == param_snapshot
+        finally:
+            conn.close()
+
+    def _list_incremental_candidate_face_ids(
+        self,
+        *,
+        scan_session_id: int,
+        conn: sqlite3.Connection,
+    ) -> list[int]:
+        rows = conn.execute(
+            """
+            SELECT f.id
+            FROM face_observation AS f
+            INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
+            INNER JOIN scan_session_source AS s
+              ON s.library_source_id = p.library_source_id
+             AND s.scan_session_id = ?
+            LEFT JOIN person_face_assignment AS a
+              ON a.face_observation_id = f.id
+             AND a.active = 1
+            WHERE f.active = 1
+              AND p.asset_status = 'active'
+              AND (f.pending_reassign = 1 OR a.id IS NULL)
+            ORDER BY f.id ASC
+            """,
+            (int(scan_session_id),),
+        ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def _face_quality_by_id(self, face_rows: list[dict[str, object]]) -> dict[int, float]:
+        return {
+            int(row.get("face_observation_id") or 0): float(row.get("quality_score") or 0.0)
+            for row in face_rows
+            if int(row.get("face_observation_id") or 0) > 0
+        }
+
+    def _filter_active_face_ids(
+        self,
+        *,
+        face_ids: list[int],
+        conn: sqlite3.Connection,
+    ) -> list[int]:
+        unique_ids = sorted({int(face_id) for face_id in face_ids if int(face_id) > 0})
+        if not unique_ids:
+            return []
+        placeholders = ", ".join("?" for _ in unique_ids)
+        rows = conn.execute(
+            f"""
+            SELECT f.id
+            FROM face_observation AS f
+            INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
+            WHERE f.id IN ({placeholders})
+              AND f.active=1
+              AND p.asset_status='active'
+            ORDER BY f.id ASC
+            """,
+            tuple(unique_ids),
+        ).fetchall()
+        return [int(row[0]) for row in rows]
 
     def _ensure_not_aborting(self, *, scan_session_id: int, conn: sqlite3.Connection | None = None) -> None:
         db = conn or connect_sqlite(self._library_db_path)

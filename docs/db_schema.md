@@ -128,6 +128,10 @@
 
 - `pending_reassign` 不对应独立 `reassign` 会话类型；其处理并入常规 `scan_*` 会话。
 - 通过部分唯一索引保证全局单活：任意时刻最多只有一个 `running/aborting` 会话。
+- `scan_incremental` 优先只处理当前会话 source 范围内“无 active assignment”或 `pending_reassign=1` 的 active observation。
+- 若参数快照与最近完成的持久 cluster 快照不一致，`scan_incremental` 会自动回退到**真正的 full rebuild**：assignment 输入改为全库 `asset_status='active'` 的 active face，并执行与 `scan_full` 等价的“停用旧 active assignment + 退役未复用 person + 重写 active cluster 快照”语义，而不是仅跳过增量服务。
+- assignment 输入始终要求 `photo_asset.asset_status='active'`；discover/metadata 已标记为 `missing/deleted` 的资产，其历史 face 不得再进入 assignment 输入。
+- full rebuild（包括由 `scan_incremental` 回退得到的 full rebuild）完成后，本次处理过的 active face 必须清空 `pending_reassign`，避免在后续 incremental session 中被重复选为 candidate。
 
 #### `scan_session_source`
 
@@ -352,6 +356,67 @@
   - `person_cluster_recall_target_min_person_faces=40`
   - `person_cluster_recall_max_rounds=2`
 - `param_snapshot_json` 中不允许出现 `embedding_flip_weight`。
+- `run_kind='scan_incremental'` 时会优先复用持久 cluster；只有在无快照或参数快照不匹配时才回退全量重建。
+- 回退 full rebuild 时，输入范围提升为全库 `asset_status='active'` 的 active face，效果必须与 `scan_full` 一致，而不是只重跑当前 session source。
+- 回退 full rebuild 时，对应 `assignment_run.run_kind` 也必须写成 `scan_full`，保证运行元数据与实际执行语义一致。
+
+#### `face_cluster`
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `INTEGER` | `PRIMARY KEY` | 持久 cluster 主键 |
+| `cluster_uuid` | `TEXT` | `NOT NULL UNIQUE` | cluster 稳定 UUID |
+| `person_id` | `INTEGER` | `NOT NULL REFERENCES person(id)` | 当前归属人物 |
+| `status` | `TEXT` | `NOT NULL CHECK (status IN ('active','replaced'))` | 当前快照状态 |
+| `rebuild_scope` | `TEXT` | `NOT NULL CHECK (rebuild_scope IN ('full','local'))` | 生成该快照的重建范围 |
+| `created_assignment_run_id` | `INTEGER` | `NOT NULL REFERENCES assignment_run(id)` | 首次生成该 cluster 的 assignment run |
+| `updated_assignment_run_id` | `INTEGER` | `NOT NULL REFERENCES assignment_run(id)` | 最近一次刷新该 cluster 的 assignment run |
+| `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
+| `updated_at` | `TEXT` | `NOT NULL` | 更新时间 |
+
+约束与索引：
+
+- `idx_face_cluster_status(status, person_id)`。
+- `status='active'` 的行代表当前 cluster 真相层；全量重建会尽量复用“同一 person 且成员集合不变”的 cluster 行，保留其稳定 `cluster_uuid`；只有未复用的旧 cluster 才会被置为 `replaced`。
+- full rebuild 判定 person/cluster 是否可复用时，签名只统计仍然有效的证据：`person_face_assignment.active=1` 且对应 `face_observation.active=1`、`photo_asset.asset_status='active'`。
+- `rebuild_scope='local'` 表示该 cluster 在增量阶段通过局部重建或局部追加刷新，而不是整库全量重建。
+- 增量 attach 采用“两阶段”判定：先仅用 `face_cluster_rep_face` 做 representative 召回候选，再只对召回到的 cluster 使用 `face_cluster_member` 做 member 精排。
+- 上述 representative/member 证据在增量路径中都必须再联表过滤 `photo_asset.asset_status='active'`；来自 `missing/deleted` 资产的历史 face 不能参与 recall、rerank 或 local rebuild。
+
+#### `face_cluster_member`
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `INTEGER` | `PRIMARY KEY` | 主键 |
+| `face_cluster_id` | `INTEGER` | `NOT NULL REFERENCES face_cluster(id)` | 所属持久 cluster |
+| `face_observation_id` | `INTEGER` | `NOT NULL REFERENCES face_observation(id)` | 成员 observation |
+| `assignment_run_id` | `INTEGER` | `NOT NULL REFERENCES assignment_run(id)` | 写入该成员关系的 assignment run |
+| `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
+
+约束与索引：
+
+- `UNIQUE(face_cluster_id, face_observation_id)`。
+- `idx_face_cluster_member_face(face_observation_id)`。
+- 活跃 cluster 的全量成员关系由 `face_cluster.status='active'` + 本表联表得到。
+
+#### `face_cluster_rep_face`
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `INTEGER` | `PRIMARY KEY` | 主键 |
+| `face_cluster_id` | `INTEGER` | `NOT NULL REFERENCES face_cluster(id)` | 所属持久 cluster |
+| `face_observation_id` | `INTEGER` | `NOT NULL REFERENCES face_observation(id)` | representative observation |
+| `rep_rank` | `INTEGER` | `NOT NULL` | 代表脸顺位，`1` 为最优 |
+| `assignment_run_id` | `INTEGER` | `NOT NULL REFERENCES assignment_run(id)` | 写入该 representative 的 assignment run |
+| `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
+
+约束与索引：
+
+- `UNIQUE(face_cluster_id, rep_rank)`。
+- `idx_face_cluster_rep_face_obs(face_observation_id)`。
+- representative face 默认按 cluster 内 `quality_score` 从高到低选取前 `3` 张。
+- 当已存 representative 因 `face_observation.active=0` 或其 `photo_asset.asset_status!='active'` 失效时，需要从仍然有效的 cluster members 中重新选 representative，避免 cluster 因坏 rep 而失去召回能力。
+- representative 只承担第一阶段召回，不参与直接硬挂；是否 attach 由召回后的 member 精排结果决定。
 
 #### `person_face_assignment`
 
@@ -373,9 +438,12 @@
 - 自动来源：`hdbscan|person_consensus`；不存在 `manual`。
 - `noise` 与 `low_quality_ignored` 不写入 `person_face_assignment`。
 - 允许值仅 `hdbscan|person_consensus|merge|undo`。
+- 若增量 `local_rebuild` 后仍无法唯一映射回某个既有 cluster（如 overlap 并列），该 face 必须保持未归属，禁止硬挂到任一 person；后续可等待下一次 full rebuild 统一处理。
 - partial unique：`UNIQUE(face_observation_id) WHERE active=1`。
 - `idx_assignment_person(person_id, active)`。
 - `idx_assignment_run(assignment_run_id)`。
+- 增量 attach 复用已有持久 cluster / person 时，来源仍记为 `person_consensus`，不会引入新的 assignment_source 枚举。
+- 边界不稳定的新 observation 不做硬挂；会先尝试 local rebuild，若仍无法稳定归属，则保持未归属，等待后续增量或全量重建。
 
 #### `person_face_exclusion`
 
