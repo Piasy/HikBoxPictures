@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import sqlite3
+import time
 from dataclasses import dataclass
 
+from hikbox_pictures.product.export.run_service import assert_people_writes_unlocked
 from hikbox_pictures.product.people.repository import (
     AssignmentRecord,
     ClusterSnapshotRecord,
@@ -66,19 +69,30 @@ class PeopleService:
         normalized_name = display_name.strip()
         if not normalized_name:
             raise ValueError("display_name 不能为空")
-        conn = self._repo.connect()
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            person = self._repo.rename_person(person_id=int(person_id), display_name=normalized_name, conn=conn)
-            if person is None:
-                raise PeopleNotFoundError(f"人物不存在或不可重命名，id={person_id}")
-            conn.commit()
-            return person
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+        last_locked_error: sqlite3.OperationalError | None = None
+        for attempt in range(20):
+            conn = self._repo.connect()
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                person = self._repo.rename_person(person_id=int(person_id), display_name=normalized_name, conn=conn)
+                if person is None:
+                    raise PeopleNotFoundError(f"人物不存在或不可重命名，id={person_id}")
+                conn.commit()
+                return person
+            except sqlite3.OperationalError as exc:
+                _rollback_quietly(conn)
+                if _is_database_locked_error(exc) and attempt < 19:
+                    last_locked_error = exc
+                    time.sleep(0.05)
+                    continue
+                raise
+            except Exception:
+                _rollback_quietly(conn)
+                raise
+            finally:
+                conn.close()
+        assert last_locked_error is not None
+        raise last_locked_error
 
     def exclude_face(self, person_id: int, face_observation_id: int) -> ExcludeFacesResult:
         return self.exclude_faces(person_id=person_id, face_observation_ids=[face_observation_id])
@@ -89,7 +103,9 @@ class PeopleService:
             raise ValueError("face_observation_ids 不能为空")
         conn = self._repo.connect()
         try:
+            assert_people_writes_unlocked(conn)
             conn.execute("BEGIN IMMEDIATE")
+            assert_people_writes_unlocked(conn)
             person = self._repo.get_person(int(person_id), conn=conn)
             if person is None or person.status != "active":
                 raise PeopleNotFoundError(f"人物不存在或不可排除，id={person_id}")
@@ -138,7 +154,9 @@ class PeopleService:
             raise PeopleMergeError("至少需要两个不同人物才能合并")
         conn = self._repo.connect()
         try:
+            assert_people_writes_unlocked(conn)
             conn.execute("BEGIN IMMEDIATE")
+            assert_people_writes_unlocked(conn)
             persons = []
             persons_by_id: dict[int, PersonRecord] = {}
             for person_id in ordered_person_ids:
@@ -249,7 +267,9 @@ class PeopleService:
     def undo_last_merge(self) -> MergeUndoResult:
         conn = self._repo.connect()
         try:
+            assert_people_writes_unlocked(conn)
             conn.execute("BEGIN IMMEDIATE")
+            assert_people_writes_unlocked(conn)
             merge_operation = self._repo.get_latest_applied_merge_operation(conn=conn)
             if merge_operation is None:
                 raise PeopleUndoMergeError("不存在可撤销的 merge_operation")
@@ -667,6 +687,17 @@ def _as_optional_float(value: object) -> float | None:
     if value is None:
         return None
     return float(value)
+
+
+def _is_database_locked_error(exc: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
+
+
+def _rollback_quietly(conn) -> None:
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        return
 
 
 def _cluster_snapshots_from_payload(payload: object) -> list[ClusterSnapshotRecord]:
