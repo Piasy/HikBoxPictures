@@ -726,40 +726,40 @@ Expected: PASS，且无需新增 schema 变更。
 - Test: `tests/product/test_export_bucket_rules.py`
 - Test: `tests/product/test_export_run_locking.py`
 
-- [ ] **Step 1: 写失败用例（模板只能选择已命名且 active 人物）**
+- [x] **Step 1: 写失败用例（模板只能选择已命名且 active 人物）**
 
 ```python
 with pytest.raises(ValidationError):
     update_template_persons(template_id=1, person_ids=[anonymous_person_id])
 ```
 
-- [ ] **Step 2: 写失败用例（only/group 分桶按阈值 selected_min_area/4）**
+- [x] **Step 2: 写失败用例（only/group 分桶按阈值 selected_min_area/4）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_export_bucket_rules.py::test_group_bucket_threshold_rule -v`
 Expected: FAIL。
 
-- [ ] **Step 3: 写失败用例（照片必须命中全部 selected persons，`YYYY-MM` 优先取 `capture_datetime`，缺失时回退文件 `mtime`）**
+- [x] **Step 3: 写失败用例（照片必须命中全部 selected persons，`YYYY-MM` 优先取 `capture_datetime`，缺失时回退文件 `mtime`）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_export_delivery_collision.py::test_export_requires_all_selected_persons_and_month_falls_back_to_mtime -v`
 Expected: FAIL。
 
-- [ ] **Step 4: 实现模板 create/list/update（无 delete）与 run 启动，明确 API/CLI 均不暴露 delete 能力**
+- [x] **Step 4: 实现模板 create/list/update（无 delete）与 run 启动，明确 API/CLI 均不暴露 delete 能力**
 
 ```python
 assert "delete_template" not in ExportTemplateService.__dict__
 ```
 
-- [ ] **Step 5: 实现导出执行（命中全部 selected persons + 目录 `only/group/YYYY-MM` + 同名冲突 `skipped_exists` + 月份回退规则）**
+- [x] **Step 5: 实现导出执行（命中全部 selected persons + 目录 `only/group/YYYY-MM` + 同名冲突 `skipped_exists` + 月份回退规则）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_export_bucket_rules.py tests/product/test_export_delivery_collision.py -v`
 Expected: PASS。
 
-- [ ] **Step 6: 实现 Live Photo 联动导出与缺失 MOV 静默跳过**
+- [x] **Step 6: 实现 Live Photo 联动导出与缺失 MOV 静默跳过**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_export_run_locking.py::test_missing_live_mov_is_silently_skipped -v`
 Expected: PASS。
 
-- [ ] **Step 7: 实现导出运行锁（导出进行中阻断人物归属/合并写）**
+- [x] **Step 7: 实现导出运行锁（导出进行中阻断人物归属/合并写）**
 
 Run: `source .venv/bin/activate && pytest tests/product/test_export_run_locking.py::test_people_writes_blocked_while_export_running -v`
 Expected: PASS。
