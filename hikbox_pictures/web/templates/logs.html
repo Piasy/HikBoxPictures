@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}日志{% endblock %}
+{% block body %}
+<main>
+  <section>
+    <h1>日志</h1>
+    <div
+      data-testid="logs-filter"
+      data-scan-session-id="{{ scan_session_id or '' }}"
+      data-export-run-id="{{ export_run_id or '' }}"
+      data-severity="{{ severity or '' }}"
+    ></div>
+    {% for item in items %}
+    <article
+      data-testid="log-row"
+      data-scan-session-id="{{ item.scan_session_id or '' }}"
+      data-export-run-id="{{ item.export_run_id or '' }}"
+      data-severity="{{ item.severity }}"
+    >
+      {{ item.event_type }}
+    </article>
+    {% endfor %}
+  </section>
+</main>
+{% endblock %}

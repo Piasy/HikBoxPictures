@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block title %}导出{% endblock %}
+{% block body %}
+<main>
+  <section>
+    <h1>导出</h1>
+    <button data-testid="export-template-create" data-enabled="true">新建模板</button>
+    {% for template in templates %}
+    <article data-testid="export-template-row" data-template-id="{{ template.id }}">
+      <span>{{ template.name }}</span>
+      <button data-testid="export-template-edit-{{ template.id }}" data-enabled="true">编辑</button>
+    </article>
+    {% endfor %}
+    <div data-testid="preview-only-stats" data-candidate-count="{{ preview['only_count'] }}">only</div>
+    <div data-testid="preview-group-stats" data-candidate-count="{{ preview['group_count'] }}">group</div>
+    {% for item in preview['items'] %}
+    <article data-testid="preview-sample-item" data-bucket="{{ item.bucket }}">{{ item.primary_path }}</article>
+    {% endfor %}
+    {% for run in runs %}
+    <article data-testid="export-run-history-row" data-export-run-id="{{ run.id }}" data-status="{{ run.status }}">
+      {{ run.id }}
+    </article>
+    {% endfor %}
+    <button data-testid="people-assign-action" data-enabled="{{ 'false' if people_write_locked else 'true' }}">人物归属</button>
+    <button data-testid="people-merge-action" data-enabled="{{ 'false' if people_write_locked else 'true' }}">人物合并</button>
+    <div data-testid="people-write-lock-tip" data-locked="{{ 'true' if people_write_locked else 'false' }}">
+      {% if people_write_locked %}导出运行中，人物写操作已锁定{% else %}当前可修改人物{% endif %}
+    </div>
+    {% if selected_run %}
+    <div data-testid="selected-export-run">{{ selected_run.id }}</div>
+    {% endif %}
+  </section>
+</main>
+{% endblock %}
