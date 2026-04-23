@@ -61,6 +61,13 @@ class ScanSessionRunResult:
     scan_session_id: int
     detect_result: DetectStageRunResult
     assignment_run_id: int
+    new_face_count: int | None = None
+    anchor_candidate_face_count: int | None = None
+    anchor_attached_face_count: int | None = None
+    anchor_missed_face_count: int | None = None
+    anchor_missed_by_person: dict[int, int] | None = None
+    local_rebuild_count: int | None = None
+    fallback_reason: str | None = None
 
 
 class ScanExecutionService:
@@ -242,6 +249,13 @@ class ScanExecutionService:
                 scan_session_id=scan_session_id,
                 detect_result=detect_result,
                 assignment_run_id=assignment_result.assignment_run_id,
+                new_face_count=assignment_result.new_face_count,
+                anchor_candidate_face_count=assignment_result.anchor_candidate_face_count,
+                anchor_attached_face_count=assignment_result.anchor_attached_face_count,
+                anchor_missed_face_count=assignment_result.anchor_missed_face_count,
+                anchor_missed_by_person=assignment_result.anchor_missed_by_person,
+                local_rebuild_count=assignment_result.local_rebuild_count,
+                fallback_reason=assignment_result.fallback_reason,
             )
         except AssignmentAbortedError:
             self._session_repo.update_status(

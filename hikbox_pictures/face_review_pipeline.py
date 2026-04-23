@@ -2141,6 +2141,28 @@ def render_review_html(payload: dict[str, Any]) -> str:
     cluster_count = int(meta.get("cluster_count", 0))
     noise_count = int(meta.get("noise_count", 0))
     person_count = int(meta.get("person_count", len(persons)))
+    fallback_full = meta.get("fallback_full", {})
+    fallback_conclusion = str(fallback_full.get("conclusion", "unknown"))
+    if fallback_conclusion not in {"no", "likely_yes", "unknown"}:
+        fallback_conclusion = "unknown"
+    fallback_conclusion_text = html.escape(str(fallback_full.get("conclusion_text", "")))
+    fallback_reason_text = html.escape(str(fallback_full.get("reason_text", "")))
+    fallback_evidence = list(fallback_full.get("evidence", [])) if isinstance(fallback_full, dict) else []
+    fallback_panel = ""
+    if fallback_conclusion_text or fallback_evidence:
+        evidence_items = "".join(f"<li>{html.escape(str(item))}</li>" for item in fallback_evidence)
+        fallback_panel = f"""
+    <section class=\"panel fallback-panel\">
+      <div class=\"fallback-head\">
+        <h2>Fallback Full 判定</h2>
+        <span class=\"fallback-badge {fallback_conclusion}\">{fallback_conclusion_text}</span>
+      </div>
+      <p class=\"fallback-reason\">{fallback_reason_text}</p>
+      <ul class=\"evidence-list\">
+        {evidence_items}
+      </ul>
+    </section>
+        """
 
     return f"""<!DOCTYPE html>
 <html lang=\"zh-CN\">
@@ -2201,6 +2223,58 @@ def render_review_html(payload: dict[str, Any]) -> str:
     }}
     .summary-grid dt {{ margin: 0 0 6px; color: var(--sub); font-size: 12px; }}
     .summary-grid dd {{ margin: 0; font-weight: 600; }}
+    .fallback-panel {{
+      display: grid;
+      gap: 10px;
+    }}
+    .fallback-head {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }}
+    .fallback-head h2 {{
+      margin: 0;
+      font-size: 18px;
+    }}
+    .fallback-badge {{
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }}
+    .fallback-badge.no {{
+      color: #0d5e3f;
+      background: #edf9f2;
+      border-color: #b8e2c8;
+    }}
+    .fallback-badge.likely_yes {{
+      color: #8b2b06;
+      background: #fff3e8;
+      border-color: #f1c7ad;
+    }}
+    .fallback-badge.unknown {{
+      color: #5e4b12;
+      background: #fff9df;
+      border-color: #ead994;
+    }}
+    .fallback-reason {{
+      margin: 0;
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }}
+    .evidence-list {{
+      margin: 0;
+      padding-left: 18px;
+      color: var(--sub);
+      display: grid;
+      gap: 4px;
+    }}
     details.panel-block {{
       padding: 0;
       overflow: hidden;
@@ -2372,6 +2446,7 @@ def render_review_html(payload: dict[str, Any]) -> str:
     <div class=\"meta\">{source}</div>
   </header>
   <main class=\"content\">
+    {fallback_panel}
     <section class=\"panel\">
       <dl class=\"summary-grid\">
         <div><dt>Embedding 模型</dt><dd>{model}</dd></div>

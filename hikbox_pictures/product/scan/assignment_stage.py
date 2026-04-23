@@ -26,6 +26,10 @@ UNASSIGNED_SOURCES = {"noise", "low_quality_ignored"}
 EMBEDDING_MODEL_KEY = "magface_iresnet100_ms1mv2"
 MAGFACE_CHECKPOINT_ENV = "HIKBOX_MAGFACE_CHECKPOINT"
 MAGFACE_CHECKPOINT_DEFAULT = Path(".cache/magface/magface_iresnet100_ms1mv2.pth")
+INCREMENTAL_FALLBACK_MIN_ANCHOR_CANDIDATE_FACES = 30
+INCREMENTAL_FALLBACK_ANCHOR_MISSED_RATIO = 0.3
+INCREMENTAL_FALLBACK_MIN_HEAVY_MISSED_FACES_PER_PERSON = 30
+INCREMENTAL_FALLBACK_MIN_FAILED_ANCHOR_PERSONS = 2
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,24 @@ class AssignmentStageResult:
     assignment_run_id: int
     person_count: int
     assignment_count: int
+    new_face_count: int | None = None
+    anchor_candidate_face_count: int | None = None
+    anchor_attached_face_count: int | None = None
+    anchor_missed_face_count: int | None = None
+    anchor_missed_by_person: dict[int, int] | None = None
+    local_rebuild_count: int | None = None
+    fallback_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class IncrementalAssignmentRuntimeStats:
+    new_face_count: int
+    anchor_candidate_face_count: int
+    anchor_attached_face_count: int
+    anchor_missed_face_count: int
+    anchor_missed_by_person: dict[int, int]
+    local_rebuild_count: int
+    fallback_reason: str | None = None
 
 
 class AssignmentAbortedError(RuntimeError):
@@ -47,6 +69,10 @@ class AssignmentAbortedError(RuntimeError):
 
 class IncrementalFallbackToFullRebuild(RuntimeError):
     """增量归属命中过多未归属样本，需要回退到 full rebuild。"""
+
+    def __init__(self, message: str, *, runtime_stats: IncrementalAssignmentRuntimeStats):
+        super().__init__(message)
+        self.runtime_stats = runtime_stats
 
 
 class AssignmentStageService:
@@ -107,6 +133,7 @@ class AssignmentStageService:
             param_snapshot=param_snapshot,
         )
         effective_run_kind = "scan_full" if str(run_kind) == "scan_incremental" and not use_incremental else str(run_kind)
+        incremental_runtime_stats: IncrementalAssignmentRuntimeStats | None = None
         started = self.start_assignment_run(
             scan_session_id=scan_session_id,
             run_kind=effective_run_kind,
@@ -125,12 +152,13 @@ class AssignmentStageService:
 
             if use_incremental:
                 try:
-                    person_count, assignment_count = self._persist_incremental_assignment_outcome(
+                    person_count, assignment_count, incremental_runtime_stats = self._persist_incremental_assignment_outcome(
                         scan_session_id=scan_session_id,
                         assignment_run_id=started.assignment_run_id,
                         face_rows=faces,
                     )
-                except IncrementalFallbackToFullRebuild:
+                except IncrementalFallbackToFullRebuild as exc:
+                    incremental_runtime_stats = exc.runtime_stats
                     full_faces = self._build_face_inputs(
                         scan_session_id=scan_session_id,
                         param_snapshot=started.param_snapshot,
@@ -169,6 +197,29 @@ class AssignmentStageService:
                 assignment_run_id=started.assignment_run_id,
                 person_count=int(person_count),
                 assignment_count=int(assignment_count),
+                new_face_count=None if incremental_runtime_stats is None else int(incremental_runtime_stats.new_face_count),
+                anchor_candidate_face_count=(
+                    None
+                    if incremental_runtime_stats is None
+                    else int(incremental_runtime_stats.anchor_candidate_face_count)
+                ),
+                anchor_attached_face_count=(
+                    None
+                    if incremental_runtime_stats is None
+                    else int(incremental_runtime_stats.anchor_attached_face_count)
+                ),
+                anchor_missed_face_count=(
+                    None if incremental_runtime_stats is None else int(incremental_runtime_stats.anchor_missed_face_count)
+                ),
+                anchor_missed_by_person=(
+                    None
+                    if incremental_runtime_stats is None
+                    else dict(sorted(incremental_runtime_stats.anchor_missed_by_person.items()))
+                ),
+                local_rebuild_count=(
+                    None if incremental_runtime_stats is None else int(incremental_runtime_stats.local_rebuild_count)
+                ),
+                fallback_reason=None if incremental_runtime_stats is None else incremental_runtime_stats.fallback_reason,
             )
         except Exception:
             self._complete_assignment_run(assignment_run_id=started.assignment_run_id, status="failed")
@@ -660,7 +711,7 @@ class AssignmentStageService:
         scan_session_id: int,
         assignment_run_id: int,
         face_rows: list[dict[str, object]],
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, IncrementalAssignmentRuntimeStats]:
         conn = connect_sqlite(self._library_db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -678,35 +729,83 @@ class AssignmentStageService:
                 conn=conn,
                 abort_checker=lambda: self._ensure_not_aborting(scan_session_id=scan_session_id, conn=conn),
             )
+            runtime_stats = self._build_incremental_runtime_stats(
+                candidate_face_count=len(candidate_face_ids),
+                result=result,
+            )
             if self._should_fallback_to_full_rebuild(
                 candidate_face_count=len(candidate_face_ids),
                 attached_face_count=int(result.attached_count),
+                anchor_candidate_face_count=int(result.anchor_candidate_face_count),
+                anchor_missed_face_count=int(result.anchor_missed_face_count),
+                anchor_missed_by_person=dict(result.anchor_missed_by_person),
             ):
+                fallback_reason = (
+                    "incremental anchor miss too high: "
+                    f"candidate={len(candidate_face_ids)} "
+                    f"attached={result.attached_count} "
+                    f"anchor_candidate={result.anchor_candidate_face_count} "
+                    f"anchor_missed={result.anchor_missed_face_count}"
+                )
                 raise IncrementalFallbackToFullRebuild(
-                    f"incremental unresolved too high: candidate={len(candidate_face_ids)} attached={result.attached_count}"
+                    fallback_reason,
+                    runtime_stats=self._build_incremental_runtime_stats(
+                        candidate_face_count=len(candidate_face_ids),
+                        result=result,
+                        fallback_reason=fallback_reason,
+                    ),
                 )
             self._mark_session_sources_stage_done(scan_session_id=scan_session_id, conn=conn)
             self._complete_assignment_run(assignment_run_id=assignment_run_id, status="completed", conn=conn)
             conn.commit()
-            return int(result.person_count), int(result.attached_count)
+            return int(result.person_count), int(result.attached_count), runtime_stats
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
 
+    def _build_incremental_runtime_stats(
+        self,
+        *,
+        candidate_face_count: int,
+        result,
+        fallback_reason: str | None = None,
+    ) -> IncrementalAssignmentRuntimeStats:
+        return IncrementalAssignmentRuntimeStats(
+            new_face_count=int(candidate_face_count),
+            anchor_candidate_face_count=int(result.anchor_candidate_face_count),
+            anchor_attached_face_count=int(result.anchor_attached_face_count),
+            anchor_missed_face_count=int(result.anchor_missed_face_count),
+            anchor_missed_by_person=dict(sorted(dict(result.anchor_missed_by_person).items())),
+            local_rebuild_count=int(result.local_rebuild_count),
+            fallback_reason=fallback_reason,
+        )
+
     def _should_fallback_to_full_rebuild(
         self,
         *,
         candidate_face_count: int,
         attached_face_count: int,
+        anchor_candidate_face_count: int,
+        anchor_missed_face_count: int,
+        anchor_missed_by_person: dict[int, int],
     ) -> bool:
-        if int(candidate_face_count) < 2:
+        if int(anchor_candidate_face_count) < int(INCREMENTAL_FALLBACK_MIN_ANCHOR_CANDIDATE_FACES):
             return False
-        unresolved_count = max(0, int(candidate_face_count) - int(attached_face_count))
-        if unresolved_count < 2:
+        if int(anchor_missed_face_count) <= 0:
             return False
-        return float(unresolved_count) / float(candidate_face_count) >= 0.5
+        if (
+            float(anchor_missed_face_count) / float(anchor_candidate_face_count)
+            < float(INCREMENTAL_FALLBACK_ANCHOR_MISSED_RATIO)
+        ):
+            return False
+        failed_anchor_person_count = sum(
+            1
+            for missed_count in (anchor_missed_by_person or {}).values()
+            if int(missed_count) >= int(INCREMENTAL_FALLBACK_MIN_HEAVY_MISSED_FACES_PER_PERSON)
+        )
+        return failed_anchor_person_count >= int(INCREMENTAL_FALLBACK_MIN_FAILED_ANCHOR_PERSONS)
 
     def _should_run_incremental(
         self,
@@ -745,6 +844,10 @@ class AssignmentStageService:
         scan_session_id: int,
         conn: sqlite3.Connection,
     ) -> list[int]:
+        session_started_at = self._incremental_candidate_boundary_at(
+            scan_session_id=scan_session_id,
+            conn=conn,
+        )
         rows = conn.execute(
             """
             SELECT f.id
@@ -758,12 +861,37 @@ class AssignmentStageService:
              AND a.active = 1
             WHERE f.active = 1
               AND p.asset_status = 'active'
-              AND (f.pending_reassign = 1 OR a.id IS NULL)
+              AND (
+                f.pending_reassign = 1
+                OR (
+                  a.id IS NULL
+                  AND (? IS NULL OR datetime(f.created_at) >= datetime(?))
+                )
+              )
             ORDER BY f.id ASC
             """,
-            (int(scan_session_id),),
+            (int(scan_session_id), session_started_at, session_started_at),
         ).fetchall()
         return [int(row[0]) for row in rows]
+
+    def _incremental_candidate_boundary_at(
+        self,
+        *,
+        scan_session_id: int,
+        conn: sqlite3.Connection,
+    ) -> str | None:
+        row = conn.execute(
+            """
+            SELECT COALESCE(started_at, created_at)
+            FROM scan_session
+            WHERE id=?
+            LIMIT 1
+            """,
+            (int(scan_session_id),),
+        ).fetchone()
+        if row is None or not row[0]:
+            return None
+        return str(row[0])
 
     def _face_quality_by_id(self, face_rows: list[dict[str, object]]) -> dict[int, float]:
         return {

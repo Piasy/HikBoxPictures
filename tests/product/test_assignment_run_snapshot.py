@@ -314,6 +314,44 @@ def test_full_rebuild_clears_pending_reassign_and_prevents_incremental_requeue(
     assert 1 not in candidate_ids
 
 
+def test_anchor_aware_fallback_ignores_global_unresolved_ratio_when_anchor_mass_is_small(
+    tmp_path: Path,
+) -> None:
+    layout, session_id, runtime_root = _seed_runtime_workspace(tmp_path)
+    service = AssignmentStageService(
+        library_db_path=layout.library_db,
+        embedding_db_path=layout.embedding_db,
+        output_root=runtime_root,
+    )
+
+    assert service._should_fallback_to_full_rebuild(
+        candidate_face_count=1035,
+        attached_face_count=517,
+        anchor_candidate_face_count=24,
+        anchor_missed_face_count=24,
+        anchor_missed_by_person={101: 24},
+    ) is False
+
+
+def test_anchor_aware_fallback_requires_multiple_anchor_persons_to_miss_heavily(
+    tmp_path: Path,
+) -> None:
+    layout, session_id, runtime_root = _seed_runtime_workspace(tmp_path)
+    service = AssignmentStageService(
+        library_db_path=layout.library_db,
+        embedding_db_path=layout.embedding_db,
+        output_root=runtime_root,
+    )
+
+    assert service._should_fallback_to_full_rebuild(
+        candidate_face_count=220,
+        attached_face_count=150,
+        anchor_candidate_face_count=100,
+        anchor_missed_face_count=70,
+        anchor_missed_by_person={11: 35, 22: 35},
+    ) is True
+
+
 def _seed_runtime_workspace(tmp_path: Path) -> tuple[object, int, Path]:
     workspace_root = tmp_path / "workspace"
     external_root = tmp_path / "external"

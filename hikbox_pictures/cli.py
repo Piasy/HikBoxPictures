@@ -161,6 +161,13 @@ def _cmd_scan_start_or_resume(args: argparse.Namespace) -> int:
             "detect_result": asdict(run_result.detect_result),
             "detect_progress": detect_progress,
             "output_root": str(output_root),
+            "new_face_count": run_result.new_face_count,
+            "anchor_candidate_face_count": run_result.anchor_candidate_face_count,
+            "anchor_attached_face_count": run_result.anchor_attached_face_count,
+            "anchor_missed_face_count": run_result.anchor_missed_face_count,
+            "anchor_missed_by_person": run_result.anchor_missed_by_person,
+            "local_rebuild_count": run_result.local_rebuild_count,
+            "fallback_reason": run_result.fallback_reason,
         },
     )
     return 0

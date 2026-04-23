@@ -10,7 +10,10 @@ from hikbox_pictures.product.scan.assignment_stage import AssignmentStageService
 from hikbox_pictures.product.scan.execution_service import DetectStageRunResult, ScanExecutionService
 from hikbox_pictures.product.scan.session_service import ScanSessionRepository
 from hikbox_pictures.product.scan.cluster_repository import ClusterRepository
-from hikbox_pictures.product.scan.incremental_assignment_service import IncrementalAssignmentService
+from hikbox_pictures.product.scan.incremental_assignment_service import (
+    IncrementalAssignmentResult,
+    IncrementalAssignmentService,
+)
 from hikbox_pictures.product.source.repository import SourceRepository
 from hikbox_pictures.product.source.service import SourceService
 
@@ -318,7 +321,7 @@ def test_scan_incremental_snapshot_mismatch_uses_true_full_rebuild_scope(tmp_pat
     assert active_clusters[0].member_count == 2
 
 
-def test_scan_incremental_falls_back_to_full_rebuild_when_batch_rebuild_leaves_too_many_unassigned(
+def test_scan_incremental_keeps_incremental_result_when_unassigned_faces_are_not_anchor_driven(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -575,9 +578,169 @@ def test_scan_incremental_falls_back_to_full_rebuild_when_batch_rebuild_leaves_t
     finally:
         conn.close()
 
-    assert result.assignment_count == 4
-    assert run_kind == "scan_full"
-    assert assigned_count == 2
+    assert result.assignment_count == 0
+    assert run_kind == "scan_incremental"
+    assert assigned_count == 0
+
+
+def test_scan_incremental_ignores_historical_unassigned_faces_when_building_candidates(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout, session_id, runtime_root = create_task6_workspace(tmp_path)
+    baseline_face_ids = seed_face_observations(
+        layout.library_db,
+        runtime_root,
+        [
+            {"asset_index": 0, "color": (220, 180, 160), "quality_score": 0.92},
+            {"asset_index": 0, "color": (218, 178, 158), "quality_score": 0.90},
+            {"asset_index": 1, "color": (180, 180, 180), "quality_score": 0.40},
+        ],
+    )
+    assigned_main = embedding_from_seed(3801)
+    historical_unassigned_main = embedding_from_seed(3802)
+    baseline_calculator = fake_embedding_calculator_from_map(
+        {
+            "f1.png": (assigned_main, embedding_from_seed(3901), 1.1),
+            "f2.png": (assigned_main, embedding_from_seed(3902), 1.1),
+            "f3.png": (historical_unassigned_main, embedding_from_seed(3903), 1.1),
+        }
+    )
+
+    def fake_full_run(*, faces, params):
+        return {
+            "faces": [
+                {
+                    "face_observation_id": baseline_face_ids[0],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.95,
+                },
+                {
+                    "face_observation_id": baseline_face_ids[1],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.94,
+                },
+                {
+                    "face_observation_id": baseline_face_ids[2],
+                    "cluster_label": -1,
+                    "person_temp_key": None,
+                    "assignment_source": "noise",
+                    "probability": None,
+                },
+            ],
+            "persons": [{"person_temp_key": "p0", "face_observation_ids": baseline_face_ids[:2]}],
+            "clusters": [
+                {
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "member_face_observation_ids": baseline_face_ids[:2],
+                    "representative_face_observation_ids": [baseline_face_ids[0]],
+                }
+            ],
+            "stats": {"person_count": 1, "assignment_count": 2},
+        }
+
+    monkeypatch.setattr("hikbox_pictures.product.scan.assignment_stage.run_frozen_v5_assignment", fake_full_run)
+    stage = AssignmentStageService(
+        library_db_path=layout.library_db,
+        embedding_db_path=layout.embedding_db,
+        output_root=runtime_root,
+    )
+    baseline = stage.run_frozen_v5_assignment(
+        scan_session_id=session_id,
+        run_kind="scan_full",
+        embedding_calculator=baseline_calculator,
+    )
+    assert baseline.assignment_count == 2
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        conn.execute(
+            """
+            UPDATE face_observation
+            SET created_at='2026-01-01 00:00:00',
+                updated_at='2026-01-01 00:00:00'
+            WHERE id=?
+            """,
+            (baseline_face_ids[2],),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    ScanSessionRepository(layout.library_db).update_status(session_id, status="completed")
+
+    incremental_session = ScanSessionRepository(layout.library_db).create_session(
+        run_kind="scan_incremental",
+        status="running",
+        triggered_by="manual_cli",
+    )
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        source_id = int(conn.execute("SELECT id FROM library_source ORDER BY id ASC LIMIT 1").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO scan_session_source(
+              scan_session_id, library_source_id, stage_status_json, processed_assets, failed_assets, updated_at
+            ) VALUES (?, ?, '{"discover":"done","metadata":"done","detect":"done","embed":"pending","cluster":"pending","assignment":"pending"}', 2, 0, CURRENT_TIMESTAMP)
+            """,
+            (incremental_session.id, source_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    new_face_id = seed_face_observations(
+        layout.library_db,
+        runtime_root,
+        [{"asset_index": 1, "color": (222, 182, 162), "quality_score": 0.91}],
+    )[0]
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        conn.execute(
+            """
+            UPDATE face_observation
+            SET aligned_relpath='artifacts/aligned/f4.png',
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=?
+            """,
+            (new_face_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    incremental_calculator = fake_embedding_calculator_from_map(
+        {
+            "f1.png": (assigned_main, embedding_from_seed(3901), 1.1),
+            "f2.png": (assigned_main, embedding_from_seed(3902), 1.1),
+            "f3.png": (historical_unassigned_main, embedding_from_seed(3903), 1.1),
+            "f4.png": (assigned_main, embedding_from_seed(3904), 1.1),
+        }
+    )
+
+    seen_candidate_face_ids: list[list[int]] = []
+
+    def fake_incremental_run(self, *, assignment_run_id, face_observation_ids, conn=None, abort_checker=None):
+        seen_candidate_face_ids.append(sorted(int(face_id) for face_id in face_observation_ids))
+        return IncrementalAssignmentResult(
+            attached_count=0,
+            local_rebuild_count=0,
+            person_count=1,
+        )
+
+    monkeypatch.setattr(IncrementalAssignmentService, "run", fake_incremental_run)
+
+    result = stage.run_frozen_v5_assignment(
+        scan_session_id=incremental_session.id,
+        run_kind="scan_incremental",
+        embedding_calculator=incremental_calculator,
+    )
+
+    assert seen_candidate_face_ids == [[new_face_id]]
+    assert result.new_face_count == 1
+    assert result.assignment_count == 0
 
 
 def test_missing_asset_faces_are_excluded_from_assignment_inputs(tmp_path: Path, monkeypatch) -> None:

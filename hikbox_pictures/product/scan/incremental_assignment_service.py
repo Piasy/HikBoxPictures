@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
@@ -22,6 +23,10 @@ class IncrementalAssignmentResult:
     attached_count: int
     local_rebuild_count: int
     person_count: int
+    anchor_candidate_face_count: int = 0
+    anchor_attached_face_count: int = 0
+    anchor_missed_face_count: int = 0
+    anchor_missed_by_person: dict[int, int] = field(default_factory=dict)
 
 
 class IncrementalAssignmentService:
@@ -60,7 +65,10 @@ class IncrementalAssignmentService:
                 db.execute("BEGIN IMMEDIATE")
             attached_count = 0
             local_rebuild_count = 0
+            anchor_attached_face_count = 0
+            anchor_missed_by_person: dict[int, int] = {}
             face_quality_by_id = self._load_face_quality_by_id(candidate_ids, conn=db)
+            anchor_person_ids = self._load_anchor_person_ids(conn=db)
             pending_face_ids = set(candidate_ids)
             if abort_checker is not None:
                 abort_checker()
@@ -75,8 +83,9 @@ class IncrementalAssignmentService:
                 if len(cluster_face_ids) <= 1:
                     continue
                 pending_face_ids.difference_update(cluster_face_ids)
-                candidate_cluster_ids = self._collect_candidate_cluster_ids_for_faces(
+                candidate_cluster_ids, anchor_candidate_person_by_face = self._collect_candidate_cluster_ids_for_faces(
                     face_observation_ids=cluster_face_ids,
+                    anchor_person_ids=anchor_person_ids,
                     conn=db,
                 )
                 if not candidate_cluster_ids:
@@ -92,6 +101,16 @@ class IncrementalAssignmentService:
                         face_quality_by_id=face_quality_by_id,
                     )
                     attached_count += len(assigned_face_ids)
+                    anchor_attached_delta, anchor_missed_delta = self._summarize_anchor_outcomes(
+                        face_observation_ids=cluster_face_ids,
+                        anchor_candidate_person_by_face=anchor_candidate_person_by_face,
+                        conn=db,
+                    )
+                    anchor_attached_face_count += anchor_attached_delta
+                    self._merge_anchor_missed_by_person(
+                        anchor_missed_by_person=anchor_missed_by_person,
+                        delta=anchor_missed_delta,
+                    )
                     if abort_checker is not None:
                         abort_checker()
                     continue
@@ -105,13 +124,40 @@ class IncrementalAssignmentService:
                 )
                 attached_count += len(assigned_face_ids)
                 pending_face_ids.update(set(cluster_face_ids) - assigned_face_ids)
+                anchor_attached_delta, anchor_missed_delta = self._summarize_anchor_outcomes(
+                    face_observation_ids=cluster_face_ids,
+                    anchor_candidate_person_by_face=anchor_candidate_person_by_face,
+                    conn=db,
+                )
+                anchor_attached_face_count += anchor_attached_delta
+                self._merge_anchor_missed_by_person(
+                    anchor_missed_by_person=anchor_missed_by_person,
+                    delta=anchor_missed_delta,
+                )
                 if abort_checker is not None:
                     abort_checker()
             for face_id in sorted(pending_face_ids):
                 if abort_checker is not None:
                     abort_checker()
                 decision = self._decide(face_observation_id=face_id, conn=db)
+                anchor_candidate_person_id = self._select_anchor_candidate_person_id(
+                    decision=decision,
+                    anchor_person_ids=anchor_person_ids,
+                )
+                anchor_candidate_person_by_face = (
+                    {int(face_id): int(anchor_candidate_person_id)} if int(anchor_candidate_person_id) > 0 else {}
+                )
                 if decision is None:
+                    anchor_attached_delta, anchor_missed_delta = self._summarize_anchor_outcomes(
+                        face_observation_ids=[face_id],
+                        anchor_candidate_person_by_face=anchor_candidate_person_by_face,
+                        conn=db,
+                    )
+                    anchor_attached_face_count += anchor_attached_delta
+                    self._merge_anchor_missed_by_person(
+                        anchor_missed_by_person=anchor_missed_by_person,
+                        delta=anchor_missed_delta,
+                    )
                     continue
                 if decision["mode"] == "attach":
                     self._attach_face(
@@ -123,6 +169,16 @@ class IncrementalAssignmentService:
                         face_quality_by_id=face_quality_by_id,
                     )
                     attached_count += 1
+                    anchor_attached_delta, anchor_missed_delta = self._summarize_anchor_outcomes(
+                        face_observation_ids=[face_id],
+                        anchor_candidate_person_by_face=anchor_candidate_person_by_face,
+                        conn=db,
+                    )
+                    anchor_attached_face_count += anchor_attached_delta
+                    self._merge_anchor_missed_by_person(
+                        anchor_missed_by_person=anchor_missed_by_person,
+                        delta=anchor_missed_delta,
+                    )
                     if abort_checker is not None:
                         abort_checker()
                     continue
@@ -136,15 +192,30 @@ class IncrementalAssignmentService:
                 )
                 if rebuilt:
                     attached_count += 1
+                anchor_attached_delta, anchor_missed_delta = self._summarize_anchor_outcomes(
+                    face_observation_ids=[face_id],
+                    anchor_candidate_person_by_face=anchor_candidate_person_by_face,
+                    conn=db,
+                )
+                anchor_attached_face_count += anchor_attached_delta
+                self._merge_anchor_missed_by_person(
+                    anchor_missed_by_person=anchor_missed_by_person,
+                    delta=anchor_missed_delta,
+                )
                 if abort_checker is not None:
                     abort_checker()
             person_count = int(db.execute("SELECT COUNT(*) FROM person WHERE status='active'").fetchone()[0])
             if managed_conn:
                 db.commit()
+            anchor_missed_face_count = sum(int(value) for value in anchor_missed_by_person.values())
             return IncrementalAssignmentResult(
                 attached_count=attached_count,
                 local_rebuild_count=local_rebuild_count,
                 person_count=person_count,
+                anchor_candidate_face_count=anchor_attached_face_count + anchor_missed_face_count,
+                anchor_attached_face_count=anchor_attached_face_count,
+                anchor_missed_face_count=anchor_missed_face_count,
+                anchor_missed_by_person=dict(sorted(anchor_missed_by_person.items())),
             )
         except Exception:
             if managed_conn:
@@ -183,10 +254,15 @@ class IncrementalAssignmentService:
             return None
         recalled_scores.sort(key=lambda item: (-float(item["rep_score"]), int(item["cluster_id"])))
         recalled_candidates = [
-            item for item in recalled_scores if float(item["rep_score"]) >= self._candidate_threshold
+            {
+                **item,
+                "strong_candidate": True,
+            }
+            for item in recalled_scores
+            if float(item["rep_score"]) >= self._candidate_threshold
         ]
         if not recalled_candidates:
-            recalled_candidates = [recalled_scores[0]]
+            recalled_candidates = [{**recalled_scores[0], "strong_candidate": False}]
 
         reranked_scores: list[dict[str, object]] = []
         for recalled in recalled_candidates:
@@ -206,6 +282,7 @@ class IncrementalAssignmentService:
                     "person_id": int(recalled["person_id"]),
                     "rep_score": float(recalled["rep_score"]),
                     "score": member_score,
+                    "strong_candidate": bool(recalled["strong_candidate"]),
                 }
             )
         if not reranked_scores:
@@ -213,14 +290,21 @@ class IncrementalAssignmentService:
         reranked_scores.sort(
             key=lambda item: (-float(item["score"]), -float(item["rep_score"]), int(item["cluster_id"]))
         )
+        strong_candidate_scores = [item for item in reranked_scores if bool(item["strong_candidate"])]
+        best_candidate_person_id = int(strong_candidate_scores[0]["person_id"]) if strong_candidate_scores else 0
         best = reranked_scores[0]
         second_score = float(reranked_scores[1]["score"]) if len(reranked_scores) > 1 else -1.0
         margin = float(best["score"]) - second_score
         if float(best["score"]) >= self._attach_threshold and margin >= self._attach_margin:
-            return {"mode": "attach", **best}
+            return {
+                "mode": "attach",
+                **best,
+                "best_candidate_person_id": best_candidate_person_id,
+            }
         return {
             "mode": "local_rebuild",
             "candidate_cluster_ids": [int(item["cluster_id"]) for item in reranked_scores[:2]],
+            "best_candidate_person_id": best_candidate_person_id,
         }
 
     def _attach_face(
@@ -294,13 +378,21 @@ class IncrementalAssignmentService:
         self,
         *,
         face_observation_ids: list[int],
+        anchor_person_ids: set[int],
         conn: sqlite3.Connection,
-    ) -> list[int]:
+    ) -> tuple[list[int], dict[int, int]]:
         candidate_cluster_ids: set[int] = set()
+        anchor_candidate_person_by_face: dict[int, int] = {}
         for face_id in sorted({int(face_id) for face_id in face_observation_ids if int(face_id) > 0}):
             decision = self._decide(face_observation_id=face_id, conn=conn)
             if decision is None:
                 continue
+            anchor_candidate_person_id = self._select_anchor_candidate_person_id(
+                decision=decision,
+                anchor_person_ids=anchor_person_ids,
+            )
+            if anchor_candidate_person_id > 0:
+                anchor_candidate_person_by_face[int(face_id)] = int(anchor_candidate_person_id)
             if decision["mode"] == "attach":
                 candidate_cluster_ids.add(int(decision["cluster_id"]))
                 continue
@@ -309,7 +401,7 @@ class IncrementalAssignmentService:
                 for cluster_id in decision.get("candidate_cluster_ids", [])
                 if int(cluster_id) > 0
             )
-        return sorted(candidate_cluster_ids)
+        return sorted(candidate_cluster_ids), anchor_candidate_person_by_face
 
     def _local_rebuild(
         self,
@@ -490,6 +582,56 @@ class IncrementalAssignmentService:
         )
         return set(valid_face_ids)
 
+    def _select_anchor_candidate_person_id(
+        self,
+        *,
+        decision: dict[str, object] | None,
+        anchor_person_ids: set[int],
+    ) -> int:
+        if decision is None or not anchor_person_ids:
+            return 0
+        best_candidate_person_id = int(decision.get("best_candidate_person_id") or 0)
+        if best_candidate_person_id in anchor_person_ids:
+            return best_candidate_person_id
+        if str(decision.get("mode")) == "attach":
+            attached_person_id = int(decision.get("person_id") or 0)
+            if attached_person_id in anchor_person_ids:
+                return attached_person_id
+        return 0
+
+    def _summarize_anchor_outcomes(
+        self,
+        *,
+        face_observation_ids: list[int],
+        anchor_candidate_person_by_face: dict[int, int],
+        conn: sqlite3.Connection,
+    ) -> tuple[int, dict[int, int]]:
+        if not anchor_candidate_person_by_face:
+            return 0, {}
+        assigned_person_by_face = self._load_active_person_ids_for_faces(
+            face_observation_ids=face_observation_ids,
+            conn=conn,
+        )
+        anchor_attached_face_count = 0
+        anchor_missed_by_person: dict[int, int] = defaultdict(int)
+        for face_id, anchor_person_id in anchor_candidate_person_by_face.items():
+            if int(assigned_person_by_face.get(int(face_id), 0)) == int(anchor_person_id):
+                anchor_attached_face_count += 1
+                continue
+            anchor_missed_by_person[int(anchor_person_id)] += 1
+        return anchor_attached_face_count, dict(anchor_missed_by_person)
+
+    def _merge_anchor_missed_by_person(
+        self,
+        *,
+        anchor_missed_by_person: dict[int, int],
+        delta: dict[int, int],
+    ) -> None:
+        for person_id, missed_count in delta.items():
+            anchor_missed_by_person[int(person_id)] = anchor_missed_by_person.get(int(person_id), 0) + int(
+                missed_count
+            )
+
     def _best_similarity(self, target_embedding: dict[str, np.ndarray], face_ids: list[int]) -> float:
         best = -1.0
         for face_id in face_ids:
@@ -608,6 +750,31 @@ class IncrementalAssignmentService:
             tuple(unique_ids),
         ).fetchall()
         return {int(row[0]): int(row[1]) for row in rows}
+
+    def _load_anchor_person_ids(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        limit: int = 10,
+    ) -> set[int]:
+        rows = conn.execute(
+            """
+            SELECT a.person_id
+            FROM person_face_assignment AS a
+            INNER JOIN person AS person ON person.id = a.person_id
+            INNER JOIN face_observation AS f ON f.id = a.face_observation_id
+            INNER JOIN photo_asset AS p ON p.id = f.photo_asset_id
+            WHERE a.active=1
+              AND person.status='active'
+              AND f.active=1
+              AND p.asset_status='active'
+            GROUP BY a.person_id
+            ORDER BY COUNT(*) DESC, a.person_id ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+        return {int(row[0]) for row in rows}
 
     def _filter_active_face_ids(
         self,

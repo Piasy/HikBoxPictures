@@ -128,7 +128,7 @@
 
 - `pending_reassign` 不对应独立 `reassign` 会话类型；其处理并入常规 `scan_*` 会话。
 - 通过部分唯一索引保证全局单活：任意时刻最多只有一个 `running/aborting` 会话。
-- `scan_incremental` 优先只处理当前会话 source 范围内“无 active assignment”或 `pending_reassign=1` 的 active observation。
+- `scan_incremental` 优先只处理当前会话 source 范围内两类 active observation：`pending_reassign=1` 的 observation，以及“在本会话创建后新出现且仍无 active assignment”的 observation；历史遗留的 unassigned face 不会仅因再次落在当前 source 范围内就自动进入本轮 incremental candidate。
 - 若参数快照与最近完成的持久 cluster 快照不一致，`scan_incremental` 会自动回退到**真正的 full rebuild**：assignment 输入改为全库 `asset_status='active'` 的 active face，并执行与 `scan_full` 等价的“停用旧 active assignment + 退役未复用 person + 重写 active cluster 快照”语义，而不是仅跳过增量服务。
 - assignment 输入始终要求 `photo_asset.asset_status='active'`；discover/metadata 已标记为 `missing/deleted` 的资产，其历史 face 不得再进入 assignment 输入。
 - full rebuild（包括由 `scan_incremental` 回退得到的 full rebuild）完成后，本次处理过的 active face 必须清空 `pending_reassign`，避免在后续 incremental session 中被重复选为 candidate。

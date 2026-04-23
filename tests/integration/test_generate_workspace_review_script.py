@@ -55,6 +55,9 @@ def test_generate_workspace_review_script_exports_active_workspace_review(tmp_pa
     assert meta["cluster_count"] == 1
     assert meta["noise_count"] == 1
     assert meta["person_count"] == 1
+    assert meta["fallback_full"]["conclusion"] == "no"
+    assert meta["fallback_full"]["requested_scan_run_kind"] == "scan_full"
+    assert meta["fallback_full"]["actual_assignment_run_kind"] == "scan_full"
 
     assert manifest["meta"]["model"] == "workspace/frozen_v5"
     assert manifest["meta"]["clusterer"] == "workspace face_cluster"
@@ -62,6 +65,7 @@ def test_generate_workspace_review_script_exports_active_workspace_review(tmp_pa
     assert manifest["meta"]["person_linkage"] == "single"
     assert manifest["meta"]["person_enable_same_photo_cannot_link"] is False
     assert manifest["meta"]["source"].endswith("sources=src")
+    assert manifest["meta"]["fallback_full"]["conclusion_text"] == "未发生 fallback full"
 
     assert len(manifest["persons"]) == 1
     assert manifest["persons"][0]["person_key"] == "person_1"
@@ -78,6 +82,10 @@ def test_generate_workspace_review_script_exports_active_workspace_review(tmp_pa
     assert "noise" in review_html
     assert "artifacts/crops/a1_000.jpg" in review_html
     assert "artifacts/context/a1_001.jpg" in review_html
+    assert "Fallback Full 判定" in review_html
+    assert "未发生 fallback full" in review_html
+    assert "scan_session.run_kind = scan_full" in review_html
+    assert "assignment_run.run_kind = scan_full" in review_html
 
     assert person_pages["count"] == 0
 
@@ -172,6 +180,110 @@ def test_generate_workspace_review_script_ignores_replaced_cluster_memberships(t
     assert manifest["meta"]["assignment_run_id"] == 2
     assert manifest["persons"][0]["clusters"][0]["cluster_key"] == "cluster_2"
     assert all(cluster["cluster_key"] != "cluster_missing_person_1" for cluster in manifest["persons"][0]["clusters"])
+
+
+def test_generate_workspace_review_script_shows_fallback_full_evidence_for_incremental_session(
+    tmp_path: Path,
+) -> None:
+    workspace_root, _ = _seed_workspace_with_active_assignment(tmp_path)
+    output_dir = tmp_path / "review"
+
+    conn = sqlite3.connect(workspace_root / ".hikbox" / "library.db")
+    try:
+        incremental_session = ScanSessionRepository(workspace_root / ".hikbox" / "library.db").create_session(
+            run_kind="scan_incremental",
+            status="completed",
+            triggered_by="manual_cli",
+            finished_at="2026-04-23T15:05:00",
+        )
+        conn.execute(
+            """
+            INSERT INTO scan_session_source(
+              scan_session_id, library_source_id, stage_status_json, processed_assets, failed_assets, updated_at
+            )
+            SELECT ?, library_source_id, stage_status_json, processed_assets, failed_assets, CURRENT_TIMESTAMP
+            FROM scan_session_source
+            WHERE scan_session_id = 1
+            """,
+            (incremental_session.id,),
+        )
+        conn.execute(
+            """
+            INSERT INTO assignment_run(
+              scan_session_id, algorithm_version, param_snapshot_json, run_kind,
+              started_at, finished_at, status, updated_at
+            ) VALUES (?, 'frozen_v5', ?, 'scan_full', ?, ?, 'completed', CURRENT_TIMESTAMP)
+            """,
+            (
+                incremental_session.id,
+                json.dumps(
+                    {
+                        "person_linkage": "single",
+                        "person_enable_same_photo_cannot_link": False,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "2026-04-23T15:04:00",
+                "2026-04-23T15:05:00",
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE face_cluster
+            SET updated_assignment_run_id=2,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=1
+            """
+        )
+        conn.execute(
+            """
+            UPDATE person_face_assignment
+            SET assignment_run_id=2,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=1
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--workspace",
+            str(workspace_root),
+            "--output-dir",
+            str(output_dir),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+
+    review_html = (output_dir / "review.html").read_text(encoding="utf-8")
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    meta = json.loads((output_dir / "review_payload_meta.json").read_text(encoding="utf-8"))
+
+    assert meta["assignment_run_id"] == 2
+    assert meta["scan_session_id"] == 2
+    assert meta["fallback_full"]["conclusion"] == "likely_yes"
+    assert meta["fallback_full"]["requested_scan_run_kind"] == "scan_incremental"
+    assert meta["fallback_full"]["actual_assignment_run_kind"] == "scan_full"
+    assert meta["fallback_full"]["previous_completed_assignment_run_id"] == 1
+    assert meta["fallback_full"]["previous_param_snapshot_matches"] is True
+    assert manifest["meta"]["fallback_full"]["conclusion_text"] == "高概率发生 fallback full"
+
+    assert "Fallback Full 判定" in review_html
+    assert "高概率发生 fallback full" in review_html
+    assert "scan_session.run_kind = scan_incremental" in review_html
+    assert "assignment_run.run_kind = scan_full" in review_html
+    assert "上一轮 completed assignment_run = 1" in review_html
+    assert "上一轮参数快照一致 = 是" in review_html
 
 
 def _seed_workspace_with_active_assignment(tmp_path: Path) -> tuple[Path, Path]:
