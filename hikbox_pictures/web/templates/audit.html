@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}扫描审计{% endblock %}
+{% block body %}
+<main>
+  <section>
+    <h1>扫描审计</h1>
+    <div
+      data-testid="scan-session-state"
+      data-session-id="{{ session.id if session else '' }}"
+      data-status="{{ session.status if session else '' }}"
+      data-failed-count="{{ failed_count }}"
+    ></div>
+    <div
+      data-testid="scan-params"
+      data-det-size="{{ scan_params.det_size }}"
+      data-workers="{{ scan_params.workers }}"
+      data-batch-size="{{ scan_params.batch_size }}"
+    ></div>
+    <button data-testid="scan-action-resume" data-enabled="{{ 'true' if session and session.status == 'interrupted' else 'false' }}">恢复</button>
+    <button data-testid="scan-action-abort" data-enabled="{{ 'true' if session and session.status in ['pending', 'running'] else 'false' }}">停止</button>
+    <button data-testid="scan-action-abandon-new" data-enabled="{{ 'true' if session and session.status in ['running', 'interrupted', 'pending'] else 'false' }}">放弃并新建</button>
+    {% for source in sources %}
+    <article
+      data-testid="source-progress-row"
+      data-source-id="{{ source.source_id }}"
+      data-processed="{{ source.processed_assets }}"
+      data-total="{{ source.total_assets }}"
+    >
+      {{ source.label }}
+    </article>
+    {% endfor %}
+    {% for item in audit_items %}
+    <a
+      data-testid="audit-jump-to-person"
+      href="/people/{{ item.person_id }}#sample-{{ item.face_observation_id }}"
+    >跳转</a>
+    {% endfor %}
+  </section>
+</main>
+{% endblock %}
