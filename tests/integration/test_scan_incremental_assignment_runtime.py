@@ -318,6 +318,268 @@ def test_scan_incremental_snapshot_mismatch_uses_true_full_rebuild_scope(tmp_pat
     assert active_clusters[0].member_count == 2
 
 
+def test_scan_incremental_falls_back_to_full_rebuild_when_batch_rebuild_leaves_too_many_unassigned(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout, session_id, runtime_root = create_task6_workspace(tmp_path)
+    observation_ids = seed_face_observations(
+        layout.library_db,
+        runtime_root,
+        [
+            {"asset_index": 0, "color": (220, 180, 160), "quality_score": 0.92},
+            {"asset_index": 0, "color": (218, 178, 158), "quality_score": 0.90},
+        ],
+    )
+    shared_main = embedding_from_seed(1801)
+    calculator = fake_embedding_calculator_from_map(
+        {
+            "f1.png": (shared_main, embedding_from_seed(1901), 1.1),
+            "f2.png": (shared_main, embedding_from_seed(1902), 1.1),
+        }
+    )
+
+    def fake_full_run(*, faces, params):
+        face_ids = sorted(int(face["face_observation_id"]) for face in faces)
+        if face_ids == sorted(observation_ids):
+            return {
+                "faces": [
+                    {
+                        "face_observation_id": observation_ids[0],
+                        "cluster_label": 10,
+                        "person_temp_key": "p0",
+                        "assignment_source": "hdbscan",
+                        "probability": 0.95,
+                    },
+                    {
+                        "face_observation_id": observation_ids[1],
+                        "cluster_label": 10,
+                        "person_temp_key": "p0",
+                        "assignment_source": "hdbscan",
+                        "probability": 0.94,
+                    },
+                ],
+                "persons": [{"person_temp_key": "p0", "face_observation_ids": observation_ids}],
+                "clusters": [
+                    {
+                        "cluster_label": 10,
+                        "person_temp_key": "p0",
+                        "member_face_observation_ids": observation_ids,
+                        "representative_face_observation_ids": [observation_ids[0]],
+                    }
+                ],
+                "stats": {"person_count": 1, "assignment_count": 2},
+            }
+        return {
+            "faces": [
+                {
+                    "face_observation_id": observation_ids[0],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.96,
+                },
+                {
+                    "face_observation_id": observation_ids[1],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.95,
+                },
+                {
+                    "face_observation_id": new_face_ids[0],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.95,
+                },
+                {
+                    "face_observation_id": new_face_ids[1],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.94,
+                },
+            ],
+            "persons": [{"person_temp_key": "p0", "face_observation_ids": sorted([*observation_ids, *new_face_ids])}],
+            "clusters": [
+                {
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "member_face_observation_ids": sorted([*observation_ids, *new_face_ids]),
+                    "representative_face_observation_ids": [observation_ids[0]],
+                }
+            ],
+            "stats": {"person_count": 1, "assignment_count": 4},
+        }
+
+    monkeypatch.setattr("hikbox_pictures.product.scan.assignment_stage.run_frozen_v5_assignment", fake_full_run)
+    stage = AssignmentStageService(
+        library_db_path=layout.library_db,
+        embedding_db_path=layout.embedding_db,
+        output_root=runtime_root,
+    )
+    baseline = stage.run_frozen_v5_assignment(
+        scan_session_id=session_id,
+        run_kind="scan_full",
+        embedding_calculator=calculator,
+    )
+    assert baseline.assignment_count == 2
+    ScanSessionRepository(layout.library_db).update_status(session_id, status="completed")
+
+    incremental_session = ScanSessionRepository(layout.library_db).create_session(
+        run_kind="scan_incremental",
+        status="running",
+        triggered_by="manual_cli",
+    )
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        source_id = int(conn.execute("SELECT id FROM library_source ORDER BY id ASC LIMIT 1").fetchone()[0])
+        conn.execute(
+            """
+            INSERT INTO scan_session_source(
+              scan_session_id, library_source_id, stage_status_json, processed_assets, failed_assets, updated_at
+            ) VALUES (?, ?, '{"discover":"done","metadata":"done","detect":"done","embed":"pending","cluster":"pending","assignment":"pending"}', 4, 0, CURRENT_TIMESTAMP)
+            """,
+            (incremental_session.id, source_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    new_face_ids = seed_face_observations(
+        layout.library_db,
+        runtime_root,
+        [
+            {"asset_index": 1, "color": (222, 182, 162), "quality_score": 0.91},
+            {"asset_index": 1, "color": (221, 181, 161), "quality_score": 0.89},
+        ],
+    )
+    for offset, face_id in enumerate(new_face_ids, start=1):
+        upsert_face_embeddings(
+            layout.embedding_db,
+            face_observation_id=face_id,
+            main=shared_main,
+            flip=embedding_from_seed(1910 + offset),
+        )
+
+    existing_cluster_id = ClusterRepository(layout.library_db).list_active_clusters()[0].id
+    monkeypatch.setattr(
+        IncrementalAssignmentService,
+        "_decide",
+        lambda self, face_observation_id, conn=None: {
+            "mode": "local_rebuild",
+            "candidate_cluster_ids": [existing_cluster_id],
+        },
+    )
+
+    def fake_incremental_run(*, faces, params):
+        face_ids = sorted(int(face["face_observation_id"]) for face in faces)
+        if face_ids == sorted(new_face_ids):
+            return {
+                "faces": [
+                    {
+                        "face_observation_id": new_face_ids[0],
+                        "cluster_label": 91,
+                        "person_temp_key": "p0",
+                        "assignment_source": "hdbscan",
+                        "probability": 0.95,
+                    },
+                    {
+                        "face_observation_id": new_face_ids[1],
+                        "cluster_label": 91,
+                        "person_temp_key": "p0",
+                        "assignment_source": "hdbscan",
+                        "probability": 0.94,
+                    },
+                ],
+                "persons": [{"person_temp_key": "p0", "face_observation_ids": sorted(new_face_ids)}],
+                "clusters": [
+                    {
+                        "cluster_label": 91,
+                        "person_temp_key": "p0",
+                        "member_face_observation_ids": sorted(new_face_ids),
+                        "representative_face_observation_ids": [new_face_ids[0]],
+                    }
+                ],
+                "stats": {"person_count": 1, "assignment_count": 2},
+            }
+        return {
+            "faces": [
+                {
+                    "face_observation_id": observation_ids[0],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.95,
+                },
+                {
+                    "face_observation_id": observation_ids[1],
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "assignment_source": "hdbscan",
+                    "probability": 0.94,
+                },
+                {
+                    "face_observation_id": new_face_ids[0],
+                    "cluster_label": -1,
+                    "person_temp_key": None,
+                    "assignment_source": "noise",
+                    "probability": None,
+                },
+                {
+                    "face_observation_id": new_face_ids[1],
+                    "cluster_label": -1,
+                    "person_temp_key": None,
+                    "assignment_source": "noise",
+                    "probability": None,
+                },
+            ],
+            "persons": [{"person_temp_key": "p0", "face_observation_ids": observation_ids}],
+            "clusters": [
+                {
+                    "cluster_label": 10,
+                    "person_temp_key": "p0",
+                    "member_face_observation_ids": observation_ids,
+                    "representative_face_observation_ids": [observation_ids[0]],
+                }
+            ],
+            "stats": {"person_count": 1, "assignment_count": 2},
+        }
+
+    monkeypatch.setattr(
+        "hikbox_pictures.product.scan.incremental_assignment_service.run_frozen_v5_assignment",
+        fake_incremental_run,
+    )
+
+    result = stage.run_frozen_v5_assignment(
+        scan_session_id=incremental_session.id,
+        run_kind="scan_incremental",
+        embedding_calculator=calculator,
+    )
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        run_kind = str(
+            conn.execute(
+                "SELECT run_kind FROM assignment_run WHERE id=?",
+                (result.assignment_run_id,),
+            ).fetchone()[0]
+        )
+        assigned_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM person_face_assignment WHERE face_observation_id IN (?, ?) AND active=1",
+                tuple(new_face_ids),
+            ).fetchone()[0]
+        )
+    finally:
+        conn.close()
+
+    assert result.assignment_count == 4
+    assert run_kind == "scan_full"
+    assert assigned_count == 2
+
+
 def test_missing_asset_faces_are_excluded_from_assignment_inputs(tmp_path: Path, monkeypatch) -> None:
     layout, session_id, runtime_root = create_task6_workspace(tmp_path)
     observation_ids = seed_face_observations(

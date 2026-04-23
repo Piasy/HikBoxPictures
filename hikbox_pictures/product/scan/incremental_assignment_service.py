@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -60,9 +61,53 @@ class IncrementalAssignmentService:
             attached_count = 0
             local_rebuild_count = 0
             face_quality_by_id = self._load_face_quality_by_id(candidate_ids, conn=db)
+            pending_face_ids = set(candidate_ids)
             if abort_checker is not None:
                 abort_checker()
-            for face_id in candidate_ids:
+            for cluster_row in self._build_candidate_batch_clusters(candidate_ids):
+                cluster_face_ids = sorted(
+                    {
+                        int(face_id)
+                        for face_id in cluster_row.get("member_face_observation_ids", [])
+                        if int(face_id) > 0
+                    }
+                )
+                if len(cluster_face_ids) <= 1:
+                    continue
+                pending_face_ids.difference_update(cluster_face_ids)
+                candidate_cluster_ids = self._collect_candidate_cluster_ids_for_faces(
+                    face_observation_ids=cluster_face_ids,
+                    conn=db,
+                )
+                if not candidate_cluster_ids:
+                    assigned_face_ids = self._create_new_person_cluster(
+                        conn=db,
+                        member_face_ids=cluster_face_ids,
+                        representative_face_ids=[
+                            int(face_id)
+                            for face_id in cluster_row.get("representative_face_observation_ids", [])
+                            if int(face_id) > 0
+                        ],
+                        assignment_run_id=assignment_run_id,
+                        face_quality_by_id=face_quality_by_id,
+                    )
+                    attached_count += len(assigned_face_ids)
+                    if abort_checker is not None:
+                        abort_checker()
+                    continue
+                local_rebuild_count += 1
+                assigned_face_ids = self._local_rebuild_faces(
+                    conn=db,
+                    face_observation_ids=cluster_face_ids,
+                    candidate_cluster_ids=candidate_cluster_ids,
+                    assignment_run_id=assignment_run_id,
+                    face_quality_by_id=face_quality_by_id,
+                )
+                attached_count += len(assigned_face_ids)
+                pending_face_ids.update(set(cluster_face_ids) - assigned_face_ids)
+                if abort_checker is not None:
+                    abort_checker()
+            for face_id in sorted(pending_face_ids):
                 if abort_checker is not None:
                     abort_checker()
                 decision = self._decide(face_observation_id=face_id, conn=db)
@@ -213,6 +258,59 @@ class IncrementalAssignmentService:
             conn=conn,
         )
 
+    def _build_candidate_batch_clusters(self, face_observation_ids: list[int]) -> list[dict[str, object]]:
+        face_rows = self._load_subset_faces(sorted(face_observation_ids))
+        if len(face_rows) <= 1:
+            return []
+        runtime_result = run_frozen_v5_assignment(
+            faces=face_rows,
+            params=build_frozen_v5_param_snapshot(),
+        )
+        valid_face_ids = {int(face_id) for face_id in face_observation_ids if int(face_id) > 0}
+        clusters: list[dict[str, object]] = []
+        for row in runtime_result.get("clusters", []):
+            member_face_ids = sorted(
+                {
+                    int(face_id)
+                    for face_id in row.get("member_face_observation_ids", [])
+                    if int(face_id) in valid_face_ids
+                }
+            )
+            if len(member_face_ids) <= 1:
+                continue
+            clusters.append(
+                {
+                    "member_face_observation_ids": member_face_ids,
+                    "representative_face_observation_ids": [
+                        int(face_id)
+                        for face_id in row.get("representative_face_observation_ids", [])
+                        if int(face_id) in valid_face_ids
+                    ],
+                }
+            )
+        return clusters
+
+    def _collect_candidate_cluster_ids_for_faces(
+        self,
+        *,
+        face_observation_ids: list[int],
+        conn: sqlite3.Connection,
+    ) -> list[int]:
+        candidate_cluster_ids: set[int] = set()
+        for face_id in sorted({int(face_id) for face_id in face_observation_ids if int(face_id) > 0}):
+            decision = self._decide(face_observation_id=face_id, conn=conn)
+            if decision is None:
+                continue
+            if decision["mode"] == "attach":
+                candidate_cluster_ids.add(int(decision["cluster_id"]))
+                continue
+            candidate_cluster_ids.update(
+                int(cluster_id)
+                for cluster_id in decision.get("candidate_cluster_ids", [])
+                if int(cluster_id) > 0
+            )
+        return sorted(candidate_cluster_ids)
+
     def _local_rebuild(
         self,
         *,
@@ -222,13 +320,34 @@ class IncrementalAssignmentService:
         assignment_run_id: int,
         face_quality_by_id: dict[int, float],
     ) -> bool:
-        subset_face_ids = {int(face_observation_id)}
-        cluster_person: dict[int, int] = {}
+        assigned_face_ids = self._local_rebuild_faces(
+            conn=conn,
+            face_observation_ids=[int(face_observation_id)],
+            candidate_cluster_ids=candidate_cluster_ids,
+            assignment_run_id=assignment_run_id,
+            face_quality_by_id=face_quality_by_id,
+        )
+        return int(face_observation_id) in assigned_face_ids
+
+    def _local_rebuild_faces(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        face_observation_ids: list[int],
+        candidate_cluster_ids: list[int],
+        assignment_run_id: int,
+        face_quality_by_id: dict[int, float],
+    ) -> set[int]:
+        batch_face_ids = sorted({int(face_id) for face_id in face_observation_ids if int(face_id) > 0})
+        if not batch_face_ids:
+            return set()
+        subset_face_ids: set[int] = set()
+        for face_observation_id in batch_face_ids:
+            subset_face_ids.add(int(face_observation_id))
         for cluster_id in candidate_cluster_ids:
             cluster = next((item for item in self._cluster_repo.list_active_clusters(conn=conn) if item.id == cluster_id), None)
             if cluster is None:
                 continue
-            cluster_person[cluster.id] = cluster.person_id
             subset_face_ids.update(
                 self._filter_active_face_ids(
                     [member.face_observation_id for member in self._cluster_repo.list_cluster_members(cluster.id, conn=conn)],
@@ -237,50 +356,139 @@ class IncrementalAssignmentService:
             )
         face_rows = self._load_subset_faces(sorted(subset_face_ids))
         if len(face_rows) <= 1:
-            return False
+            return set()
         runtime_result = run_frozen_v5_assignment(
             faces=face_rows,
             params=build_frozen_v5_param_snapshot(),
         )
-        candidate_row = next(
-            (row for row in runtime_result.get("faces", []) if int(row.get("face_observation_id") or 0) == int(face_observation_id)),
-            None,
+        person_groups: dict[str, list[int]] = {}
+        for row in runtime_result.get("faces", []):
+            person_temp_key = str(row.get("person_temp_key") or "")
+            face_id = int(row.get("face_observation_id") or 0)
+            if not person_temp_key or face_id <= 0:
+                continue
+            person_groups.setdefault(person_temp_key, []).append(face_id)
+
+        active_person_ids = self._load_active_person_ids_for_faces(
+            face_observation_ids=sorted(subset_face_ids - set(batch_face_ids)),
+            conn=conn,
         )
-        if not candidate_row or not candidate_row.get("person_temp_key"):
-            return False
-        cluster_label = int(candidate_row.get("cluster_label") or -1)
-        if cluster_label == -1:
-            return False
-        local_member_ids = [
-            int(row.get("face_observation_id") or 0)
-            for row in runtime_result.get("faces", [])
-            if int(row.get("cluster_label") or -1) == cluster_label and int(row.get("face_observation_id") or 0) > 0
-        ]
-        overlap_by_cluster: list[tuple[int, int]] = []
-        for cluster_id in candidate_cluster_ids:
-            existing_member_ids = set(
-                self._filter_active_face_ids(
-                    [item.face_observation_id for item in self._cluster_repo.list_cluster_members(cluster_id, conn=conn)],
+        assigned_face_ids: set[int] = set()
+        batch_face_id_set = set(batch_face_ids)
+        for group_face_ids in person_groups.values():
+            candidate_group_ids = sorted(
+                {
+                    int(face_id)
+                    for face_id in group_face_ids
+                    if int(face_id) in batch_face_id_set
+                }
+            )
+            if not candidate_group_ids:
+                continue
+            existing_person_ids = {
+                int(active_person_ids[face_id])
+                for face_id in group_face_ids
+                if int(face_id) in active_person_ids
+            }
+            if len(existing_person_ids) == 1:
+                target_person_id = next(iter(existing_person_ids))
+                self._assign_faces_to_person(
                     conn=conn,
+                    face_observation_ids=candidate_group_ids,
+                    person_id=target_person_id,
+                    assignment_run_id=assignment_run_id,
+                    assignment_source="merge",
+                )
+                self._cluster_repo.create_cluster_for_person(
+                    person_id=target_person_id,
+                    assignment_run_id=assignment_run_id,
+                    member_face_ids=candidate_group_ids,
+                    representative_face_ids=[],
+                    face_quality_by_id=face_quality_by_id,
+                    conn=conn,
+                    rebuild_scope="local",
+                )
+                assigned_face_ids.update(candidate_group_ids)
+                continue
+            if existing_person_ids:
+                continue
+            assigned_face_ids.update(
+                self._create_new_person_cluster(
+                    conn=conn,
+                    member_face_ids=candidate_group_ids,
+                    representative_face_ids=[],
+                    assignment_run_id=assignment_run_id,
+                    face_quality_by_id=face_quality_by_id,
                 )
             )
-            overlap_by_cluster.append((cluster_id, len(existing_member_ids.intersection(local_member_ids))))
-        overlap_by_cluster.sort(key=lambda item: (-item[1], item[0]))
-        if not overlap_by_cluster or overlap_by_cluster[0][1] <= 0:
-            return False
-        if len(overlap_by_cluster) > 1 and overlap_by_cluster[1][1] == overlap_by_cluster[0][1]:
-            return False
-        target_cluster_id = int(overlap_by_cluster[0][0])
-        target_person_id = int(cluster_person[target_cluster_id])
-        self._attach_face(
-            conn=conn,
-            face_observation_id=face_observation_id,
-            person_id=target_person_id,
-            cluster_id=target_cluster_id,
-            assignment_run_id=assignment_run_id,
-            face_quality_by_id=face_quality_by_id,
+        return assigned_face_ids
+
+    def _assign_faces_to_person(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        face_observation_ids: list[int],
+        person_id: int,
+        assignment_run_id: int,
+        assignment_source: str,
+    ) -> None:
+        for face_id in sorted({int(face_id) for face_id in face_observation_ids if int(face_id) > 0}):
+            conn.execute(
+                "UPDATE person_face_assignment SET active=0, updated_at=CURRENT_TIMESTAMP WHERE face_observation_id=? AND active=1",
+                (face_id,),
+            )
+            conn.execute(
+                """
+                INSERT INTO person_face_assignment(
+                  person_id, face_observation_id, assignment_run_id, assignment_source,
+                  active, confidence, margin, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 1, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """,
+                (int(person_id), int(face_id), int(assignment_run_id), str(assignment_source)),
+            )
+            conn.execute(
+                "UPDATE face_observation SET pending_reassign=0, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                (face_id,),
+            )
+
+    def _create_new_person_cluster(
+        self,
+        *,
+        conn: sqlite3.Connection,
+        member_face_ids: list[int],
+        representative_face_ids: list[int],
+        assignment_run_id: int,
+        face_quality_by_id: dict[int, float],
+    ) -> set[int]:
+        valid_face_ids = sorted({int(face_id) for face_id in member_face_ids if int(face_id) > 0})
+        if not valid_face_ids:
+            return set()
+        cursor = conn.execute(
+            """
+            INSERT INTO person(
+              person_uuid, display_name, is_named, status, merged_into_person_id, created_at, updated_at
+            ) VALUES (?, NULL, 0, 'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (str(uuid.uuid4()),),
         )
-        return True
+        person_id = int(cursor.lastrowid)
+        self._assign_faces_to_person(
+            conn=conn,
+            face_observation_ids=valid_face_ids,
+            person_id=person_id,
+            assignment_run_id=assignment_run_id,
+            assignment_source="hdbscan",
+        )
+        self._cluster_repo.create_cluster_for_person(
+            person_id=person_id,
+            assignment_run_id=assignment_run_id,
+            member_face_ids=valid_face_ids,
+            representative_face_ids=representative_face_ids,
+            face_quality_by_id=face_quality_by_id,
+            conn=conn,
+            rebuild_scope="local",
+        )
+        return set(valid_face_ids)
 
     def _best_similarity(self, target_embedding: dict[str, np.ndarray], face_ids: list[int]) -> float:
         best = -1.0
@@ -379,6 +587,27 @@ class IncrementalAssignmentService:
             tuple(int(face_id) for face_id in face_observation_ids),
         ).fetchall()
         return {int(row[0]): float(row[1] or 0.0) for row in rows}
+
+    def _load_active_person_ids_for_faces(
+        self,
+        *,
+        face_observation_ids: list[int],
+        conn: sqlite3.Connection,
+    ) -> dict[int, int]:
+        unique_ids = sorted({int(face_id) for face_id in face_observation_ids if int(face_id) > 0})
+        if not unique_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in unique_ids)
+        rows = conn.execute(
+            f"""
+            SELECT face_observation_id, person_id
+            FROM person_face_assignment
+            WHERE active=1
+              AND face_observation_id IN ({placeholders})
+            """,
+            tuple(unique_ids),
+        ).fetchall()
+        return {int(row[0]): int(row[1]) for row in rows}
 
     def _filter_active_face_ids(
         self,

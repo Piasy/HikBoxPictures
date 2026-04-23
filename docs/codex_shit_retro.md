@@ -12,6 +12,8 @@
 - scan_batch_item 的 failed=1639 不是“人脸模型效果差”，而是图片解码失败，几乎全是 HEIF/HEIC 读取失败。
 - 算法迁移（冻结）结果也是一坨屎，完全就是瞎识别、归类。
 
+期间我也初步尝试了 trae + gpt 5.4 和 trae solo app，trae 和 superpowers 这套 skills 不太适配，发起 sub agent 老是跑偏（比如修改/review 没在 worktree），solo 则很容易触发模型死循环。（但 trae 和 solo 直接 vibe 体感还不错）
+
 
 • 结论：没有。当前实现和 hikbox_pictures/face_review_pipeline.py 的核心检测/聚类/归属链路不一致，也还没有把这三段真正“冻结”到产品扫描主链路里。
 

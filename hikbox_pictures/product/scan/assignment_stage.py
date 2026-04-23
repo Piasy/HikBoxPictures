@@ -45,6 +45,10 @@ class AssignmentAbortedError(RuntimeError):
     """assignment 执行期间收到 abort。"""
 
 
+class IncrementalFallbackToFullRebuild(RuntimeError):
+    """增量归属命中过多未归属样本，需要回退到 full rebuild。"""
+
+
 class AssignmentStageService:
     """冻结链路执行服务。"""
 
@@ -120,11 +124,34 @@ class AssignmentStageService:
             self._ensure_not_aborting(scan_session_id=scan_session_id)
 
             if use_incremental:
-                person_count, assignment_count = self._persist_incremental_assignment_outcome(
-                    scan_session_id=scan_session_id,
-                    assignment_run_id=started.assignment_run_id,
-                    face_rows=faces,
-                )
+                try:
+                    person_count, assignment_count = self._persist_incremental_assignment_outcome(
+                        scan_session_id=scan_session_id,
+                        assignment_run_id=started.assignment_run_id,
+                        face_rows=faces,
+                    )
+                except IncrementalFallbackToFullRebuild:
+                    full_faces = self._build_face_inputs(
+                        scan_session_id=scan_session_id,
+                        param_snapshot=started.param_snapshot,
+                        embedding_calculator=embedding_calculator,
+                        include_all_active_sources=True,
+                    )
+                    self._persist_embeddings(scan_session_id=scan_session_id, faces=full_faces)
+                    self._ensure_not_aborting(scan_session_id=scan_session_id)
+                    self._promote_assignment_run_to_full(assignment_run_id=started.assignment_run_id)
+                    runtime_result = run_frozen_v5_assignment(faces=full_faces, params=started.param_snapshot)
+                    self._ensure_not_aborting(scan_session_id=scan_session_id)
+                    person_count, assignment_count = self._persist_assignment_outcome(
+                        scan_session_id=scan_session_id,
+                        assignment_run_id=started.assignment_run_id,
+                        run_kind="scan_full",
+                        face_rows=full_faces,
+                        person_rows=list(runtime_result.get("persons", [])),
+                        assignment_rows=list(runtime_result.get("faces", [])),
+                        cluster_rows=list(runtime_result.get("clusters", [])),
+                        rebuild_scope="full",
+                    )
             else:
                 runtime_result = run_frozen_v5_assignment(faces=faces, params=started.param_snapshot)
                 self._ensure_not_aborting(scan_session_id=scan_session_id)
@@ -524,6 +551,22 @@ class AssignmentStageService:
             if managed_conn:
                 db.close()
 
+    def _promote_assignment_run_to_full(self, *, assignment_run_id: int) -> None:
+        conn = connect_sqlite(self._library_db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE assignment_run
+                SET run_kind='scan_full',
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=?
+                """,
+                (int(assignment_run_id),),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
     def _mark_session_sources_stage_done(self, *, scan_session_id: int, conn: sqlite3.Connection) -> None:
         rows = conn.execute(
             "SELECT id, stage_status_json FROM scan_session_source WHERE scan_session_id=?",
@@ -635,6 +678,13 @@ class AssignmentStageService:
                 conn=conn,
                 abort_checker=lambda: self._ensure_not_aborting(scan_session_id=scan_session_id, conn=conn),
             )
+            if self._should_fallback_to_full_rebuild(
+                candidate_face_count=len(candidate_face_ids),
+                attached_face_count=int(result.attached_count),
+            ):
+                raise IncrementalFallbackToFullRebuild(
+                    f"incremental unresolved too high: candidate={len(candidate_face_ids)} attached={result.attached_count}"
+                )
             self._mark_session_sources_stage_done(scan_session_id=scan_session_id, conn=conn)
             self._complete_assignment_run(assignment_run_id=assignment_run_id, status="completed", conn=conn)
             conn.commit()
@@ -644,6 +694,19 @@ class AssignmentStageService:
             raise
         finally:
             conn.close()
+
+    def _should_fallback_to_full_rebuild(
+        self,
+        *,
+        candidate_face_count: int,
+        attached_face_count: int,
+    ) -> bool:
+        if int(candidate_face_count) < 2:
+            return False
+        unresolved_count = max(0, int(candidate_face_count) - int(attached_face_count))
+        if unresolved_count < 2:
+            return False
+        return float(unresolved_count) / float(candidate_face_count) >= 0.5
 
     def _should_run_incremental(
         self,

@@ -313,6 +313,51 @@ class ClusterRepository:
             (int(assignment_run_id), int(cluster_id)),
         )
 
+    def create_cluster_for_person(
+        self,
+        *,
+        person_id: int,
+        assignment_run_id: int,
+        member_face_ids: list[int],
+        representative_face_ids: list[int] | None,
+        face_quality_by_id: dict[int, float],
+        conn: sqlite3.Connection,
+        rebuild_scope: str = "local",
+    ) -> int:
+        cursor = conn.execute(
+            """
+            INSERT INTO face_cluster(
+              cluster_uuid, person_id, status, rebuild_scope,
+              created_assignment_run_id, updated_assignment_run_id, created_at, updated_at
+            ) VALUES (?, ?, 'active', ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            """,
+            (
+                str(uuid.uuid4()),
+                int(person_id),
+                str(rebuild_scope),
+                int(assignment_run_id),
+                int(assignment_run_id),
+            ),
+        )
+        cluster_id = int(cursor.lastrowid)
+        cluster_row = {
+            "member_face_observation_ids": sorted(
+                {int(face_id) for face_id in member_face_ids if int(face_id) > 0}
+            ),
+            "representative_face_observation_ids": [] if representative_face_ids is None else sorted(
+                {int(face_id) for face_id in representative_face_ids if int(face_id) > 0}
+            ),
+        }
+        self._refresh_cluster(
+            conn=conn,
+            cluster_id=cluster_id,
+            assignment_run_id=assignment_run_id,
+            cluster_row=cluster_row,
+            face_quality_by_id=face_quality_by_id,
+            rebuild_scope=rebuild_scope,
+        )
+        return cluster_id
+
     def _insert_cluster(
         self,
         *,
