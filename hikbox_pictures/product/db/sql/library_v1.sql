@@ -255,3 +255,148 @@ ON person_face_assignment(person_id, active);
 
 CREATE INDEX IF NOT EXISTS idx_assignment_run
 ON person_face_assignment(assignment_run_id);
+
+CREATE TABLE IF NOT EXISTS person_face_exclusion (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  reason TEXT NOT NULL CHECK (reason='manual_exclude'),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_person_face_exclusion_active
+ON person_face_exclusion(person_id, face_observation_id)
+WHERE active = 1;
+
+CREATE INDEX IF NOT EXISTS idx_exclusion_face
+ON person_face_exclusion(face_observation_id, active);
+
+CREATE TABLE IF NOT EXISTS merge_operation (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  selected_person_ids_json TEXT NOT NULL,
+  winner_person_id INTEGER NOT NULL REFERENCES person(id),
+  winner_person_uuid TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('applied', 'undone')),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  undone_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS merge_operation_person_delta (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES merge_operation(id),
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  before_snapshot_json TEXT NOT NULL,
+  after_snapshot_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_operation_person_delta_merge_operation
+ON merge_operation_person_delta(merge_operation_id);
+
+CREATE TABLE IF NOT EXISTS merge_operation_assignment_delta (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES merge_operation(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  before_assignment_json TEXT NOT NULL,
+  after_assignment_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_operation_assignment_delta_merge_operation
+ON merge_operation_assignment_delta(merge_operation_id);
+
+CREATE TABLE IF NOT EXISTS merge_operation_exclusion_delta (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES merge_operation(id),
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  before_exclusion_json TEXT NOT NULL,
+  after_exclusion_json TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_operation_exclusion_delta_merge_operation
+ON merge_operation_exclusion_delta(merge_operation_id);
+
+CREATE TABLE IF NOT EXISTS export_template (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  output_root TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS export_template_person (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id INTEGER NOT NULL REFERENCES export_template(id),
+  person_id INTEGER NOT NULL REFERENCES person(id),
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(template_id, person_id)
+);
+
+CREATE TABLE IF NOT EXISTS export_run (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id INTEGER NOT NULL REFERENCES export_template(id),
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'aborted')),
+  summary_json TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_export_run_status
+ON export_run(status);
+
+CREATE INDEX IF NOT EXISTS idx_export_run_template
+ON export_run(template_id, started_at);
+
+CREATE TABLE IF NOT EXISTS export_delivery (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  export_run_id INTEGER NOT NULL REFERENCES export_run(id),
+  photo_asset_id INTEGER NOT NULL REFERENCES photo_asset(id),
+  media_kind TEXT NOT NULL CHECK (media_kind IN ('photo', 'live_mov')),
+  bucket TEXT NOT NULL CHECK (bucket IN ('only', 'group')),
+  month_key TEXT NOT NULL,
+  destination_path TEXT NOT NULL,
+  delivery_status TEXT NOT NULL CHECK (delivery_status IN ('exported', 'skipped_exists', 'failed')),
+  error_message TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(export_run_id, media_kind, destination_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_export_delivery_status
+ON export_delivery(delivery_status);
+
+CREATE TABLE IF NOT EXISTS ops_event (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('info', 'warning', 'error')),
+  scan_session_id INTEGER REFERENCES scan_session(id),
+  export_run_id INTEGER REFERENCES export_run(id),
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_ops_event_type_created
+ON ops_event(event_type, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_ops_event_scan
+ON ops_event(scan_session_id);
+
+CREATE INDEX IF NOT EXISTS idx_ops_event_export_run
+ON ops_event(export_run_id);
+
+CREATE TABLE IF NOT EXISTS scan_audit_item (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_session_id INTEGER NOT NULL REFERENCES scan_session(id),
+  assignment_run_id INTEGER NOT NULL REFERENCES assignment_run(id),
+  audit_type TEXT NOT NULL CHECK (audit_type IN (
+    'low_margin_auto_assign', 'reassign_after_exclusion', 'new_anonymous_person'
+  )),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observation(id),
+  person_id INTEGER REFERENCES person(id),
+  evidence_json TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_scan_audit_session
+ON scan_audit_item(scan_session_id, audit_type);
