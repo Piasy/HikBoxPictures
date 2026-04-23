@@ -167,6 +167,8 @@ class IncrementalAssignmentService:
                         cluster_id=int(decision["cluster_id"]),
                         assignment_run_id=assignment_run_id,
                         face_quality_by_id=face_quality_by_id,
+                        confidence=None if decision.get("score") is None else float(decision["score"]),
+                        margin=None if decision.get("margin") is None else float(decision["margin"]),
                     )
                     attached_count += 1
                     anchor_attached_delta, anchor_missed_delta = self._summarize_anchor_outcomes(
@@ -299,6 +301,7 @@ class IncrementalAssignmentService:
             return {
                 "mode": "attach",
                 **best,
+                "margin": float(margin),
                 "best_candidate_person_id": best_candidate_person_id,
             }
         return {
@@ -316,6 +319,8 @@ class IncrementalAssignmentService:
         cluster_id: int,
         assignment_run_id: int,
         face_quality_by_id: dict[int, float],
+        confidence: float | None,
+        margin: float | None,
     ) -> None:
         conn.execute(
             "UPDATE person_face_assignment SET active=0, updated_at=CURRENT_TIMESTAMP WHERE face_observation_id=? AND active=1",
@@ -326,9 +331,15 @@ class IncrementalAssignmentService:
             INSERT INTO person_face_assignment(
               person_id, face_observation_id, assignment_run_id, assignment_source,
               active, confidence, margin, created_at, updated_at
-            ) VALUES (?, ?, ?, 'person_consensus', 1, NULL, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, 'person_consensus', 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             """,
-            (int(person_id), int(face_observation_id), int(assignment_run_id)),
+            (
+                int(person_id),
+                int(face_observation_id),
+                int(assignment_run_id),
+                None if confidence is None else float(confidence),
+                None if margin is None else float(margin),
+            ),
         )
         conn.execute(
             "UPDATE face_observation SET pending_reassign=0, updated_at=CURRENT_TIMESTAMP WHERE id=?",

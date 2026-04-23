@@ -109,7 +109,7 @@ def run_frozen_v5_assignment(*, faces: list[dict[str, object]], params: dict[str
         enable_same_photo_cannot_link=bool(params["person_enable_same_photo_cannot_link"]),
     )
 
-    persons, _, recall_attach_count = attach_micro_clusters_to_existing_persons(
+    persons, recall_events, recall_attach_count = attach_micro_clusters_to_existing_persons(
         persons=persons,
         source_max_cluster_size=int(params["person_cluster_recall_source_max_cluster_size"]),
         source_max_person_face_count=int(params["person_cluster_recall_source_max_person_faces"]),
@@ -120,6 +120,13 @@ def run_frozen_v5_assignment(*, faces: list[dict[str, object]], params: dict[str
         margin_threshold=float(params["person_cluster_recall_margin_threshold"]),
         max_rounds=int(params["person_cluster_recall_max_rounds"]),
     )
+    recall_margin_by_cluster_label: dict[int, float] = {}
+    for event in recall_events:
+        cluster_label = int(event.get("cluster_label", -1))
+        margin = event.get("margin")
+        if cluster_label == -1 or margin is None:
+            continue
+        recall_margin_by_cluster_label[cluster_label] = float(margin)
 
     cluster_owner: dict[int, str] = {}
     person_faces: dict[str, list[int]] = defaultdict(list)
@@ -136,7 +143,14 @@ def run_frozen_v5_assignment(*, faces: list[dict[str, object]], params: dict[str
                 person_faces[person_temp_key].append(face_id)
 
     result_faces: list[dict[str, object]] = []
-    for face, label, prob, excluded in zip(faces, labels, probabilities, excluded_flags, strict=True):
+    for original_face, feature_face, label, prob, excluded in zip(
+        faces,
+        preliminary_rows,
+        labels,
+        probabilities,
+        excluded_flags,
+        strict=True,
+    ):
         cluster_label = int(label)
         if cluster_label == -1:
             assignment_source = "low_quality_ignored" if bool(excluded) else "noise"
@@ -150,13 +164,25 @@ def run_frozen_v5_assignment(*, faces: list[dict[str, object]], params: dict[str
 
         result_faces.append(
             {
-                "face_observation_id": int(face["face_observation_id"]),
+                "face_observation_id": int(original_face["face_observation_id"]),
                 "cluster_label": cluster_label,
                 "person_temp_key": person_temp_key,
                 "assignment_source": assignment_source,
                 "probability": None if prob is None else float(prob),
+                "confidence": (
+                    None
+                    if feature_face.get("assignment_confidence") is None
+                    else float(feature_face["assignment_confidence"])
+                ),
+                "margin": (
+                    None
+                    if feature_face.get("assignment_margin") is None
+                    else float(feature_face["assignment_margin"])
+                ),
             }
         )
+        if result_faces[-1]["margin"] is None and cluster_label in recall_margin_by_cluster_label:
+            result_faces[-1]["margin"] = float(recall_margin_by_cluster_label[cluster_label])
 
     result_persons = []
     for person_temp_key, observation_ids in sorted(person_faces.items(), key=lambda item: item[0]):
