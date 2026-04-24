@@ -18,10 +18,10 @@ def test_scan_start_or_resume_prints_incremental_assignment_stats_at_end(
     external_root = tmp_path / "external"
     layout = initialize_workspace(workspace_root=workspace_root, external_root=external_root)
 
-    def fake_run_session(self, *, scan_session_id: int, runtime_defaults=None, detector=None, embedding_calculator=None):
-        ScanSessionRepository(self._db_path).update_status(scan_session_id, status="completed")
+    def fake_execute_scan_session(services, *, session_id: int):
+        ScanSessionRepository(layout.library_db).update_status(session_id, status="completed")
         return ScanSessionRunResult(
-            scan_session_id=scan_session_id,
+            scan_session_id=session_id,
             detect_result=DetectStageRunResult(claimed_batches=0, acked_batches=0, interrupted=False),
             assignment_run_id=88,
             new_face_count=12,
@@ -33,17 +33,7 @@ def test_scan_start_or_resume_prints_incremental_assignment_stats_at_end(
             fallback_reason="incremental anchor miss too high",
         )
 
-    monkeypatch.setattr("hikbox_pictures.cli.ScanExecutionService.run_session", fake_run_session)
-    monkeypatch.setattr(
-        "hikbox_pictures.cli.ScanExecutionService.detect_stage_progress",
-        lambda self, *, scan_session_id: {
-            "acked_batches": 0,
-            "running_batches": 0,
-            "claimed_batches": 0,
-            "failed_batches": 0,
-            "source_detect_status": {},
-        },
-    )
+    monkeypatch.setattr("hikbox_pictures.cli._execute_scan_session", fake_execute_scan_session)
 
     exit_code = cli_entry(
         [

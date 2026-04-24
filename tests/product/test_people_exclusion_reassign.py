@@ -375,6 +375,113 @@ def test_exclude_faces_prunes_cluster_truth_layer_so_similar_new_face_is_not_att
     ]
 
 
+def test_incremental_assignment_creates_new_anonymous_person_for_single_pending_reassign_face(
+    tmp_path: Path,
+) -> None:
+    layout, session_id, runtime_root = create_task6_workspace(tmp_path)
+    face_id = seed_face_observations(
+        layout.library_db,
+        runtime_root,
+        [{"asset_index": 0, "color": (220, 180, 160), "quality_score": 0.95}],
+    )[0]
+    shared_main = embedding_from_seed(8101)
+    shared_flip = embedding_from_seed(8102)
+    upsert_face_embeddings(layout.embedding_db, face_observation_id=face_id, main=shared_main, flip=shared_flip)
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        original_person_id = _insert_person(conn, display_name="Alice")
+        baseline_assignment_run_id = _insert_assignment_run(conn, scan_session_id=session_id)
+        _insert_assignment(
+            conn,
+            person_id=original_person_id,
+            face_observation_id=face_id,
+            assignment_run_id=baseline_assignment_run_id,
+        )
+        _insert_cluster(
+            conn,
+            person_id=original_person_id,
+            assignment_run_id=baseline_assignment_run_id,
+            member_face_ids=[face_id],
+            rep_face_ids=[face_id],
+        )
+        incremental_assignment_run_id = _insert_assignment_run(conn, scan_session_id=session_id)
+        conn.commit()
+    finally:
+        conn.close()
+
+    PeopleService(PeopleRepository(layout.library_db)).exclude_face(
+        person_id=original_person_id,
+        face_observation_id=face_id,
+    )
+
+    service = IncrementalAssignmentService(
+        library_db_path=layout.library_db,
+        embedding_db_path=layout.embedding_db,
+        cluster_repo=ClusterRepository(layout.library_db),
+    )
+    result = service.run(
+        assignment_run_id=incremental_assignment_run_id,
+        face_observation_ids=[face_id],
+    )
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        active_assignment = conn.execute(
+            """
+            SELECT person_id, assignment_run_id, assignment_source
+            FROM person_face_assignment
+            WHERE face_observation_id=? AND active=1
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (face_id,),
+        ).fetchone()
+        pending_reassign = int(
+            conn.execute(
+                "SELECT pending_reassign FROM face_observation WHERE id=?",
+                (face_id,),
+            ).fetchone()[0]
+        )
+        new_person = conn.execute(
+            """
+            SELECT id, display_name, is_named, status
+            FROM person
+            WHERE id<>?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (original_person_id,),
+        ).fetchone()
+        new_cluster = None
+        if new_person is not None:
+            new_cluster = conn.execute(
+                """
+                SELECT c.person_id, c.rebuild_scope, m.face_observation_id
+                FROM face_cluster AS c
+                INNER JOIN face_cluster_member AS m ON m.face_cluster_id=c.id
+                WHERE c.person_id=?
+                  AND c.status='active'
+                ORDER BY c.id DESC
+                LIMIT 1
+                """,
+                (int(new_person[0]),),
+            ).fetchone()
+    finally:
+        conn.close()
+
+    assert result.attached_count == 1
+    assert result.local_rebuild_count == 0
+    assert active_assignment is not None
+    assert new_person is not None
+    assert int(active_assignment[0]) == int(new_person[0])
+    assert int(active_assignment[1]) == incremental_assignment_run_id
+    assert str(active_assignment[2]) == "hdbscan"
+    assert pending_reassign == 0
+    assert new_person == (int(new_person[0]), None, 0, "active")
+    assert new_cluster == (int(new_person[0]), "local", face_id)
+
+
 def _insert_person(conn: sqlite3.Connection, *, display_name: str | None = None) -> int:
     cursor = conn.execute(
         """

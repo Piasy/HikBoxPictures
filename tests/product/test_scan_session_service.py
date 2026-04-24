@@ -44,6 +44,7 @@ def test_start_or_resume_resumes_latest_interrupted_when_no_active(repo: ScanSes
     assert older.id < latest.id
     assert resumed.session_id == latest.id
     assert resumed.resumed is True
+    assert resumed.should_execute is True
     assert repo.get_session(latest.id).status == "running"
     assert repo.count_sessions() == before_count
 
@@ -57,6 +58,7 @@ def test_start_or_resume_reuses_active_session_without_creating_new(repo: ScanSe
 
     assert reused.session_id == active.id
     assert reused.resumed is True
+    assert reused.should_execute is False
     assert repo.count_sessions() == before_count
 
 
@@ -67,6 +69,7 @@ def test_start_or_resume_creates_running_when_no_active_and_no_interrupted(repo:
 
     session = repo.get_session(created.session_id)
     assert created.resumed is False
+    assert created.should_execute is True
     assert session.status == "running"
     assert session.run_kind == "scan_incremental"
     assert session.triggered_by == "manual_webui"
@@ -79,6 +82,7 @@ def test_start_new_abandons_interrupted_then_creates_new(repo: ScanSessionReposi
     created = service.start_new(run_kind="scan_incremental", triggered_by="manual_webui")
 
     assert created.session_id != old.id
+    assert created.should_execute is True
     assert repo.get_session(old.id).status == "abandoned"
     assert repo.get_session(created.session_id).status == "pending"
 
@@ -167,6 +171,7 @@ def test_start_or_resume_returns_active_when_integrity_error_happens() -> None:
 
     assert result.resumed is True
     assert result.session_id == 22
+    assert result.should_execute is False
 
 
 def test_start_new_raises_conflict_when_integrity_error_happens() -> None:

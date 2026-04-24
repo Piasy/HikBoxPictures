@@ -1169,7 +1169,7 @@ def test_audit_source_export_template_and_run(cli_bin, seeded_workspace):
 Run: `source .venv/bin/activate && pytest tests/cli/test_cli_audit_source_list_commands.py tests/cli/test_cli_export_template_commands.py::test_audit_source_export_template_and_run -v`
 Expected: FAIL。
 
-- [x] **Step 4: 写 `config/source/scan status|list/export run-status|run-list/logs/db` 失败用例（命令签名严格对齐 spec 15.5）**
+- [x] **Step 4: 写 `config/source/scan status|list/export run-status|execute|run-list/logs/db` 失败用例（命令签名严格对齐 spec 15.5）**
 
 ```python
 def test_scan_export_db_and_output_modes(cli_bin, workspace, photos_dir):
@@ -1398,7 +1398,7 @@ SPEC_15_5_COMMANDS = [
     "serve start [--host] [--port]",
     "people list|show|rename|exclude|exclude-batch|merge|undo-last-merge",
     "export template list|create|update",
-    "export run|run-status|run-list",
+    "export run|run-status|execute|run-list",
     "logs list [--scan-session-id <id>] [--export-run-id <id>] [--severity info|warning|error] [--limit <n>]",
     "audit list --scan-session-id <id>",
     "db vacuum [--library] [--embedding]",
@@ -1447,7 +1447,7 @@ Expected: PASS。
 - Test: `tests/integration/test_productization_acceptance.py`
 - Test: `scripts/run_tests.sh`
 
-- [ ] **Step 1: 把 spec 的 22 条验收项拆成 22 个独立测试（AC01-AC22），并把“主链路真实执行”作为强制验收条件**
+- [x] **Step 1: 把 spec 的 22 条验收项拆成 22 个独立测试（AC01-AC22），并把“主链路真实执行”作为强制验收条件**
 
 ```python
 def test_ac03_detect_defaults_persisted_in_db(workspace):
@@ -1476,7 +1476,7 @@ def test_ac11_scan_main_chain_uses_frozen_v5_runtime(workspace):
     assert_behavior_parity_with_face_review_pipeline_baseline(workspace)
 ```
 
-- [ ] **Step 2: 维护 AC01-AC22 对照表（AC 编号 -> 测试函数 -> 断言来源 + spec 条目）**
+- [x] **Step 2: 维护 AC01-AC22 对照表（AC 编号 -> 测试函数 -> 断言来源 + spec 条目）**
 
 | AC 编号 | 测试函数 | 断言来源（含 spec） |
 | --- | --- | --- |
@@ -1490,7 +1490,7 @@ def test_ac11_scan_main_chain_uses_frozen_v5_runtime(workspace):
 | AC08 | `test_ac08_active_assignment_uniqueness` | DB（active 唯一约束结果），spec §17-08 |
 | AC09 | `test_ac09_assignment_run_snapshot_from_db` | DB（`assignment_run`），spec §17-09 |
 | AC10 | `test_ac10_param_snapshot_full_frozen_params` | DB（快照 JSON 全参数覆盖 spec §7.2），spec §17-10 |
-| AC11 | `test_ac11_scan_main_chain_uses_frozen_v5_runtime` | CLI 触发 scan + DB/产物 + 与 `face_review_pipeline` 基线统计对比（主链路真实执行冻结链路），spec §17-11 |
+| AC11 | `test_ac11_scan_main_chain_uses_frozen_v5_runtime` | CLI 触发 scan + `tests/data/e2e-face-input/raw` 中 `person_a_* + person_b_*` 真实样本 + DB/产物 + 与 `face_review_pipeline` 基线统计对比（主链路真实执行冻结链路），spec §17-11 |
 | AC12 | `test_ac12_live_photo_pairing_written_in_metadata` | DB（`photo_asset.live_mov_*`），spec §17-12 |
 | AC13 | `test_ac13_homepage_named_anonymous_sections_without_search` | API（`TestClient GET /`），spec §17-13 |
 | AC14 | `test_ac14_nav_items_removed` | API（`TestClient GET /`），spec §17-14 |
@@ -1503,27 +1503,27 @@ def test_ac11_scan_main_chain_uses_frozen_v5_runtime(workspace):
 | AC21 | `test_ac21_cli_lock_and_conflict_codes` | CLI（真实退出码与输出），spec §17-21 |
 | AC22 | `test_ac22_db_schema_doc_migration_text` | 文档文件文本（`docs/db_schema.md`），spec §17-22 |
 
-- [ ] **Step 3: 落地 DB+运行时真实断言（`sqlite3` 查询 + CLI/API 触发后的真实数据结果）**
+- [x] **Step 3: 落地 DB+运行时真实断言（`sqlite3` 查询 + CLI/API 触发后的真实数据结果）**
 
-Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py::test_ac01_db_schema_constraints_from_sqlite_pragma tests/integration/test_productization_acceptance.py::test_ac03_detect_defaults_persisted_in_db tests/integration/test_productization_acceptance.py::test_ac07_assignment_source_and_noise_rules_from_db tests/integration/test_productization_acceptance.py::test_ac09_assignment_run_snapshot_from_db tests/integration/test_productization_acceptance.py::test_ac10_param_snapshot_full_frozen_params tests/integration/test_productization_acceptance.py::test_ac11_scan_main_chain_uses_frozen_v5_runtime tests/integration/test_scan_behavior_parity_with_face_review_pipeline.py::test_scan_behavior_parity_with_face_review_pipeline_sample -v`
+Run: `source .venv/bin/activate && python -m pytest tests/integration/test_productization_acceptance.py::test_ac01_db_schema_constraints_from_sqlite_pragma tests/integration/test_productization_acceptance.py::test_ac03_detect_defaults_persisted_in_db tests/integration/test_productization_acceptance.py::test_ac07_assignment_source_and_noise_rules_from_db tests/integration/test_productization_acceptance.py::test_ac09_assignment_run_snapshot_from_db tests/integration/test_productization_acceptance.py::test_ac10_param_snapshot_full_frozen_params tests/integration/test_productization_acceptance.py::test_ac11_scan_main_chain_uses_frozen_v5_runtime tests/integration/test_scan_behavior_parity_with_face_review_pipeline.py::test_scan_behavior_parity_with_face_review_pipeline_sample -v`
 Expected: PASS，断言来自真实 scan 运行结果，不允许仅靠静态插表通过。
 
-- [ ] **Step 4: 落地 API+CLI 合同断言（spec §15.3 全核心端点 + spec §15.5 命令面，不占用 AC19）**
+- [x] **Step 4: 落地 API+CLI 合同断言（spec §15.3 全核心端点 + spec §15.5 命令面，不占用 AC19）**
 
-Run: `source .venv/bin/activate && pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 tests/integration/test_productization_acceptance.py::test_api_cli_contract_routes_and_commands tests/integration/test_productization_acceptance.py::test_api_data_fields_and_db_side_effect_matrix -v`
-Expected: PASS，必须逐端点断言 spec §15.3 成功 `data` 字段：`{session_id,status,resumed}`、`{session_id,status}`、`{session_id,status:"aborting"}`、`{person_id,display_name,is_named}`、`{person_id,face_observation_id,pending_reassign:1}`、`{person_id,excluded_count}`、`{merge_operation_id,winner_person_id,winner_person_uuid}`、`{merge_operation_id,status:"undone"}`、`{items:[...]}`、`{template_id}`、`{template_id,updated:true}`、`{export_run_id,status:"running"}`、`{items:[...]}`，并对每条成功分支做 DB 联动验证。
+Run: `source .venv/bin/activate && python -m pytest tests/web/test_api_contract.py::test_scan_start_or_resume_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_start_new_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_abort_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_rename_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignment_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_exclude_assignments_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_merge_batch_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_people_undo_last_merge_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_templates_list_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_create_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_update_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_template_run_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_export_run_execute_contract_data_fields_and_db_side_effect tests/web/test_api_contract.py::test_scan_audit_items_contract_data_fields_and_db_side_effect tests/cli/test_cli_commands.py::test_cli_command_signatures_match_spec_15_5 tests/cli/test_cli_export_template_commands.py::test_export_run_触发导出运行并与_db真值一致 tests/cli/test_cli_scan_export_commands.py::test_scan_status_latest_返回最新会话并与_db真值一致 tests/cli/test_cli_scan_export_commands.py::test_scan_status_session_id_返回指定会话并与_db真值一致 tests/cli/test_cli_scan_export_commands.py::test_scan_list_limit_返回受限列表并与_db真值一致 tests/cli/test_cli_scan_export_commands.py::test_export_run_status_返回单次运行并与_db真值一致 tests/cli/test_cli_scan_export_commands.py::test_export_execute_显式执行导出并写入_db tests/cli/test_cli_scan_export_commands.py::test_export_run_list_按模板与_limit过滤并与_db真值一致 -v`
+Expected: PASS，必须逐端点断言 spec §15.3 成功 `data` 字段：`{session_id,status,resumed}`、`{session_id,status}`、`{session_id,status:"aborting"}`、`{person_id,display_name,is_named}`、`{person_id,face_observation_id,pending_reassign:1}`、`{person_id,excluded_count}`、`{merge_operation_id,winner_person_id,winner_person_uuid}`、`{merge_operation_id,status:"undone"}`、`{items:[...]}`、`{template_id}`、`{template_id,updated:true}`、`{export_run_id,status:"running"}`、`{export_run_id,status,exported_count,skipped_exists_count,failed_count}`、`{items:[...]}`，并对每条成功分支做 DB 联动验证。
 
-- [ ] **Step 5: 落地 AC19（模板删除能力不存在）断言**
+- [x] **Step 5: 落地 AC19（模板删除能力不存在）断言**
 
-Run: `source .venv/bin/activate && pytest tests/cli/test_cli_commands.py::test_cli_has_no_export_template_delete_command tests/integration/test_productization_acceptance.py::test_ac19_export_template_delete_not_exposed_in_api_or_cli -v`
+Run: `source .venv/bin/activate && python -m pytest tests/cli/test_cli_export_template_commands.py::test_export_template_help_与解析器中不存在_delete tests/integration/test_productization_acceptance.py::test_ac19_export_template_delete_not_exposed_in_api_or_cli -v`
 Expected: PASS，CLI 帮助输出、命令解析与 Web/API 路由均不存在删除模板入口。
 
-- [ ] **Step 6: 落地 CLI 真实断言（执行命令并校验退出码与 stdout/stderr）**
+- [x] **Step 6: 落地 CLI 真实断言（执行命令并校验退出码与 stdout/stderr）**
 
-Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py::test_ac18_export_run_layout_and_collision tests/integration/test_productization_acceptance.py::test_ac21_cli_lock_and_conflict_codes -v`
+Run: `source .venv/bin/activate && python -m pytest tests/integration/test_productization_acceptance.py::test_ac18_export_run_layout_and_collision tests/integration/test_productization_acceptance.py::test_ac21_cli_lock_and_conflict_codes -v`
 Expected: PASS，使用 `subprocess.run` 调用真实 CLI，校验 returncode 与输出内容。
 
-- [ ] **Step 7: 加防伪造约束检查（禁止回退到 `run_check`、占位 observation/embedding/assignment）**
+- [x] **Step 7: 加防伪造约束检查（禁止回退到 `run_check`、占位 observation/embedding/assignment）**
 
 Run: `source .venv/bin/activate && rg -n "run_check\\(|check_id|class AcceptanceContext" tests/integration/test_productization_acceptance.py`
 Expected: 无匹配。
@@ -1537,17 +1537,17 @@ Expected: 无匹配。
 Run: `source .venv/bin/activate && python - <<'PY'\nimport sqlite3\nfrom pathlib import Path\n\ndb = Path('.tmp/parity/workspace/.hikbox/library.db')\nif db.exists():\n    with sqlite3.connect(db) as conn:\n        row = conn.execute(\"\"\"\n            SELECT COUNT(*),\n                   COUNT(DISTINCT printf('%.6f,%.6f,%.6f,%.6f', bbox_x1,bbox_y1,bbox_x2,bbox_y2)),\n                   COUNT(DISTINCT printf('%.6f', quality_score))\n            FROM face_observation\n            WHERE active=1\n        \"\"\").fetchone()\n    print(row)\nPY`
 Expected: 若存在 parity 工作区，则第二、三列必须大于 1；否则视为检测退化风险，阻断合入。
 
-- [ ] **Step 8: 先跑验收集成测试并记录缺口**
+- [x] **Step 8: 先跑验收集成测试并记录缺口**
 
-Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py -v`
+Run: `source .venv/bin/activate && python -m pytest tests/integration/test_productization_acceptance.py -v`
 Expected: 首次 FAIL，暴露未闭环项。
 
-- [ ] **Step 9: 补齐验收缺口并复跑到全绿**
+- [x] **Step 9: 补齐验收缺口并复跑到全绿**
 
-Run: `source .venv/bin/activate && pytest tests/integration/test_productization_acceptance.py -v`
+Run: `source .venv/bin/activate && python -m pytest tests/integration/test_productization_acceptance.py -v`
 Expected: PASS。
 
-- [ ] **Step 10: 更新 `README.md`（安装、初始化、扫描、serve、人物维护、导出、测试命令）并核对 schema 文档一致性**
+- [x] **Step 10: 更新 `README.md`（安装、初始化、扫描、serve、人物维护、导出、测试命令）并核对 schema 文档一致性**
 
 Run: `source .venv/bin/activate && rg -n "hikbox init|hikbox scan start-or-resume|hikbox serve start|people rename|people merge|export template create|export run|./scripts/run_tests.sh" README.md`
 Expected: 命令与 CLI 一致。
@@ -1555,7 +1555,7 @@ Expected: 命令与 CLI 一致。
 Run: `source .venv/bin/activate && rg -n "scan_session|assignment_run|export_template|scan_audit_item|face_embedding" docs/db_schema.md hikbox_pictures/product/db/sql/*.sql`
 Expected: 表、字段、枚举、索引描述一致。
 
-- [ ] **Step 11: 执行仓库回归测试入口**
+- [x] **Step 11: 执行仓库回归测试入口**
 
 Run: `source .venv/bin/activate && ./scripts/run_tests.sh`
 Expected: 全量测试 PASS，无新增回归。

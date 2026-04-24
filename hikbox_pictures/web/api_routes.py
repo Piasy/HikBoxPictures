@@ -37,7 +37,11 @@ def build_api_router() -> APIRouter:
                 run_kind=str(payload.get("run_kind", "")),
                 triggered_by=str(payload.get("triggered_by", "")),
             )
-            session = services.scan_session_repo.get_session(result.session_id)
+            session = _run_scan_session_until_terminal(
+                services,
+                session_id=result.session_id,
+                should_execute=result.should_execute,
+            )
             return _ok(
                 {
                     "session_id": result.session_id,
@@ -57,7 +61,11 @@ def build_api_router() -> APIRouter:
                 run_kind=str(payload.get("run_kind", "")),
                 triggered_by=str(payload.get("triggered_by", "")),
             )
-            session = services.scan_session_repo.get_session(result.session_id)
+            session = _run_scan_session_until_terminal(
+                services,
+                session_id=result.session_id,
+                should_execute=result.should_execute,
+            )
             return _ok({"session_id": result.session_id, "status": session.status})
         except ScanActiveConflictError as exc:
             return _error("SCAN_ACTIVE_CONFLICT", str(exc), status_code=409)
@@ -235,11 +243,39 @@ def build_api_router() -> APIRouter:
             code = _export_error_code(exc)
             return _error(code, str(exc), status_code=_export_status_code(code))
 
+    @router.post("/export/runs/{export_run_id}/actions/execute")
+    def export_run_execute(request: Request, export_run_id: int) -> JSONResponse:
+        services = _services(request)
+        try:
+            result = services.export_runs.execute_run(export_run_id)
+            return _ok(
+                {
+                    "export_run_id": result.export_run_id,
+                    "status": result.status,
+                    "exported_count": result.exported_count,
+                    "skipped_exists_count": result.skipped_exists_count,
+                    "failed_count": result.failed_count,
+                }
+            )
+        except Exception as exc:
+            code = _export_error_code(exc)
+            return _error(code, str(exc), status_code=_export_status_code(code))
+
     return router
 
 
 def _services(request: Request) -> ServiceContainer:
     return request.app.state.services
+
+
+def _run_scan_session_until_terminal(services: ServiceContainer, *, session_id: int, should_execute: bool):
+    session = services.scan_session_repo.get_session(session_id)
+    if not should_execute:
+        return session
+    if session.status == "pending":
+        session = services.scan_session_repo.update_status(session_id, status="running")
+    services.scan_execution.run_session(scan_session_id=session_id)
+    return services.scan_session_repo.get_session(session_id)
 
 
 def _ok(data: dict[str, Any]) -> JSONResponse:
@@ -257,6 +293,8 @@ def _export_error_code(exc: Exception) -> str:
     name = exc.__class__.__name__
     if name == "ExportTemplateNotFoundError":
         return "EXPORT_TEMPLATE_NOT_FOUND"
+    if name == "ExportRunNotFoundError":
+        return "EXPORT_RUN_NOT_FOUND"
     if name == "ExportTemplateDuplicateError":
         return "EXPORT_TEMPLATE_DUPLICATE"
     if name == "ExportValidationError":
@@ -267,6 +305,6 @@ def _export_error_code(exc: Exception) -> str:
 def _export_status_code(code: str) -> int:
     if code == "VALIDATION_ERROR":
         return 422
-    if code == "EXPORT_TEMPLATE_NOT_FOUND":
+    if code in {"EXPORT_TEMPLATE_NOT_FOUND", "EXPORT_RUN_NOT_FOUND"}:
         return 404
     return 409

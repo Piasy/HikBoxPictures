@@ -45,7 +45,7 @@ def test_cli_command_signatures_match_spec_15_5(
         assert command in people_help
 
     export_help = cli帮助输出(["export"])
-    for command in ("template", "run", "run-status", "run-list"):
+    for command in ("template", "run", "run-status", "execute", "run-list"):
         assert command in export_help
     assert "--template-id" in cli帮助输出(["export", "run-list"])
     assert "--limit" in cli帮助输出(["export", "run-list"])

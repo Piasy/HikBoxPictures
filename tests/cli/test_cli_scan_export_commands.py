@@ -170,6 +170,123 @@ def test_export_run_status_返回单次运行并与_db真值一致(
     }
 
 
+def test_export_run_status_对_running任务保持纯查询语义(
+    seeded_workspace: Path,
+    运行_cli: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+    查询行: Callable[[Path, str, Sequence[object]], tuple[object, ...] | None],
+) -> None:
+    output_root = (seeded_workspace / "exports" / "run-status-driver").resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    create_result = 运行_cli(
+        [
+            "--json",
+            "export",
+            "template",
+            "create",
+            "--name",
+            "run-status-driver",
+            "--output-root",
+            str(output_root),
+            "--person-ids",
+            "4",
+            "--workspace",
+            str(seeded_workspace),
+        ]
+    )
+    template_id = int(读取_json输出(create_result.stdout)["data"]["template_id"])
+    run_result = 运行_cli(["--json", "export", "run", str(template_id), "--workspace", str(seeded_workspace)])
+    export_run_id = int(读取_json输出(run_result.stdout)["data"]["export_run_id"])
+
+    result = 运行_cli(
+        ["--json", "export", "run-status", str(export_run_id), "--workspace", str(seeded_workspace)]
+    )
+    payload = 读取_json输出(result.stdout)
+    db_row = 查询行(
+        seeded_workspace,
+        "SELECT status, finished_at FROM export_run WHERE id=?",
+        (export_run_id,),
+    )
+
+    assert create_result.returncode == 0, create_result.stderr
+    assert run_result.returncode == 0, run_result.stderr
+    assert db_row is not None
+    assert result.returncode == 0
+    assert payload["ok"] is True
+    assert payload["data"]["export_run_id"] == export_run_id
+    assert payload["data"]["status"] == "running"
+    assert payload["data"]["summary"] == {
+        "exported_count": 0,
+        "skipped_exists_count": 0,
+        "failed_count": 0,
+    }
+    assert db_row == ("running", None)
+
+
+def test_export_execute_显式执行导出并写入_db(
+    seeded_workspace: Path,
+    运行_cli: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],
+    查询行: Callable[[Path, str, Sequence[object]], tuple[object, ...] | None],
+) -> None:
+    output_root = (seeded_workspace / "exports" / "execute-driver").resolve()
+    output_root.mkdir(parents=True, exist_ok=True)
+    create_result = 运行_cli(
+        [
+            "--json",
+            "export",
+            "template",
+            "create",
+            "--name",
+            "execute-driver",
+            "--output-root",
+            str(output_root),
+            "--person-ids",
+            "4",
+            "--workspace",
+            str(seeded_workspace),
+        ]
+    )
+    template_id = int(读取_json输出(create_result.stdout)["data"]["template_id"])
+    run_result = 运行_cli(["--json", "export", "run", str(template_id), "--workspace", str(seeded_workspace)])
+    export_run_id = int(读取_json输出(run_result.stdout)["data"]["export_run_id"])
+
+    result = 运行_cli(
+        ["--json", "export", "execute", str(export_run_id), "--workspace", str(seeded_workspace)]
+    )
+    payload = 读取_json输出(result.stdout)
+    db_row = 查询行(
+        seeded_workspace,
+        "SELECT status, finished_at FROM export_run WHERE id=?",
+        (export_run_id,),
+    )
+    delivery_row = 查询行(
+        seeded_workspace,
+        """
+        SELECT delivery_status
+        FROM export_delivery
+        WHERE export_run_id=?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (export_run_id,),
+    )
+
+    assert create_result.returncode == 0, create_result.stderr
+    assert run_result.returncode == 0, run_result.stderr
+    assert db_row is not None
+    assert result.returncode == 0
+    assert payload["ok"] is True
+    assert payload["data"] == {
+        "export_run_id": export_run_id,
+        "status": "completed",
+        "exported_count": 1,
+        "skipped_exists_count": 0,
+        "failed_count": 0,
+    }
+    assert db_row[0] == "completed"
+    assert db_row[1] is not None
+    assert delivery_row == ("exported",)
+
+
 def test_export_run_list_按模板与_limit过滤并与_db真值一致(
     seeded_workspace: Path,
     运行_cli: Callable[[Sequence[str]], subprocess.CompletedProcess[str]],

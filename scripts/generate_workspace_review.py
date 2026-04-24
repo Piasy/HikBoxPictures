@@ -84,6 +84,109 @@ def _load_latest_completed_assignment_run(conn: sqlite3.Connection) -> sqlite3.R
     return row
 
 
+def _load_scan_session_run_kind(conn: sqlite3.Connection, *, scan_session_id: int) -> str | None:
+    row = conn.execute(
+        """
+        SELECT run_kind
+        FROM scan_session
+        WHERE id = ?
+        """,
+        (int(scan_session_id),),
+    ).fetchone()
+    if row is None or row["run_kind"] is None:
+        return None
+    return str(row["run_kind"])
+
+
+def _parse_json_object(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _load_previous_completed_assignment_run(
+    conn: sqlite3.Connection,
+    *,
+    assignment_run_id: int,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, param_snapshot_json
+        FROM assignment_run
+        WHERE status='completed'
+          AND id < ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (int(assignment_run_id),),
+    ).fetchone()
+
+
+def _build_fallback_full_meta(conn: sqlite3.Connection, *, assignment_run: sqlite3.Row) -> dict[str, Any]:
+    requested_scan_run_kind = _load_scan_session_run_kind(
+        conn,
+        scan_session_id=int(assignment_run["scan_session_id"]),
+    )
+    actual_assignment_run_kind = str(assignment_run["run_kind"])
+    previous_completed_assignment_run = _load_previous_completed_assignment_run(
+        conn,
+        assignment_run_id=int(assignment_run["id"]),
+    )
+    current_param_snapshot = _parse_json_object(assignment_run["param_snapshot_json"])
+
+    previous_completed_assignment_run_id: int | None = None
+    previous_param_snapshot_matches = False
+    if previous_completed_assignment_run is not None:
+        previous_completed_assignment_run_id = int(previous_completed_assignment_run["id"])
+        previous_param_snapshot_matches = (
+            _parse_json_object(previous_completed_assignment_run["param_snapshot_json"]) == current_param_snapshot
+        )
+
+    conclusion = "unknown"
+    if requested_scan_run_kind == "scan_full" and actual_assignment_run_kind == "scan_full":
+        conclusion = "no"
+    elif requested_scan_run_kind == "scan_incremental" and actual_assignment_run_kind == "scan_full":
+        conclusion = "likely_yes"
+
+    conclusion_text_map = {
+        "no": "未发生 fallback full",
+        "likely_yes": "高概率发生 fallback full",
+        "unknown": "无法判定 fallback full",
+    }
+    reason_text_map = {
+        "no": "请求扫描类型与实际 assignment_run 一致，无需 fallback full。",
+        "likely_yes": "请求为增量扫描，但实际 assignment_run 以 full 方式完成，符合 fallback full 特征。",
+        "unknown": "现有元数据不足以判断是否发生 fallback full。",
+    }
+
+    evidence = [
+        f"scan_session.run_kind = {requested_scan_run_kind or 'unknown'}",
+        f"assignment_run.run_kind = {actual_assignment_run_kind}",
+    ]
+    if previous_completed_assignment_run_id is not None:
+        evidence.append(f"上一轮 completed assignment_run = {previous_completed_assignment_run_id}")
+        evidence.append(f"上一轮参数快照一致 = {'是' if previous_param_snapshot_matches else '否'}")
+
+    return {
+        "conclusion": conclusion,
+        "conclusion_text": conclusion_text_map[conclusion],
+        "reason_text": reason_text_map[conclusion],
+        "requested_scan_run_kind": requested_scan_run_kind,
+        "actual_assignment_run_kind": actual_assignment_run_kind,
+        "previous_completed_assignment_run_id": previous_completed_assignment_run_id,
+        "previous_param_snapshot_matches": previous_param_snapshot_matches,
+        "evidence": evidence,
+    }
+
+
 def _load_source_labels(conn: sqlite3.Connection, *, scan_session_id: int) -> list[str]:
     rows = conn.execute(
         """
@@ -234,8 +337,9 @@ def _build_payload(
     conn: sqlite3.Connection,
 ) -> dict[str, Any]:
     assignment_run = _load_latest_completed_assignment_run(conn)
-    param_snapshot = json.loads(str(assignment_run["param_snapshot_json"]))
+    param_snapshot = _parse_json_object(assignment_run["param_snapshot_json"])
     source_labels = _load_source_labels(conn, scan_session_id=int(assignment_run["scan_session_id"]))
+    fallback_full = _build_fallback_full_meta(conn, assignment_run=assignment_run)
 
     assigned_rows = _load_assigned_rows(conn)
     unassigned_rows = _load_unassigned_rows(conn)
@@ -381,6 +485,7 @@ def _build_payload(
         "scan_session_id": int(assignment_run["scan_session_id"]),
         "run_kind": str(assignment_run["run_kind"]),
         "finished_at": None if assignment_run["finished_at"] is None else str(assignment_run["finished_at"]),
+        "fallback_full": fallback_full,
     }
     return {
         "meta": meta,

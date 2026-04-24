@@ -105,7 +105,15 @@ def test_runtime_consensus_uses_late_fusion_max_main_flip(tmp_path: Path, monkey
     vec_b_flip = np.zeros(512, dtype=np.float32)
     vec_b_flip[1] = 1.0
 
-    def fake_inputs(self, *, scan_session_id: int, param_snapshot, embedding_calculator=None):
+    def fake_inputs(
+        self,
+        *,
+        scan_session_id: int,
+        param_snapshot,
+        embedding_calculator=None,
+        include_all_active_sources: bool = False,
+    ):
+        assert include_all_active_sources is False
         return [
             {
                 "face_observation_id": 101,

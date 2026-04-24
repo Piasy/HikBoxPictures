@@ -188,6 +188,177 @@ def test_detect_default_path_uses_subprocess_worker(tmp_path: Path, monkeypatch)
     assert called["count"] >= 1
 
 
+def test_replace_face_observation_keeps_existing_pending_reassign_on_same_face_index(tmp_path: Path) -> None:
+    layout, _ = _seed_detect_workspace(tmp_path)
+    repo = DetectStageRepository(layout.library_db)
+    photo_asset_id = 1
+    baseline_face = {
+        "bbox": [10.0, 12.0, 130.0, 150.0],
+        "detector_confidence": 0.91,
+        "face_area_ratio": 0.22,
+        "magface_quality": 1.13,
+        "quality_score": 0.99,
+        "crop_relpath": "crops/a.png",
+        "aligned_relpath": "aligned/a.png",
+        "context_relpath": "context/a.png",
+    }
+    second_face = {
+        **baseline_face,
+        "bbox": [20.0, 22.0, 150.0, 170.0],
+        "crop_relpath": "crops/b.png",
+        "aligned_relpath": "aligned/b.png",
+        "context_relpath": "context/b.png",
+    }
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        repo._replace_face_observations(conn, photo_asset_id=photo_asset_id, faces=[baseline_face, second_face])
+        first_rows = conn.execute(
+            """
+            SELECT id, face_index, pending_reassign
+            FROM face_observation
+            WHERE photo_asset_id=?
+            ORDER BY face_index ASC
+            """,
+            (photo_asset_id,),
+        ).fetchall()
+        assert len(first_rows) == 2
+        first_face_row_id = int(first_rows[0][0])
+        conn.execute(
+            "UPDATE face_observation SET pending_reassign=1, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (first_face_row_id,),
+        )
+
+        updated_face = {
+            **baseline_face,
+            "detector_confidence": 0.97,
+            "quality_score": 1.07,
+            "crop_relpath": "crops/a2.png",
+            "aligned_relpath": "aligned/a2.png",
+            "context_relpath": "context/a2.png",
+        }
+        updated_second_face = {
+            **second_face,
+            "detector_confidence": 0.95,
+            "quality_score": 1.01,
+            "crop_relpath": "crops/b2.png",
+            "aligned_relpath": "aligned/b2.png",
+            "context_relpath": "context/b2.png",
+        }
+        repo._replace_face_observations(conn, photo_asset_id=photo_asset_id, faces=[updated_face, updated_second_face])
+        conn.commit()
+
+        second_rows = conn.execute(
+            """
+            SELECT id, face_index, pending_reassign, detector_confidence, crop_relpath, active
+            FROM face_observation
+            WHERE photo_asset_id=?
+            ORDER BY face_index ASC
+            """,
+            (photo_asset_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert len(second_rows) == 2
+    first_face, second_face_row = second_rows
+    assert int(first_face[0]) == first_face_row_id
+    assert int(first_face[2]) == 1
+    assert float(first_face[3]) == 0.97
+    assert str(first_face[4]) == "crops/a2.png"
+    assert int(first_face[5]) == 1
+    assert int(second_face_row[2]) == 0
+    assert float(second_face_row[3]) == 0.95
+    assert str(second_face_row[4]) == "crops/b2.png"
+    assert int(second_face_row[5]) == 1
+
+
+def test_replace_face_observation_faces_reordered时_pending_reassign仍跟随同一张脸(tmp_path: Path) -> None:
+    layout, _ = _seed_detect_workspace(tmp_path)
+    repo = DetectStageRepository(layout.library_db)
+    photo_asset_id = 1
+    face_a = {
+        "bbox": [10.0, 12.0, 130.0, 150.0],
+        "detector_confidence": 0.91,
+        "face_area_ratio": 0.22,
+        "magface_quality": 1.13,
+        "quality_score": 0.99,
+        "crop_relpath": "crops/a.png",
+        "aligned_relpath": "aligned/a.png",
+        "context_relpath": "context/a.png",
+    }
+    face_b = {
+        "bbox": [160.0, 22.0, 260.0, 170.0],
+        "detector_confidence": 0.89,
+        "face_area_ratio": 0.19,
+        "magface_quality": 1.08,
+        "quality_score": 0.93,
+        "crop_relpath": "crops/b.png",
+        "aligned_relpath": "aligned/b.png",
+        "context_relpath": "context/b.png",
+    }
+
+    conn = sqlite3.connect(layout.library_db)
+    try:
+        repo._replace_face_observations(conn, photo_asset_id=photo_asset_id, faces=[face_a, face_b])
+        baseline_rows = conn.execute(
+            """
+            SELECT id, face_index, bbox_x1, bbox_y1, bbox_x2, bbox_y2
+            FROM face_observation
+            WHERE photo_asset_id=?
+            ORDER BY face_index ASC
+            """,
+            (photo_asset_id,),
+        ).fetchall()
+        pending_face_row_id = int(baseline_rows[0][0])
+        conn.execute(
+            "UPDATE face_observation SET pending_reassign=1, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+            (pending_face_row_id,),
+        )
+        reordered_face_b = {
+            **face_b,
+            "crop_relpath": "crops/b2.png",
+            "aligned_relpath": "aligned/b2.png",
+            "context_relpath": "context/b2.png",
+        }
+        reordered_face_a = {
+            **face_a,
+            "crop_relpath": "crops/a2.png",
+            "aligned_relpath": "aligned/a2.png",
+            "context_relpath": "context/a2.png",
+        }
+        repo._replace_face_observations(conn, photo_asset_id=photo_asset_id, faces=[reordered_face_b, reordered_face_a])
+        conn.commit()
+
+        rows = conn.execute(
+            """
+            SELECT id, face_index, pending_reassign, crop_relpath, bbox_x1, bbox_y1, bbox_x2, bbox_y2
+            FROM face_observation
+            WHERE photo_asset_id=?
+            ORDER BY id ASC
+            """,
+            (photo_asset_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    row_by_id = {int(row[0]): row for row in rows}
+    pending_row = row_by_id[pending_face_row_id]
+    other_rows = [row for row in rows if int(row[0]) != pending_face_row_id]
+
+    assert int(pending_row[2]) == 1
+    assert str(pending_row[3]) == "crops/a2.png"
+    assert (float(pending_row[4]), float(pending_row[5]), float(pending_row[6]), float(pending_row[7])) == (
+        10.0,
+        12.0,
+        130.0,
+        150.0,
+    )
+    assert len(other_rows) == 1
+    assert int(other_rows[0][2]) == 0
+    assert str(other_rows[0][3]) == "crops/b2.png"
+
+
 def test_worker_exception_converges_to_failed_without_running_hang(tmp_path: Path, monkeypatch) -> None:
     layout, session_id = _seed_detect_workspace(tmp_path)
     service = ScanExecutionService(db_path=layout.library_db, output_root=tmp_path / "runtime")

@@ -37,8 +37,18 @@ def api_env(tmp_path: Path) -> tuple[TestClient, WorkspaceLayout, dict[str, int 
     return client, layout, seeded
 
 
-def test_scan_start_or_resume_contract_data_fields_and_db_side_effect(api_env) -> None:
-    client, layout, _seeded = api_env
+@pytest.fixture()
+def scan_api_env(tmp_path: Path) -> tuple[TestClient, WorkspaceLayout]:
+    layout = initialize_workspace(
+        workspace_root=tmp_path / "workspace",
+        external_root=tmp_path / "external",
+    )
+    client = TestClient(create_app(build_service_container(layout)))
+    return client, layout
+
+
+def test_scan_start_or_resume_contract_data_fields_and_db_side_effect(scan_api_env) -> None:
+    client, layout = scan_api_env
 
     response = client.post(
         "/api/scan/start_or_resume",
@@ -49,19 +59,27 @@ def test_scan_start_or_resume_contract_data_fields_and_db_side_effect(api_env) -
     payload = response.json()
     assert payload["ok"] is True
     assert set(payload["data"]) == {"session_id", "status", "resumed"}
-    assert payload["data"]["status"] == "running"
+    assert payload["data"]["status"] == "completed"
     assert payload["data"]["resumed"] is False
 
     row = _fetchone(
         layout.library_db,
-        "SELECT status, triggered_by FROM scan_session WHERE id=?",
+        "SELECT status, triggered_by, finished_at FROM scan_session WHERE id=?",
         (payload["data"]["session_id"],),
     )
-    assert row == ("running", "manual_webui")
+    assert row[0] == "completed"
+    assert row[1] == "manual_webui"
+    assert row[2] is not None
+    assignment_run = _fetchone(
+        layout.library_db,
+        "SELECT status FROM assignment_run WHERE scan_session_id=?",
+        (payload["data"]["session_id"],),
+    )
+    assert assignment_run == ("completed",)
 
 
-def test_scan_start_or_resume_resumes_interrupted_session_and_updates_db(api_env) -> None:
-    client, layout, _seeded = api_env
+def test_scan_start_or_resume_resumes_interrupted_session_and_updates_db(scan_api_env) -> None:
+    client, layout = scan_api_env
     interrupted_id = _execute_insert(
         layout.library_db,
         """
@@ -79,15 +97,22 @@ def test_scan_start_or_resume_resumes_interrupted_session_and_updates_db(api_env
     assert response.status_code == 200
     assert response.json()["data"] == {
         "session_id": interrupted_id,
-        "status": "running",
+        "status": "completed",
         "resumed": True,
     }
-    row = _fetchone(layout.library_db, "SELECT status FROM scan_session WHERE id=?", (interrupted_id,))
-    assert row == ("running",)
+    row = _fetchone(layout.library_db, "SELECT status, finished_at FROM scan_session WHERE id=?", (interrupted_id,))
+    assert row[0] == "completed"
+    assert row[1] is not None
+    assignment_run = _fetchone(
+        layout.library_db,
+        "SELECT status FROM assignment_run WHERE scan_session_id=?",
+        (interrupted_id,),
+    )
+    assert assignment_run == ("completed",)
 
 
-def test_scan_start_or_resume_invalid_payload_returns_validation_error(api_env) -> None:
-    client, _layout, _seeded = api_env
+def test_scan_start_or_resume_invalid_payload_returns_validation_error(scan_api_env) -> None:
+    client, _layout = scan_api_env
 
     response = client.post(
         "/api/scan/start_or_resume",
@@ -98,8 +123,8 @@ def test_scan_start_or_resume_invalid_payload_returns_validation_error(api_env) 
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
-def test_scan_start_new_contract_data_fields_and_db_side_effect(api_env) -> None:
-    client, layout, _seeded = api_env
+def test_scan_start_new_contract_data_fields_and_db_side_effect(scan_api_env) -> None:
+    client, layout = scan_api_env
     interrupted_id = int(
         _execute_insert(
             layout.library_db,
@@ -120,16 +145,25 @@ def test_scan_start_new_contract_data_fields_and_db_side_effect(api_env) -> None
     payload = response.json()
     assert payload["ok"] is True
     assert set(payload["data"]) == {"session_id", "status"}
-    assert payload["data"]["status"] == "pending"
+    assert payload["data"]["status"] == "completed"
 
     new_session = _fetchone(
         layout.library_db,
-        "SELECT status, run_kind, triggered_by FROM scan_session WHERE id=?",
+        "SELECT status, run_kind, triggered_by, finished_at FROM scan_session WHERE id=?",
         (payload["data"]["session_id"],),
     )
     interrupted = _fetchone(layout.library_db, "SELECT status FROM scan_session WHERE id=?", (interrupted_id,))
-    assert new_session == ("pending", "scan_incremental", "manual_webui")
+    assert new_session[0] == "completed"
+    assert new_session[1] == "scan_incremental"
+    assert new_session[2] == "manual_webui"
+    assert new_session[3] is not None
     assert interrupted == ("abandoned",)
+    assignment_run = _fetchone(
+        layout.library_db,
+        "SELECT status FROM assignment_run WHERE scan_session_id=?",
+        (payload["data"]["session_id"],),
+    )
+    assert assignment_run == ("completed",)
 
 
 def test_scan_start_new_active_conflict_returns_scan_active_conflict(api_env) -> None:
@@ -472,6 +506,54 @@ def test_export_template_run_contract_data_fields_and_db_side_effect(api_env) ->
     assert row == ("running", seeded["template_id"])
 
 
+def test_export_run_execute_contract_data_fields_and_db_side_effect(api_env) -> None:
+    client, layout, seeded = api_env
+    output_root = str(layout.workspace_root / "export-run-execute")
+    create_template_response = client.post(
+        "/api/export/templates",
+        json={
+            "name": "执行导出模板",
+            "output_root": output_root,
+            "person_ids": [seeded["exclude_person_id"]],
+        },
+    )
+    template_id = int(create_template_response.json()["data"]["template_id"])
+    create_run_response = client.post(f"/api/export/templates/{template_id}/actions/run")
+    export_run_id = int(create_run_response.json()["data"]["export_run_id"])
+
+    response = client.post(f"/api/export/runs/{export_run_id}/actions/execute")
+
+    assert create_template_response.status_code == 200
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "export_run_id": export_run_id,
+        "status": "completed",
+        "exported_count": 1,
+        "skipped_exists_count": 0,
+        "failed_count": 0,
+    }
+    row = _fetchone(
+        layout.library_db,
+        "SELECT status, finished_at FROM export_run WHERE id=?",
+        (export_run_id,),
+    )
+    delivery = _fetchone(
+        layout.library_db,
+        """
+        SELECT delivery_status
+        FROM export_delivery
+        WHERE export_run_id=?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (export_run_id,),
+    )
+    assert row is not None
+    assert row[0] == "completed"
+    assert row[1] is not None
+    assert delivery == ("exported",)
+
+
 def test_export_template_run_missing_template_returns_not_found_code(api_env) -> None:
     client, _layout, _seeded = api_env
 
@@ -479,6 +561,15 @@ def test_export_template_run_missing_template_returns_not_found_code(api_env) ->
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "EXPORT_TEMPLATE_NOT_FOUND"
+
+
+def test_export_run_execute_missing_run_returns_not_found_code(api_env) -> None:
+    client, _layout, _seeded = api_env
+
+    response = client.post("/api/export/runs/999999/actions/execute")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "EXPORT_RUN_NOT_FOUND"
 
 
 def test_scan_audit_items_contract_data_fields_and_db_side_effect(api_env) -> None:
