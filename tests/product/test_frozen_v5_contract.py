@@ -10,6 +10,7 @@ import numpy as np
 from PIL import Image
 
 import hikbox_pictures.product.engine.frozen_v5 as frozen_v5_engine
+import hikbox_pictures.product.scan.assignment_stage as assignment_stage_module
 from hikbox_pictures.product.config import initialize_workspace
 from hikbox_pictures.product.engine.frozen_v5 import late_fusion_similarity
 from hikbox_pictures.product.scan.assignment_stage import AssignmentStageService
@@ -156,6 +157,23 @@ def test_runtime_consensus_uses_late_fusion_max_main_flip(tmp_path: Path, monkey
     by_obs = {int(row["face_observation_id"]): str(row["assignment_source"]) for row in captured["rows"]}
     assert by_obs[101] == "hdbscan"
     assert by_obs[202] == "person_consensus"
+
+
+def test_resolve_magface_checkpoint_prefers_ready_ancestor_cache(tmp_path: Path, monkeypatch) -> None:
+    repo_root = tmp_path / "repo"
+    task_root = repo_root / ".worktrees" / "task-real-data-e2e"
+    module_path = task_root / "hikbox_pictures" / "product" / "scan" / "assignment_stage.py"
+    checkpoint_path = repo_root / ".cache" / "magface" / "magface_iresnet100_ms1mv2.pth"
+
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_bytes(b"ready")
+    module_path.parent.mkdir(parents=True, exist_ok=True)
+    module_path.write_text("# fake module path\n", encoding="utf-8")
+
+    monkeypatch.chdir(task_root)
+    monkeypatch.setattr(assignment_stage_module, "__file__", str(module_path))
+
+    assert assignment_stage_module._resolve_magface_checkpoint(param_snapshot={}) == checkpoint_path.resolve()
 
 
 def _seed_minimal_observation(library_db: Path, runtime_root: Path, scan_session_id: int) -> int:

@@ -958,7 +958,24 @@ def _resolve_magface_checkpoint(*, param_snapshot: dict[str, object]) -> Path:
     env_path = str(os.environ.get(MAGFACE_CHECKPOINT_ENV, "")).strip()
     if env_path:
         return Path(env_path).expanduser().resolve()
+    discovered = _discover_magface_checkpoint()
+    if discovered is not None:
+        return discovered
     return MAGFACE_CHECKPOINT_DEFAULT.expanduser().resolve()
+
+
+def _discover_magface_checkpoint() -> Path | None:
+    candidate_roots: list[Path] = [Path.cwd(), Path(__file__).resolve().parent]
+    seen: set[Path] = set()
+    for base in candidate_roots:
+        for candidate in [base, *base.parents]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            checkpoint_path = candidate / ".cache" / "magface" / "magface_iresnet100_ms1mv2.pth"
+            if checkpoint_path.exists():
+                return checkpoint_path.resolve()
+    return None
 
 
 def _build_default_embedding_calculator(*, param_snapshot: dict[str, object]):

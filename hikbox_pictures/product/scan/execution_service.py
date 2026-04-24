@@ -325,7 +325,9 @@ def _run_detect_worker_subprocess(request: dict[str, object], *, workdir: Path) 
         ipc_root = Path(ipc_dir)
         request_json = ipc_root / "request.json"
         response_json = ipc_root / "response.json"
-        request_json.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+        request_payload = dict(request)
+        request_payload.setdefault("insightface_root", str(_resolve_insightface_root()))
+        request_json.write_text(json.dumps(request_payload, ensure_ascii=False), encoding="utf-8")
         subprocess.run(
             [
                 sys.executable,
@@ -339,3 +341,32 @@ def _run_detect_worker_subprocess(request: dict[str, object], *, workdir: Path) 
             check=True,
         )
         return json.loads(response_json.read_text(encoding="utf-8"))
+
+
+def _resolve_insightface_root() -> Path:
+    configured = os.environ.get("HIKBOX_INSIGHTFACE_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+
+    candidate_roots: list[Path] = [Path.cwd(), Path(__file__).resolve().parent]
+    seen: set[Path] = set()
+    discovered_caches: list[Path] = []
+    for base in candidate_roots:
+        for candidate in [base, *base.parents]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            cache_root = candidate / ".insightface"
+            if not cache_root.exists():
+                continue
+            if _is_ready_insightface_root(cache_root):
+                return cache_root
+            discovered_caches.append(cache_root)
+
+    if discovered_caches:
+        return discovered_caches[0]
+    return Path(".insightface")
+
+
+def _is_ready_insightface_root(cache_root: Path) -> bool:
+    return (cache_root / "models" / "buffalo_l" / "det_10g.onnx").exists()

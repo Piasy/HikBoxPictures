@@ -94,9 +94,18 @@ hikbox export run-list --workspace ./workspace
 ./scripts/run_tests.sh
 ```
 
+默认会包含 `tests/integration/test_real_data_e2e_face_input.py` 这条基于 `tests/data/e2e-face-input` 的真实样本全链路用例。
+
 如果只想跑本次产品化验收骨架：
 
 ```bash
 source .venv/bin/activate
 python -m pytest tests/integration/test_productization_acceptance.py -q
+```
+
+如果只想单独复现真实样本全链路集成：
+
+```bash
+source .venv/bin/activate
+python -m pytest tests/integration/test_real_data_e2e_face_input.py -q
 ```
