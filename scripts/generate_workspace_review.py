@@ -109,6 +109,86 @@ def _load_source_labels(conn: sqlite3.Connection, *, scan_session_id: int) -> li
     return [str(row["label"]) for row in fallback_rows if str(row["label"]).strip()]
 
 
+def _load_scan_session_run_kind(conn: sqlite3.Connection, *, scan_session_id: int) -> str:
+    row = conn.execute(
+        "SELECT run_kind FROM scan_session WHERE id=?",
+        (int(scan_session_id),),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"assignment_run 关联的 scan_session 不存在: {scan_session_id}")
+    return str(row["run_kind"])
+
+
+def _load_previous_completed_assignment_run(
+    conn: sqlite3.Connection,
+    *,
+    assignment_run_id: int,
+) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT id, param_snapshot_json
+        FROM assignment_run
+        WHERE status='completed'
+          AND id < ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (int(assignment_run_id),),
+    ).fetchone()
+
+
+def _build_fallback_full_meta(
+    conn: sqlite3.Connection,
+    *,
+    assignment_run: sqlite3.Row,
+    param_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    requested_scan_run_kind = _load_scan_session_run_kind(
+        conn,
+        scan_session_id=int(assignment_run["scan_session_id"]),
+    )
+    actual_assignment_run_kind = str(assignment_run["run_kind"])
+    previous_run = _load_previous_completed_assignment_run(conn, assignment_run_id=int(assignment_run["id"]))
+    previous_param_snapshot_matches = None
+    previous_completed_assignment_run_id = None
+    if previous_run is not None:
+        previous_completed_assignment_run_id = int(previous_run["id"])
+        previous_param_snapshot_matches = json.loads(str(previous_run["param_snapshot_json"])) == param_snapshot
+
+    if requested_scan_run_kind != "scan_incremental":
+        conclusion = "no"
+        conclusion_text = "未发生 fallback full"
+        reason_text = "当前会话请求的就是 full/resume 主链路，不存在 incremental fallback full。"
+    elif actual_assignment_run_kind == "scan_full":
+        conclusion = "likely_yes"
+        conclusion_text = "高概率发生 fallback full"
+        reason_text = "会话请求为 scan_incremental，但实际 assignment_run 记录为 scan_full。"
+    else:
+        conclusion = "unknown"
+        conclusion_text = "无法判断 fallback full"
+        reason_text = "会话请求与 assignment_run 未呈现 fallback full 特征。"
+
+    evidence = [
+        f"scan_session.run_kind = {requested_scan_run_kind}",
+        f"assignment_run.run_kind = {actual_assignment_run_kind}",
+    ]
+    if previous_completed_assignment_run_id is not None:
+        evidence.append(f"上一轮 completed assignment_run = {previous_completed_assignment_run_id}")
+    if previous_param_snapshot_matches is not None:
+        evidence.append(f"上一轮参数快照一致 = {'是' if previous_param_snapshot_matches else '否'}")
+
+    return {
+        "conclusion": conclusion,
+        "conclusion_text": conclusion_text,
+        "reason_text": reason_text,
+        "requested_scan_run_kind": requested_scan_run_kind,
+        "actual_assignment_run_kind": actual_assignment_run_kind,
+        "previous_completed_assignment_run_id": previous_completed_assignment_run_id,
+        "previous_param_snapshot_matches": previous_param_snapshot_matches,
+        "evidence": evidence,
+    }
+
+
 def _build_member(
     row: sqlite3.Row,
     *,
@@ -361,6 +441,11 @@ def _build_payload(
     )
 
     workspace_text = os.path.relpath(workspace, start=Path.cwd()).replace("\\", "/")
+    fallback_full = _build_fallback_full_meta(
+        conn,
+        assignment_run=assignment_run,
+        param_snapshot=param_snapshot,
+    )
     meta = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "model": f"workspace/{str(assignment_run['algorithm_version'])}",
@@ -381,6 +466,7 @@ def _build_payload(
         "scan_session_id": int(assignment_run["scan_session_id"]),
         "run_kind": str(assignment_run["run_kind"]),
         "finished_at": None if assignment_run["finished_at"] is None else str(assignment_run["finished_at"]),
+        "fallback_full": fallback_full,
     }
     return {
         "meta": meta,

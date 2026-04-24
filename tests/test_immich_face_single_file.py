@@ -4,10 +4,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from hikbox_pictures.immich_face_single_file import BoundingBox
 from hikbox_pictures.immich_face_single_file import DetectedFace
 from hikbox_pictures.immich_face_single_file import ImmichLikeFaceEngine
+from hikbox_pictures.immich_face_single_file import InsightFaceImmichBackend
+from hikbox_pictures.immich_face_single_file import load_rgb_image_with_exif
 
 
 class FakeBackend:
@@ -238,3 +241,68 @@ def test_process_pending_recognition_queue_assigns_similar_faces_to_one_person(t
     assert None not in person_ids
     assert engine.pending_recognition_face_ids == []
     assert len(engine.people) == 1
+
+
+def test_load_rgb_image_with_exif_applies_orientation(tmp_path: Path) -> None:
+    image_path = tmp_path / "rotated.jpg"
+    exif = Image.Exif()
+    exif[274] = 6
+    Image.new("RGB", (100, 60), color=(220, 180, 160)).save(image_path, exif=exif)
+
+    image = load_rgb_image_with_exif(image_path)
+    try:
+        assert image.size == (60, 100)
+    finally:
+        image.close()
+
+
+def test_insightface_backend_detect_faces_does_not_reset_detector_input_size(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from insightface.model_zoo import model_zoo
+
+    class FakeDetector:
+        def __init__(self) -> None:
+            self.prepare_calls: list[dict[str, object]] = []
+
+        def prepare(self, ctx_id: int, **kwargs: object) -> None:
+            self.prepare_calls.append({"ctx_id": ctx_id, **kwargs})
+
+        def detect(self, image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+            return (
+                np.empty((0, 5), dtype=np.float32),
+                np.empty((0, 5, 2), dtype=np.float32),
+            )
+
+    class FakeRecognizer:
+        pass
+
+    detector = FakeDetector()
+    recognizer = FakeRecognizer()
+
+    def fake_get_model(path: str, providers: list[str] | None = None) -> object:
+        if path.endswith("det_10g.onnx"):
+            return detector
+        if path.endswith("w600k_r50.onnx"):
+            return recognizer
+        raise AssertionError(f"unexpected model path: {path}")
+
+    monkeypatch.setattr(model_zoo, "get_model", fake_get_model)
+
+    model_root = tmp_path / ".insightface"
+    model_dir = model_root / "models" / "buffalo_l"
+    model_dir.mkdir(parents=True)
+    (model_dir / "det_10g.onnx").write_bytes(b"fake")
+    (model_dir / "w600k_r50.onnx").write_bytes(b"fake")
+
+    image_path = tmp_path / "asset.jpg"
+    Image.new("RGB", (32, 24), color=(128, 96, 64)).save(image_path)
+
+    backend = InsightFaceImmichBackend(model_root=model_root, min_score=0.7)
+    backend.detect_faces(image_path, min_score=0.8)
+
+    assert detector.prepare_calls == [
+        {"ctx_id": 0, "det_thresh": 0.7, "input_size": (640, 640)},
+        {"ctx_id": 0, "det_thresh": 0.8},
+    ]

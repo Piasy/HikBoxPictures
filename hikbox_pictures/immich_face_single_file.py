@@ -10,6 +10,8 @@ import uuid
 
 import hnswlib
 import numpy as np
+from PIL import Image
+from PIL import ImageOps
 
 
 def _utcnow() -> datetime:
@@ -22,6 +24,12 @@ def _normalize_vector(vector: np.ndarray) -> np.ndarray:
     if norm <= 1e-9:
         return safe
     return safe / norm
+
+
+def load_rgb_image_with_exif(image_path: Path) -> Image.Image:
+    with Image.open(image_path) as image:
+        normalized = ImageOps.exif_transpose(image)
+        return normalized.convert("RGB")
 
 
 @dataclass(frozen=True)
@@ -411,10 +419,9 @@ class InsightFaceImmichBackend:
 
     def detect_faces(self, image_path: Path, *, min_score: float) -> tuple[int, int, list[DetectedFace]]:
         from insightface.utils.face_align import norm_crop
-        from PIL import Image
 
-        self._detector.prepare(ctx_id=0, det_thresh=float(min_score), input_size=(640, 640))
-        image = Image.open(image_path).convert("RGB")
+        self._detector.prepare(ctx_id=0, det_thresh=float(min_score))
+        image = load_rgb_image_with_exif(image_path)
         rgb = np.asarray(image, dtype=np.uint8)
         bgr = rgb[:, :, ::-1]
         bboxes, landmarks = self._detector.detect(bgr)

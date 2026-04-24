@@ -677,3 +677,74 @@
 
 - 本文档替代旧 `pipeline.db` 说明，不再描述旧表 `pipeline_sources/source_images/detected_faces/pipeline_meta`。
 - 首版发布后，任何 schema 变更必须走 migration，并同步维护本文档。
+
+## 9. `immich people review` 增量 SQLite 库
+
+为了支持 `scripts/generate_immich_people_summary.py --db-path ...` 在多个输入目录之间复用已识别的人物，本仓库额外维护一份轻量 SQLite 库。该库独立于产品化双库，不参与 `workspace/.hikbox/library.db` / `embedding.db` 的正式 schema。
+
+推荐位置：
+
+- `<workspace>/.tmp/<task-name>/people.sqlite3`
+
+当前实现包含 4 张表：
+
+### 9.1 `immich_people_source`
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `INTEGER` | `PRIMARY KEY` | 主键 |
+| `root_path` | `TEXT` | `NOT NULL UNIQUE` | 已处理输入目录绝对路径 |
+| `created_at` | `TEXT` | `NOT NULL` | 首次写入时间 |
+| `updated_at` | `TEXT` | `NOT NULL` | 最近一次处理时间 |
+
+### 9.2 `immich_people_asset`
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `TEXT` | `PRIMARY KEY` | 资产 ID，基于绝对路径稳定生成 |
+| `source_id` | `INTEGER` | `NOT NULL REFERENCES immich_people_source(id)` | 来源目录 |
+| `image_path` | `TEXT` | `NOT NULL UNIQUE` | 图片绝对路径 |
+| `file_name` | `TEXT` | `NOT NULL` | 文件名 |
+| `extension` | `TEXT` | `NOT NULL` | 扩展名 |
+| `created_at` | `TEXT` | `NOT NULL` | 首次入库时间 |
+| `updated_at` | `TEXT` | `NOT NULL` | 最近一次写入时间 |
+
+索引：
+
+- `idx_immich_people_asset_source_id(source_id)`
+
+### 9.3 `immich_people_person`
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `TEXT` | `PRIMARY KEY` | 人物 ID |
+| `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
+
+### 9.4 `immich_people_face`
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `TEXT` | `PRIMARY KEY` | 人脸 ID |
+| `asset_id` | `TEXT` | `NOT NULL REFERENCES immich_people_asset(id)` | 所属图片 |
+| `person_id` | `TEXT` | `REFERENCES immich_people_person(id)` | 归属人物，可空 |
+| `bbox_x1` | `REAL` | `NOT NULL` | 检测框左上 X |
+| `bbox_y1` | `REAL` | `NOT NULL` | 检测框左上 Y |
+| `bbox_x2` | `REAL` | `NOT NULL` | 检测框右下 X |
+| `bbox_y2` | `REAL` | `NOT NULL` | 检测框右下 Y |
+| `image_width` | `INTEGER` | `NOT NULL` | 原图宽 |
+| `image_height` | `INTEGER` | `NOT NULL` | 原图高 |
+| `embedding` | `BLOB` | `NOT NULL` | 512 维 `float32` 向量 |
+| `score` | `REAL` | `NOT NULL` | 检测分数 |
+| `source_type` | `TEXT` | `NOT NULL` | 当前固定为 `machine_learning` |
+| `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
+
+索引：
+
+- `idx_immich_people_face_asset_id(asset_id)`
+- `idx_immich_people_face_person_id(person_id)`
+
+规则：
+
+- 该库的目标是“跨目录增量复用人物库”，即目录 A 处理完成后，目录 B 的新脸可以直接检索并挂到已存在的 `person_id`。
+- 当前 `summary.json` / `review.html` 仍只输出“本次输入目录”的图片、人脸和证据图；SQLite 仅作为跨目录的全局识别状态。
+- 当前实现不承诺支持“同一绝对路径图片反复重跑”；若库里已存在同路径资产，会按资产级错误处理，而不是刷新旧 embedding。
