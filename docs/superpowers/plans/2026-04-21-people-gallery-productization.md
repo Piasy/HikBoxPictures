@@ -1572,12 +1572,16 @@ Expected: 全量测试 PASS，无新增回归。
 
 **Files:**
 - Create: `tests/integration/test_real_data_e2e_face_input.py`
+- Modify: `hikbox_pictures/product/scan/execution_service.py`
+- Modify: `hikbox_pictures/product/scan/assignment_stage.py`
 - Modify: `tests/integration/test_productization_acceptance.py`
+- Modify: `tests/product/test_detect_batch_claim_ack.py`
+- Modify: `tests/product/test_frozen_v5_contract.py`
 - Modify: `scripts/run_tests.sh`
 - Modify: `README.md`
 - Test: `tests/integration/test_real_data_e2e_face_input.py`
 
-- [ ] **Step 1: 写真实全链路集成失败用例（强制使用 `tests/data/e2e-face-input`，通过公共入口触发完整扫描链路）**
+- [x] **Step 1: 写真实全链路集成失败用例（强制使用 `tests/data/e2e-face-input`，通过公共入口触发完整扫描链路）**
 
 ```python
 REAL_E2E_DATASET = Path("tests/data/e2e-face-input").resolve()
@@ -1602,27 +1606,27 @@ def test_real_dataset_scan_runs_full_pipeline_and_persists_results(cli_bin, tmp_
     assert obs_count > 0 and assign_count > 0
 ```
 
-- [ ] **Step 2: 跑真实全链路失败用例，确认当前实现未满足前先失败**
+- [x] **Step 2: 跑真实全链路失败用例，确认当前实现未满足前先失败**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_real_data_e2e_face_input.py::test_real_dataset_scan_runs_full_pipeline_and_persists_results -v`
 Expected: FAIL（未完成真实链路接线或断言尚未满足时必须失败）。
 
-- [ ] **Step 3: 实现真实数据夹具与全链路断言（读取 `manifest.json`、校验阶段推进、校验非占位分布）**
+- [x] **Step 3: 实现真实数据夹具与全链路断言（读取 `manifest.json`、校验阶段推进、校验非占位分布）**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_real_data_e2e_face_input.py -v`
 Expected: PASS，且断言至少覆盖：`manifest` 样本计数、`scan_session` 六阶段完成、`face_observation`/`person_face_assignment` 真实落库、bbox/quality 非常量分布。
 
-- [ ] **Step 4: 把真实全链路用例接入 AC11/验收映射，禁止“仅合成样本通过”**
+- [x] **Step 4: 把真实全链路用例接入 AC11/验收映射，禁止“仅合成样本通过”**
 
 Run: `source .venv/bin/activate && rg -n "real_data_e2e_face_input|tests/data/e2e-face-input|AC11" tests/integration/test_productization_acceptance.py`
 Expected: 命中真实样本链路引用，AC11 验收包含该用例或等价断言。
 
-- [ ] **Step 5: 更新测试入口与文档，确保真实 `e2e-face-input` 用例纳入标准回归**
+- [x] **Step 5: 更新测试入口与文档，确保真实 `e2e-face-input` 用例纳入标准回归**
 
 Run: `source .venv/bin/activate && rg -n "test_real_data_e2e_face_input|tests/data/e2e-face-input" scripts/run_tests.sh README.md`
 Expected: 命中测试入口与说明，开发者按文档可直接复现真实全链路集成测试。
 
-- [ ] **Step 6: 执行本任务收口回归（仅真实全链路集成）**
+- [x] **Step 6: 执行本任务收口回归（仅真实全链路集成）**
 
 Run: `source .venv/bin/activate && pytest tests/integration/test_real_data_e2e_face_input.py -v`
 Expected: PASS，真实完整链路由仓库内 `e2e-face-input` 数据覆盖。

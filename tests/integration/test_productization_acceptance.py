@@ -29,7 +29,8 @@ from tests.product.task6_test_support import create_task6_workspace, seed_face_o
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DB_SCHEMA_DOC = REPO_ROOT / "docs" / "db_schema.md"
 LIVE_EXAMPLE_DIR = REPO_ROOT / "tests" / "data" / "live-example"
-REAL_E2E_RAW_DIR = REPO_ROOT / "tests" / "data" / "e2e-face-input" / "raw"
+REAL_E2E_DATASET_DIR = REPO_ROOT / "tests" / "data" / "e2e-face-input"
+REAL_E2E_RAW_DIR = REAL_E2E_DATASET_DIR / "raw"
 
 ACCEPTANCE_CASE_MATRIX: tuple[dict[str, str], ...] = (
     {"ac": "AC01", "test": "test_ac01_db_schema_constraints_from_sqlite_pragma", "source": "DB/真实表结构", "spec": "§17-01"},
@@ -42,7 +43,12 @@ ACCEPTANCE_CASE_MATRIX: tuple[dict[str, str], ...] = (
     {"ac": "AC08", "test": "test_ac08_active_assignment_uniqueness", "source": "DB/active assignment 唯一性", "spec": "§17-08"},
     {"ac": "AC09", "test": "test_ac09_assignment_run_snapshot_from_db", "source": "DB/assignment_run", "spec": "§17-09"},
     {"ac": "AC10", "test": "test_ac10_param_snapshot_full_frozen_params", "source": "DB/冻结参数快照", "spec": "§17-10"},
-    {"ac": "AC11", "test": "test_ac11_scan_main_chain_uses_frozen_v5_runtime", "source": "CLI + DB + parity 基线统计", "spec": "§17-11"},
+    {
+        "ac": "AC11",
+        "test": "test_ac11_scan_main_chain_uses_frozen_v5_runtime + tests/integration/test_real_data_e2e_face_input.py::test_real_dataset_scan_runs_full_pipeline_and_persists_results",
+        "source": "CLI + DB + parity 基线统计 + tests/data/e2e-face-input 真实全量链路",
+        "spec": "§17-11",
+    },
     {"ac": "AC12", "test": "test_ac12_live_photo_pairing_written_in_metadata", "source": "DB/photo_asset.live_mov_*", "spec": "§17-12"},
     {"ac": "AC13", "test": "test_ac13_homepage_named_anonymous_sections_without_search", "source": "API/TestClient 页面响应", "spec": "§17-13"},
     {"ac": "AC14", "test": "test_ac14_nav_items_removed", "source": "API/TestClient 路由与页面文本", "spec": "§17-14"},

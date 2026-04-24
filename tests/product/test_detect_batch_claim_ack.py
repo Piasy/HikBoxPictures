@@ -6,6 +6,7 @@ import numpy as np
 from PIL import Image
 
 from hikbox_pictures.product.config import initialize_workspace
+from hikbox_pictures.product.scan import execution_service
 from hikbox_pictures.product.scan.detect_stage import DetectStageRepository
 from hikbox_pictures.product.scan.execution_service import (
     ScanExecutionService,
@@ -186,6 +187,58 @@ def test_detect_default_path_uses_subprocess_worker(tmp_path: Path, monkeypatch)
     result = service.run_detect_stage(scan_session_id=session_id)
     assert result.interrupted is False
     assert called["count"] >= 1
+
+
+def test_run_detect_worker_subprocess_writes_resolved_insightface_root(tmp_path: Path, monkeypatch) -> None:
+    runtime_root = tmp_path / "runtime"
+    response_payload = {"results": []}
+    captured_request: dict[str, object] = {}
+
+    def fake_subprocess_run(cmd: list[str], *, check: bool) -> None:
+        assert check is True
+        request_path = Path(cmd[cmd.index("--request-json") + 1])
+        response_path = Path(cmd[cmd.index("--response-json") + 1])
+        captured_request.update(json.loads(request_path.read_text(encoding="utf-8")))
+        response_path.write_text(json.dumps(response_payload, ensure_ascii=False), encoding="utf-8")
+
+    monkeypatch.setattr(
+        execution_service,
+        "_resolve_insightface_root",
+        lambda: Path("/shared-cache/.insightface"),
+        raising=False,
+    )
+    monkeypatch.setattr(execution_service.subprocess, "run", fake_subprocess_run)
+
+    payload = execution_service._run_detect_worker_subprocess(
+        {"items": [{"photo_asset_id": 1, "image_path": "demo.jpg", "photo_key": "a1"}]},
+        workdir=runtime_root,
+    )
+
+    assert payload == response_payload
+    assert captured_request["insightface_root"] == "/shared-cache/.insightface"
+
+
+def test_resolve_insightface_root_prefers_ready_ancestor_cache_over_partial_local_cache(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = tmp_path / "repo"
+    task_root = repo_root / ".worktrees" / "task-real-data-e2e"
+    module_path = task_root / "hikbox_pictures" / "product" / "scan" / "execution_service.py"
+    ready_cache = repo_root / ".insightface" / "models" / "buffalo_l"
+    partial_cache = task_root / ".insightface" / "models"
+
+    ready_cache.mkdir(parents=True, exist_ok=True)
+    partial_cache.mkdir(parents=True, exist_ok=True)
+    (ready_cache / "det_10g.onnx").write_bytes(b"ready")
+    (partial_cache / "buffalo_l.zip").write_bytes(b"partial")
+    module_path.parent.mkdir(parents=True, exist_ok=True)
+    module_path.write_text("# fake module path\n", encoding="utf-8")
+
+    monkeypatch.chdir(task_root)
+    monkeypatch.setattr(execution_service, "__file__", str(module_path))
+
+    assert execution_service._resolve_insightface_root() == repo_root / ".insightface"
 
 
 def test_replace_face_observation_keeps_existing_pending_reassign_on_same_face_index(tmp_path: Path) -> None:
