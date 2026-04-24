@@ -208,7 +208,7 @@ class ScanSessionService:
             active = self._repo.latest_by_status(ACTIVE_STATUS, conn=conn)
             if active is not None:
                 conn.commit()
-                return ScanStartResult(session_id=active.id, resumed=True)
+                return ScanStartResult(session_id=active.id, resumed=True, should_execute=False)
 
             interrupted = self._repo.latest_by_status({"interrupted"}, conn=conn)
             if interrupted is not None:
@@ -219,9 +219,9 @@ class ScanSessionService:
                     if active is None:
                         raise
                     conn.commit()
-                    return ScanStartResult(session_id=active.id, resumed=True)
+                    return ScanStartResult(session_id=active.id, resumed=True, should_execute=False)
                 conn.commit()
-                return ScanStartResult(session_id=resumed.id, resumed=True)
+                return ScanStartResult(session_id=resumed.id, resumed=True, should_execute=True)
 
             try:
                 created = self._repo.create_session(
@@ -235,9 +235,9 @@ class ScanSessionService:
                 if active is None:
                     raise
                 conn.commit()
-                return ScanStartResult(session_id=active.id, resumed=True)
+                return ScanStartResult(session_id=active.id, resumed=True, should_execute=False)
             conn.commit()
-            return ScanStartResult(session_id=created.id, resumed=False)
+            return ScanStartResult(session_id=created.id, resumed=False, should_execute=True)
         except Exception:
             conn.rollback()
             raise
@@ -272,7 +272,7 @@ class ScanSessionService:
                 raise ScanActiveConflictError(active.id) from None
 
             conn.commit()
-            return ScanStartResult(session_id=created.id, resumed=False)
+            return ScanStartResult(session_id=created.id, resumed=False, should_execute=True)
         except Exception:
             conn.rollback()
             raise

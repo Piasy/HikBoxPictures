@@ -212,6 +212,12 @@ def cli帮助输出(运行_cli: Callable[[Sequence[str]], subprocess.CompletedPr
 
 
 def 读取_json输出(stdout: str) -> dict[str, object]:
+    lines = [line.strip() for line in str(stdout).splitlines() if line.strip()]
+    for line in reversed(lines):
+        try:
+            return json.loads(line)
+        except json.JSONDecodeError:
+            continue
     return json.loads(stdout)
 
 

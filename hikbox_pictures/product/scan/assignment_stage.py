@@ -281,8 +281,10 @@ class AssignmentStageService:
             conn.close()
 
         faces: list[dict[str, object]] = []
-        calculator = embedding_calculator or _build_default_embedding_calculator(param_snapshot=param_snapshot)
+        calculator = embedding_calculator
         for row in rows:
+            if calculator is None:
+                calculator = _build_default_embedding_calculator(param_snapshot=param_snapshot)
             observation_id = int(row[0])
             photo_asset_id = int(row[1])
             aligned_relpath = str(row[2])

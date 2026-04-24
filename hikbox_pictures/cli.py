@@ -9,8 +9,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import uvicorn
-
 from hikbox_pictures.product.config import WorkspaceLayout, initialize_workspace
 from hikbox_pictures.product.export import (
     ExportRunNotFoundError,
@@ -96,6 +94,30 @@ def _print_success(args: argparse.Namespace, data: dict[str, Any]) -> None:
         print(f"{key}: {value_text}")
 
 
+def _print_scan_runtime_stats(args: argparse.Namespace, run_result: Any | None) -> None:
+    if run_result is None or getattr(args, "quiet", False) or getattr(args, "json", False):
+        return
+    fields = [
+        ("new_face_count", getattr(run_result, "new_face_count", None)),
+        ("anchor_candidate_face_count", getattr(run_result, "anchor_candidate_face_count", None)),
+        ("anchor_attached_face_count", getattr(run_result, "anchor_attached_face_count", None)),
+        ("anchor_missed_face_count", getattr(run_result, "anchor_missed_face_count", None)),
+        ("anchor_missed_by_person", getattr(run_result, "anchor_missed_by_person", None)),
+        ("local_rebuild_count", getattr(run_result, "local_rebuild_count", None)),
+        ("fallback_reason", getattr(run_result, "fallback_reason", None)),
+    ]
+    if not any(value is not None for _, value in fields):
+        return
+    for key, value in fields:
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            value_text = json.dumps(value, ensure_ascii=False)
+        else:
+            value_text = str(value)
+        print(f"{key}: {value_text}")
+
+
 def _print_error(args: argparse.Namespace | None, *, code: str, message: str, extra: dict[str, Any] | None = None) -> None:
     payload = {"ok": False, "error": {"code": code, "message": message}}
     if extra:
@@ -150,7 +172,11 @@ def _cmd_scan_start_or_resume(args: argparse.Namespace) -> int:
         run_kind=args.run_kind,
         triggered_by="manual_cli",
     )
-    session = services.scan_session_repo.get_session(result.session_id)
+    session, run_result = _run_scan_session_until_terminal(
+        services,
+        session_id=result.session_id,
+        should_execute=result.should_execute,
+    )
     _print_success(
         args,
         {
@@ -159,6 +185,7 @@ def _cmd_scan_start_or_resume(args: argparse.Namespace) -> int:
             "status": session.status,
         },
     )
+    _print_scan_runtime_stats(args, run_result)
     return EXIT_CODE_SUCCESS
 
 
@@ -170,9 +197,11 @@ def _cmd_scan_start_new(args: argparse.Namespace) -> int:
         run_kind=args.run_kind,
         triggered_by="manual_cli",
     )
-    session = services.scan_session_repo.get_session(result.session_id)
-    if session.status == "pending":
-        session = services.scan_session_repo.update_status(result.session_id, status="running")
+    session, run_result = _run_scan_session_until_terminal(
+        services,
+        session_id=result.session_id,
+        should_execute=result.should_execute,
+    )
     _print_success(
         args,
         {
@@ -181,6 +210,7 @@ def _cmd_scan_start_new(args: argparse.Namespace) -> int:
             "status": session.status,
         },
     )
+    _print_scan_runtime_stats(args, run_result)
     return EXIT_CODE_SUCCESS
 
 
@@ -223,6 +253,7 @@ def _cmd_scan_list(args: argparse.Namespace) -> int:
 
 def _cmd_serve_start(args: argparse.Namespace) -> int:
     from hikbox_pictures.web.app import create_app
+    import uvicorn
 
     workspace = _workspace_root(args.workspace)
     layout = _require_workspace_initialized(workspace)
@@ -532,6 +563,24 @@ def _cmd_export_run_status(args: argparse.Namespace) -> int:
     return EXIT_CODE_SUCCESS
 
 
+def _cmd_export_execute(args: argparse.Namespace) -> int:
+    workspace = _workspace_root(args.workspace)
+    layout = _require_workspace_initialized(workspace)
+    services = build_service_container(layout)
+    result = services.export_runs.execute_run(args.export_run_id)
+    _print_success(
+        args,
+        {
+            "export_run_id": result.export_run_id,
+            "status": result.status,
+            "exported_count": result.exported_count,
+            "skipped_exists_count": result.skipped_exists_count,
+            "failed_count": result.failed_count,
+        },
+    )
+    return EXIT_CODE_SUCCESS
+
+
 def _cmd_export_run_list(args: argparse.Namespace) -> int:
     workspace = _workspace_root(args.workspace)
     layout = _require_workspace_initialized(workspace)
@@ -668,6 +717,20 @@ def _serialize_scan_session_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
     }
+
+
+def _execute_scan_session(services: Any, *, session_id: int):
+    return services.scan_execution.run_session(scan_session_id=session_id)
+
+
+def _run_scan_session_until_terminal(services: Any, *, session_id: int, should_execute: bool):
+    session = services.scan_session_repo.get_session(session_id)
+    if not should_execute:
+        return session, None
+    if session.status == "pending":
+        session = services.scan_session_repo.update_status(session_id, status="running")
+    run_result = _execute_scan_session(services, session_id=session_id)
+    return services.scan_session_repo.get_session(session_id), run_result
 
 
 def _get_scan_session_status(library_db: Path, *, latest: bool, session_id: int | None) -> dict[str, Any]:
@@ -975,6 +1038,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_export_run_status.add_argument("export_run_id", type=int, help="导出运行 id")
     p_export_run_status.add_argument("--workspace", required=True, help="workspace 根目录")
     p_export_run_status.set_defaults(func=_cmd_export_run_status)
+
+    p_export_execute = export_sub.add_parser("execute", help="执行导出运行")
+    p_export_execute.add_argument("export_run_id", type=int, help="导出运行 id")
+    p_export_execute.add_argument("--workspace", required=True, help="workspace 根目录")
+    p_export_execute.set_defaults(func=_cmd_export_execute)
 
     p_export_run_list = export_sub.add_parser("run-list", help="列出导出运行")
     p_export_run_list.add_argument("--template-id", type=int, help="模板 id")
