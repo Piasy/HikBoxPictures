@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}人物列表{% endblock %}
+{% block body %}
+<main>
+  <section data-testid="named-people-section">
+    <h1>人物列表</h1>
+    <div>{{ named_people|length }}</div>
+    {% for person in named_people %}
+    <article data-person-id="{{ person.id }}">{{ person.display_name or person.person_uuid }}</article>
+    {% endfor %}
+  </section>
+  <section data-testid="anonymous-people-section">
+    <div>{{ anonymous_people|length }}</div>
+    {% for person in anonymous_people %}
+    <article data-person-id="{{ person.id }}">{{ person.person_uuid }}</article>
+    {% endfor %}
+  </section>
+  <button data-testid="merge-selected-action" data-enabled="true">合并选中人物</button>
+  <button data-testid="undo-last-merge-action" data-enabled="true">撤销最近一次合并</button>
+</main>
+{% endblock %}

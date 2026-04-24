@@ -24,4 +24,5 @@ else
   export RUN_PLAYWRIGHT_VISUAL
 fi
 
+# 默认全量回归会包含 tests/integration/test_real_data_e2e_face_input.py 这条真实样本全链路用例。
 "${VENV_PYTHON}" -m pytest -q -ra "$@"

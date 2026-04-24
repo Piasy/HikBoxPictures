@@ -271,17 +271,17 @@ def attach_noise_faces_to_person_consensus(
         person_candidates.sort(key=lambda item: item[0])
         return person_candidates
 
-    def evaluate_pass(candidates: list[tuple[float, float, int]]) -> tuple[bool, int]:
+    def evaluate_pass(candidates: list[tuple[float, float, int]]) -> tuple[bool, int, float | None, float | None]:
         if not candidates:
-            return False, -1
+            return False, -1, None, None
         best_dist, best_sim, best_label = candidates[0]
         second_sim = candidates[1][1] if len(candidates) >= 2 else -1.0
         margin = best_sim - second_sim
         if best_dist > float(distance_threshold):
-            return False, -1
+            return False, -1, None, None
         if margin < float(margin_threshold):
-            return False, -1
-        return True, int(best_label)
+            return False, -1, None, None
+        return True, int(best_label), float(best_sim), float(margin)
 
     for idx, (face, label) in enumerate(zip(faces, labels, strict=True)):
         if int(label) != -1:
@@ -314,19 +314,25 @@ def attach_noise_faces_to_person_consensus(
             use_flip_supplement=True,
         )
 
-        main_pass, main_label = evaluate_pass(main_candidates)
-        supplement_pass, supplement_label = evaluate_pass(supplement_candidates)
+        main_pass, main_label, main_confidence, main_margin = evaluate_pass(main_candidates)
+        supplement_pass, supplement_label, supplement_confidence, supplement_margin = evaluate_pass(supplement_candidates)
 
         if main_pass:
             final_label = main_label
+            final_confidence = main_confidence
+            final_margin = main_margin
         elif supplement_pass:
             final_label = supplement_label
+            final_confidence = supplement_confidence
+            final_margin = supplement_margin
         else:
             continue
 
         updated_labels[idx] = final_label
         # 这里的回挂置信不是 HDBSCAN 原生 probability，review 中留空避免误解。
         updated_probabilities[idx] = None
+        faces[idx]["assignment_confidence"] = None if final_confidence is None else float(final_confidence)
+        faces[idx]["assignment_margin"] = None if final_margin is None else float(final_margin)
         attached_count += 1
 
     return updated_labels, updated_probabilities, attached_count

@@ -406,6 +406,25 @@ class DetectStageRepository:
             conn.close()
 
     def _replace_face_observations(self, conn: sqlite3.Connection, *, photo_asset_id: int, faces: list[object]) -> None:
+        existing_rows = [
+            {
+                "face_index": int(row[0]),
+                "pending_reassign": int(row[1]),
+                "bbox": [float(row[2]), float(row[3]), float(row[4]), float(row[5])],
+            }
+            for row in conn.execute(
+                """
+                SELECT face_index, pending_reassign, bbox_x1, bbox_y1, bbox_x2, bbox_y2
+                FROM face_observation
+                WHERE photo_asset_id=? AND active=1
+                ORDER BY face_index ASC
+                """,
+                (photo_asset_id,),
+            ).fetchall()
+        ]
+        matched_existing_by_input_index = _match_existing_faces_to_inputs(existing_rows=existing_rows, faces=faces)
+        next_face_index = 0 if not existing_rows else max(int(row["face_index"]) for row in existing_rows) + 1
+
         conn.execute(
             """
             UPDATE face_observation
@@ -429,6 +448,11 @@ class DetectStageRepository:
             area_ratio = float(face_obj["face_area_ratio"])
             magface_quality = float(face_obj.get("magface_quality", 1.0 + area_ratio + det_conf))
             quality_score = float(face_obj.get("quality_score", magface_quality * max(0.05, det_conf)))
+            matched_existing = matched_existing_by_input_index.get(face_index)
+            stable_face_index = next_face_index if matched_existing is None else int(matched_existing["face_index"])
+            keep_pending_reassign = 0 if matched_existing is None else int(matched_existing["pending_reassign"])
+            if matched_existing is None:
+                next_face_index += 1
 
             conn.execute(
                 """
@@ -437,7 +461,7 @@ class DetectStageRepository:
                   bbox_x1, bbox_y1, bbox_x2, bbox_y2,
                   detector_confidence, face_area_ratio, magface_quality, quality_score,
                   active, inactive_reason, pending_reassign, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NULL, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 ON CONFLICT(photo_asset_id, face_index)
                 DO UPDATE SET
                   crop_relpath=excluded.crop_relpath,
@@ -453,12 +477,12 @@ class DetectStageRepository:
                   quality_score=excluded.quality_score,
                   active=1,
                   inactive_reason=NULL,
-                  pending_reassign=0,
+                  pending_reassign=excluded.pending_reassign,
                   updated_at=CURRENT_TIMESTAMP
                 """,
                 (
                     photo_asset_id,
-                    face_index,
+                    stable_face_index,
                     str(face_obj["crop_relpath"]),
                     str(face_obj["aligned_relpath"]),
                     str(face_obj["context_relpath"]),
@@ -470,8 +494,59 @@ class DetectStageRepository:
                     area_ratio,
                     magface_quality,
                     quality_score,
+                    keep_pending_reassign,
                 ),
             )
+
+
+def _match_existing_faces_to_inputs(
+    *,
+    existing_rows: list[dict[str, object]],
+    faces: list[object],
+) -> dict[int, dict[str, object]]:
+    scored_pairs: list[tuple[float, int, int]] = []
+    for input_index, face_obj in enumerate(faces):
+        if not isinstance(face_obj, dict):
+            continue
+        bbox_obj = face_obj.get("bbox")
+        if not isinstance(bbox_obj, list) or len(bbox_obj) != 4:
+            continue
+        input_bbox = [float(value) for value in bbox_obj]
+        for existing_index, existing_row in enumerate(existing_rows):
+            score = _bbox_iou(existing_row["bbox"], input_bbox)
+            if score <= 0.0:
+                continue
+            scored_pairs.append((score, existing_index, input_index))
+
+    scored_pairs.sort(key=lambda item: (-float(item[0]), int(existing_rows[item[1]]["face_index"]), int(item[2])))
+    matched_existing_indices: set[int] = set()
+    matched_input_indices: set[int] = set()
+    matched_existing_by_input_index: dict[int, dict[str, object]] = {}
+    for _score, existing_index, input_index in scored_pairs:
+        if existing_index in matched_existing_indices or input_index in matched_input_indices:
+            continue
+        matched_existing_indices.add(existing_index)
+        matched_input_indices.add(input_index)
+        matched_existing_by_input_index[int(input_index)] = existing_rows[existing_index]
+    return matched_existing_by_input_index
+
+
+def _bbox_iou(left: list[float], right: list[float]) -> float:
+    inter_x1 = max(float(left[0]), float(right[0]))
+    inter_y1 = max(float(left[1]), float(right[1]))
+    inter_x2 = min(float(left[2]), float(right[2]))
+    inter_y2 = min(float(left[3]), float(right[3]))
+    inter_width = max(0.0, inter_x2 - inter_x1)
+    inter_height = max(0.0, inter_y2 - inter_y1)
+    inter_area = inter_width * inter_height
+    if inter_area <= 0.0:
+        return 0.0
+    left_area = max(0.0, float(left[2]) - float(left[0])) * max(0.0, float(left[3]) - float(left[1]))
+    right_area = max(0.0, float(right[2]) - float(right[0])) * max(0.0, float(right[3]) - float(right[1]))
+    union_area = left_area + right_area - inter_area
+    if union_area <= 0.0:
+        return 0.0
+    return inter_area / union_area
 
 
 def _split_items_evenly(items: list[int], workers: int) -> list[list[int]]:

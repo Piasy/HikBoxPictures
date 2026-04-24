@@ -27,6 +27,7 @@ class ScanSessionRecord:
 class ScanStartResult:
     session_id: int
     resumed: bool
+    should_execute: bool
 
 
 @dataclass(frozen=True)

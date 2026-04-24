@@ -14,6 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from hikbox_pictures.product.audit.service import AuditSamplingService
 from hikbox_pictures.product.db.connection import connect_sqlite
 from hikbox_pictures.product.engine.magface_embedder import MagFaceEmbedder
 from hikbox_pictures.product.engine.param_snapshot import build_frozen_v5_param_snapshot
@@ -89,6 +90,7 @@ class AssignmentStageService:
         self._embedding_db_path = Path(embedding_db_path)
         self._output_root = Path(output_root)
         self._cluster_repo = ClusterRepository(self._library_db_path)
+        self._audit_service = AuditSamplingService(self._library_db_path)
 
     def start_assignment_run(
         self,
@@ -279,8 +281,10 @@ class AssignmentStageService:
             conn.close()
 
         faces: list[dict[str, object]] = []
-        calculator = embedding_calculator or _build_default_embedding_calculator(param_snapshot=param_snapshot)
+        calculator = embedding_calculator
         for row in rows:
+            if calculator is None:
+                calculator = _build_default_embedding_calculator(param_snapshot=param_snapshot)
             observation_id = int(row[0])
             photo_asset_id = int(row[1])
             aligned_relpath = str(row[2])
@@ -537,14 +541,19 @@ class AssignmentStageService:
                 INSERT INTO person_face_assignment(
                   person_id, face_observation_id, assignment_run_id, assignment_source,
                   active, confidence, margin, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 1, ?, NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
                 (
                     person_id,
                     face_observation_id,
                     int(assignment_run_id),
                     source,
-                    None if row.get("probability") is None else float(row["probability"]),
+                    (
+                        None
+                        if row.get("confidence") is None and row.get("probability") is None
+                        else float(row["confidence"] if row.get("confidence") is not None else row["probability"])
+                    ),
+                    None if row.get("margin") is None else float(row["margin"]),
                 ),
             )
             count += 1
@@ -695,6 +704,7 @@ class AssignmentStageService:
                 conn=conn,
                 rebuild_scope=rebuild_scope,
             )
+            self._audit_service.persist_assignment_run(assignment_run_id, conn=conn)
             self._mark_session_sources_stage_done(scan_session_id=scan_session_id, conn=conn)
             self._complete_assignment_run(assignment_run_id=assignment_run_id, status="completed", conn=conn)
             conn.commit()
@@ -755,6 +765,7 @@ class AssignmentStageService:
                         fallback_reason=fallback_reason,
                     ),
                 )
+            self._audit_service.persist_assignment_run(assignment_run_id, conn=conn)
             self._mark_session_sources_stage_done(scan_session_id=scan_session_id, conn=conn)
             self._complete_assignment_run(assignment_run_id=assignment_run_id, status="completed", conn=conn)
             conn.commit()
@@ -947,7 +958,24 @@ def _resolve_magface_checkpoint(*, param_snapshot: dict[str, object]) -> Path:
     env_path = str(os.environ.get(MAGFACE_CHECKPOINT_ENV, "")).strip()
     if env_path:
         return Path(env_path).expanduser().resolve()
+    discovered = _discover_magface_checkpoint()
+    if discovered is not None:
+        return discovered
     return MAGFACE_CHECKPOINT_DEFAULT.expanduser().resolve()
+
+
+def _discover_magface_checkpoint() -> Path | None:
+    candidate_roots: list[Path] = [Path.cwd(), Path(__file__).resolve().parent]
+    seen: set[Path] = set()
+    for base in candidate_roots:
+        for candidate in [base, *base.parents]:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            checkpoint_path = candidate / ".cache" / "magface" / "magface_iresnet100_ms1mv2.pth"
+            if checkpoint_path.exists():
+                return checkpoint_path.resolve()
+    return None
 
 
 def _build_default_embedding_calculator(*, param_snapshot: dict[str, object]):

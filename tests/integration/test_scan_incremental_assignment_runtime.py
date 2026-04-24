@@ -930,7 +930,18 @@ def test_scan_incremental_abort_during_assignment_interrupts_and_rolls_back(tmp_
     original_attach_face = IncrementalAssignmentService._attach_face
     aborted_once = {"done": False}
 
-    def abort_after_first_attach(self, *, conn, face_observation_id, person_id, cluster_id, assignment_run_id, face_quality_by_id):
+    def abort_after_first_attach(
+        self,
+        *,
+        conn,
+        face_observation_id,
+        person_id,
+        cluster_id,
+        assignment_run_id,
+        face_quality_by_id,
+        confidence=None,
+        margin=None,
+    ):
         original_attach_face(
             self,
             conn=conn,
@@ -939,6 +950,8 @@ def test_scan_incremental_abort_during_assignment_interrupts_and_rolls_back(tmp_
             cluster_id=cluster_id,
             assignment_run_id=assignment_run_id,
             face_quality_by_id=face_quality_by_id,
+            confidence=confidence,
+            margin=margin,
         )
         if not aborted_once["done"]:
             ScanSessionRepository(layout.library_db).update_status(

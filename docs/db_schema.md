@@ -486,6 +486,10 @@
 | `before_snapshot_json` | `TEXT` | `NOT NULL` | 合并前快照 |
 | `after_snapshot_json` | `TEXT` | `NOT NULL` | 合并后快照 |
 
+索引：
+
+- `idx_merge_operation_person_delta_merge_operation(merge_operation_id)`
+
 #### `merge_operation_assignment_delta`
 
 | 字段 | 类型 | 约束 | 说明 |
@@ -495,6 +499,10 @@
 | `face_observation_id` | `INTEGER` | `NOT NULL REFERENCES face_observation(id)` | observation |
 | `before_assignment_json` | `TEXT` | `NOT NULL` | 合并前归属快照 |
 | `after_assignment_json` | `TEXT` | `NOT NULL` | 合并后归属快照 |
+
+索引：
+
+- `idx_merge_operation_assignment_delta_merge_operation(merge_operation_id)`
 
 #### `merge_operation_exclusion_delta`
 
@@ -506,6 +514,10 @@
 | `face_observation_id` | `INTEGER` | `NOT NULL REFERENCES face_observation(id)` | observation |
 | `before_exclusion_json` | `TEXT` | `NOT NULL` | 合并前排除快照 |
 | `after_exclusion_json` | `TEXT` | `NOT NULL` | 合并后排除快照 |
+
+索引：
+
+- `idx_merge_operation_exclusion_delta_merge_operation(merge_operation_id)`
 
 规则：
 
@@ -602,6 +614,7 @@
 
 - `idx_ops_event_type_created(event_type, created_at)`
 - `idx_ops_event_scan(scan_session_id)`
+- `idx_ops_event_export_run(export_run_id)`
 
 #### `scan_audit_item`
 
