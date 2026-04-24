@@ -197,6 +197,15 @@ def test_stream_for_detect_faces_respects_force_flag_and_latest_first(tmp_path: 
     assert list(engine.stream_assets_for_detect(force=True)) == [newer.id, older.id]
 
 
+def test_add_asset_does_not_store_visibility_state(tmp_path: Path) -> None:
+    backend = FakeBackend({})
+    engine = ImmichLikeFaceEngine(backend=backend, min_faces=1, max_distance=0.5)
+
+    asset = engine.add_asset(asset_id="asset-no-visibility", image_path=tmp_path / "asset-no-visibility.jpg")
+
+    assert not hasattr(asset, "visibility")
+
+
 def test_process_pending_recognition_queue_assigns_similar_faces_to_one_person(tmp_path: Path) -> None:
     image_paths = [tmp_path / f"asset-{index}.jpg" for index in range(3)]
     for image_path in image_paths:

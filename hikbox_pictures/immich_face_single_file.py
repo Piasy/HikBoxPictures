@@ -78,7 +78,6 @@ class DetectedFace:
 class AssetRecord:
     id: str
     image_path: Path
-    visibility: str = "timeline"
     file_created_at: datetime = field(default_factory=_utcnow)
     faces_recognized_at: datetime | None = None
     face_ids: list[str] = field(default_factory=list)
@@ -228,13 +227,11 @@ class ImmichLikeFaceEngine:
         *,
         asset_id: str,
         image_path: Path,
-        visibility: str = "timeline",
         file_created_at: datetime | None = None,
     ) -> AssetRecord:
         asset = AssetRecord(
             id=str(asset_id),
             image_path=Path(image_path),
-            visibility=str(visibility),
             file_created_at=file_created_at or _utcnow(),
         )
         self.assets[asset.id] = asset
@@ -309,8 +306,7 @@ class ImmichLikeFaceEngine:
         matched_face_ids = [item.face_id for item in matches]
         if self.min_faces > 1 and len(matches) <= 1:
             return RecognizeFaceResult(status="skipped", matched_face_ids=matched_face_ids)
-        asset = self.assets[face.asset_id]
-        is_core = len(matches) >= self.min_faces and asset.visibility == "timeline"
+        is_core = len(matches) >= self.min_faces
         if not is_core and not deferred:
             return RecognizeFaceResult(status="deferred", matched_face_ids=matched_face_ids)
         person_id = next((self.faces[item.face_id].person_id for item in matches if self.faces[item.face_id].person_id), None)
