@@ -1,6 +1,6 @@
 # 数据库 Schema 说明（当前已实现）
 
-本文档只描述当前仓库已经落地并经自动化验证的最小 schema 契约。截止目前，仅实现了 Slice A / Feature Slice 1「初始化工作区」。
+本文档只描述当前仓库已经落地并经自动化验证的最小 schema 契约。截止目前，已实现 Slice A / Feature Slice 1「初始化工作区」和 Feature Slice 2「登记和列出源目录」。
 
 ## 1. 存储布局
 
@@ -75,10 +75,30 @@ CREATE TABLE library_sources (
 - `active`：`1` 表示 active，`0` 表示 inactive。
 - `created_at`：带 `Z` 后缀的 ISO-8601 UTC 字符串，例如 `2026-04-24T00:00:00Z`。
 
-说明：
+运行时行为：
 
-- 当前 slice 只负责在初始化时创建该表和约束，不负责写入 source 数据。
-- `path TEXT NOT NULL UNIQUE` 是后续 `source add` 的全局唯一约束基础。
+- `hikbox source add --workspace <path> <source-path> --label <label>` 会向该表插入一条记录。
+- `path` 写入解析后的源目录绝对路径，并受 `UNIQUE` 约束保护；重复登记同一路径必须失败，且不会覆盖原 `label`。
+- `label` 写入用户传入的标签；空白标签不会入库。
+- `active` 当前固定写入 `1`，由 `hikbox source list` 映射为 JSON 布尔值 `true`。
+- `created_at` 写入带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
+- `hikbox source list --workspace <path>` 按 `id ASC` 读取该表，并输出如下 JSON 结构：
+
+```json
+{
+  "sources": [
+    {
+      "id": 1,
+      "label": "family",
+      "path": "/absolute/path/to/source",
+      "active": true,
+      "created_at": "2026-04-24T00:00:00Z"
+    }
+  ]
+}
+```
+
+没有任何 source 时，stdout 精确输出 `{"sources": []}`。
 
 ## 4. `embedding.db`
 
@@ -107,10 +127,22 @@ CREATE TABLE schema_meta (
 
 初始化失败时不会为了记录失败额外创建 `external_root/logs` 半成品。
 
-## 6. 未在本文承诺的内容
+## 6. source 操作日志
+
+`hikbox source add` 成功后，`external_root/logs/source.log.jsonl` 会追加一条 JSON Lines 日志。当前最小字段包括：
+
+- `timestamp`
+- `command`
+- `workspace`
+- `source_path`
+- `label`
+- `result`
+
+当前实现只要求 `source add` 成功落盘日志；`source list` 成功通过 stdout JSON 暴露结果，失败则通过 stderr 输出可读错误。
+
+## 7. 未在本文承诺的内容
 
 以下内容尚未在当前实现中落地，因此不属于本文档承诺范围：
 
-- `source add/list` 的运行时写入行为
 - 扫描、产物生成、人物归属、WebUI、导出
 - 任何 `schema_version > 1` 的 migration 规则

@@ -129,7 +129,7 @@ CREATE TABLE library_sources (
 
 ## Feature Slice 2: 登记和列出源目录
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 
