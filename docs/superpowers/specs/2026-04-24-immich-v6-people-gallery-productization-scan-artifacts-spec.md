@@ -20,7 +20,7 @@
 
 ## Feature Slice 1: 批次可恢复检测入库
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

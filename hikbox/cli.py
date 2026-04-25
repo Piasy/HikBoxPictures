@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from hikbox_pictures.product.scan import ScanStartError
+from hikbox_pictures.product.scan import start_scan
 from hikbox_pictures.product.sources import WorkspaceAccessError
 from hikbox_pictures.product.sources import add_source
 from hikbox_pictures.product.sources import list_sources
@@ -40,6 +42,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     source_list_parser = source_subparsers.add_parser("list", prog="hikbox source list")
     source_list_parser.add_argument("--workspace", required=True, help="工作区目录")
+
+    scan_parser = subparsers.add_parser("scan", prog="hikbox scan")
+    scan_subparsers = scan_parser.add_subparsers(dest="scan_command")
+    scan_subparsers.required = True
+
+    scan_start_parser = scan_subparsers.add_parser("start", prog="hikbox scan start")
+    scan_start_parser.add_argument("--workspace", required=True, help="工作区目录")
+    scan_start_parser.add_argument(
+        "--batch-size",
+        default=200,
+        type=_positive_int,
+        help="每批处理的照片数量，必须为正整数，默认 200。",
+    )
 
     return parser
 
@@ -82,6 +97,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(json.dumps(payload, ensure_ascii=False))
         return 0
 
+    if args.command == "scan" and args.scan_command == "start":
+        try:
+            start_scan(
+                workspace=Path(args.workspace),
+                batch_size=int(args.batch_size),
+                command_args=list(argv) if argv is not None else sys.argv[1:],
+            )
+        except (WorkspaceAccessError, ScanStartError) as exc:
+            print(f"scan start 失败: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     parser.print_usage(sys.stderr)
     print("参数错误: 不支持的命令。", file=sys.stderr)
     return 2
+
+
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--batch-size 必须是正整数。") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("--batch-size 必须是正整数。")
+    return value

@@ -26,14 +26,14 @@
 
 ### Slice A：工作区与源目录
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-workspace-source-spec.md`
 - Scope: 提供从零建库的本地 workspace/external_root 基础设施；公共入口是 `hikbox init`、`hikbox source add`、`hikbox source list`。
 - Acceptance summary: 用户能通过 CLI 初始化真实工作区、创建 `config.json`/`library.db`/`embedding.db`/artifact/log 目录，登记一个或多个真实 source，并通过 JSON 输出稳定列出 source。
 
 ### Slice B：可恢复扫描与人脸产物
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-scan-artifacts-spec.md`
 - Scope: 在 Slice A 基础上扫描源目录照片，生成 asset、metadata、face observation、main embedding、crop/context，并支持批次级恢复；公共入口是 `hikbox scan start --workspace <path> [--batch-size <n>]`。
 - Acceptance summary: 使用 Slice 0 定义的固定入库测试图库以 `--batch-size 10` 扫描后，可在 DB、embedding 库、产物目录和日志中观察完整结果；信号中断后重跑不重复处理已提交批次。

@@ -21,6 +21,8 @@ class WorkspaceContext:
     workspace_path: Path
     external_root_path: Path
     library_db_path: Path
+    embedding_db_path: Path
+    model_root_path: Path
 
 
 def add_source(
@@ -115,8 +117,9 @@ def load_workspace_context(workspace: Path) -> WorkspaceContext:
     hikbox_dir = workspace_path / ".hikbox"
     config_path = hikbox_dir / "config.json"
     library_db_path = hikbox_dir / "library.db"
+    embedding_db_path = hikbox_dir / "embedding.db"
 
-    if not config_path.is_file() or not library_db_path.is_file():
+    if not config_path.is_file() or not library_db_path.is_file() or not embedding_db_path.is_file():
         raise WorkspaceAccessError(
             f"工作区未初始化或缺少必要文件：{workspace_path}"
         )
@@ -134,6 +137,8 @@ def load_workspace_context(workspace: Path) -> WorkspaceContext:
         workspace_path=workspace_path,
         external_root_path=Path(external_root),
         library_db_path=library_db_path,
+        embedding_db_path=embedding_db_path,
+        model_root_path=hikbox_dir / "models" / "insightface",
     )
 
 
