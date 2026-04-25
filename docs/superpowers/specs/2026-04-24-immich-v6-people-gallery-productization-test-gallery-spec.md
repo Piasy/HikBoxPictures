@@ -16,7 +16,7 @@
 
 ## Feature Slice 1: 入库真实验收小图库
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

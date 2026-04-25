@@ -19,7 +19,7 @@
 
 ### Slice 0：真实验收小图库生成
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-test-gallery-spec.md`
 - Scope: 生成并固化一套用于扫描、人物归属、WebUI、合并、排除和导出验收的真实小图库、manifest 和校验入口。
 - Acceptance summary: 固定测试图库和 `manifest.json` 直接入库，具体照片数量、类别矩阵和验收规则只在 Slice 0 子 spec 中定义；manifest 明确 expected_person_groups 和 expected_exports，且不得作为产品逻辑输入。
