@@ -15,7 +15,7 @@
 
 ## Split Specs
 
-当前已写入并进入 review gate 的子 spec 包括 Slice 0、Slice A 和 Slice B。Slice C-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
+当前已写入并进入 review gate 的子 spec 包括 Slice 0、Slice A、Slice B 和 Slice C。Slice D-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
 
 ### Slice 0：真实验收小图库生成
 
@@ -38,15 +38,16 @@
 - Scope: 在 Slice A 基础上扫描源目录照片，生成 asset、metadata、face observation、main embedding、crop/context，并支持批次级恢复；公共入口是 `hikbox scan start --workspace <path> [--batch-size <n>]`。
 - Acceptance summary: 使用 Slice 0 定义的固定入库测试图库以 `--batch-size 10` 扫描后，可在 DB、embedding 库、产物目录和日志中观察完整结果；信号中断后重跑不重复处理已提交批次。
 
+### Slice C：v6 在线人物归属
+
+- [ ] Implementation status: Not done
+- Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-online-assignment-spec.md`
+- Scope: 在扫描入库后按 Immich v6 在线语义创建匿名人物和 active assignment；公共入口仍是 `hikbox scan start --workspace <path> [--batch-size <n>]`。
+- Acceptance summary: manifest 期望成组的人物形成匿名 person；低于阈值的 face 不进入人物库；重复扫描保持 person/assignment 幂等，并记录 `immich_v6_online_v1` 参数快照和归属摘要。
+
 ## Candidate Future Split Specs
 
 以下候选拆分只记录产品化路线，不代表已批准或可实现的 spec。每一项都必须单独补写 `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-<slice>-spec.md`，包含完整行为、验收标准和自动化验证，并通过 reviewer 后，才能移动到 `Split Specs`。候选项不使用 implementation checkbox。
-
-### Candidate C：v6 在线人物归属
-
-- Planned spec path: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-online-assignment-spec.md`
-- Scope: 在扫描入库后按 Immich v6 在线语义创建匿名人物和 active assignment；公共入口仍是 `hikbox scan start --workspace <path>`。
-- Acceptance summary: manifest 期望成组的人物形成匿名 person；低于阈值的 face 不进入人物库；重复扫描保持 person/assignment 幂等。
 
 ### Candidate D：人物库 WebUI 浏览与命名
 
