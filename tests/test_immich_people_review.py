@@ -211,12 +211,14 @@ def test_write_people_summary_reuses_sqlite_people_across_new_directories(tmp_pa
         face_count = conn.execute("SELECT COUNT(*) FROM immich_people_face").fetchone()[0]
         person_count = conn.execute("SELECT COUNT(*) FROM immich_people_person").fetchone()[0]
         source_count = conn.execute("SELECT COUNT(*) FROM immich_people_source").fetchone()[0]
+        face_columns = {row[1] for row in conn.execute("PRAGMA table_info(immich_people_face)")}
     finally:
         conn.close()
     assert asset_count == 2
     assert face_count == 2
     assert person_count == 1
     assert source_count == 2
+    assert "source_type" not in face_columns
 
 
 def test_write_people_summary_generates_context_with_exif_orientation(tmp_path: Path) -> None:

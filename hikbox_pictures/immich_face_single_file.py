@@ -92,7 +92,6 @@ class FaceRecord:
     image_height: int
     embedding: np.ndarray
     score: float
-    source_type: str = "machine_learning"
     person_id: str | None = None
     created_at: datetime = field(default_factory=_utcnow)
 
@@ -251,9 +250,7 @@ class ImmichLikeFaceEngine:
         asset = self.assets[str(asset_id)]
         image_height, image_width, faces = self.backend.detect_faces(asset.image_path, min_score=self.min_score)
         existing_face_ids = list(asset.face_ids)
-        unmatched_ml_face_ids = {
-            face_id for face_id in existing_face_ids if self.faces[face_id].source_type == "machine_learning"
-        }
+        unmatched_face_ids = set(existing_face_ids)
         new_face_ids: list[str] = []
         matched_face_ids: list[str] = []
         for face in faces:
@@ -263,11 +260,9 @@ class ImmichLikeFaceEngine:
                 image_height=image_height,
                 new_box=face.bounding_box,
             )
-            if match_id and self.faces[match_id].source_type == "machine_learning":
-                unmatched_ml_face_ids.discard(match_id)
-                matched_face_ids.append(match_id)
-                continue
             if match_id:
+                unmatched_face_ids.discard(match_id)
+                matched_face_ids.append(match_id)
                 continue
             face_id = str(uuid.uuid4())
             face_record = FaceRecord(
@@ -284,7 +279,7 @@ class ImmichLikeFaceEngine:
             self.face_search.upsert(face_id, face_record.embedding)
             new_face_ids.append(face_id)
             self.pending_recognition_face_ids.append(face_id)
-        removed_face_ids = sorted(unmatched_ml_face_ids)
+        removed_face_ids = sorted(unmatched_face_ids)
         for face_id in removed_face_ids:
             self._remove_face(face_id)
         asset.faces_recognized_at = _utcnow()

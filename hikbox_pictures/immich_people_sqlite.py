@@ -13,7 +13,6 @@ from hikbox_pictures.immich_face_single_file import BoundingBox
 from hikbox_pictures.immich_face_single_file import FaceRecord
 from hikbox_pictures.immich_face_single_file import ImmichLikeFaceEngine
 from hikbox_pictures.immich_face_single_file import PersonRecord
-from hikbox_pictures.product.db.connection import connect_sqlite
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS immich_people_source (
@@ -50,7 +49,6 @@ CREATE TABLE IF NOT EXISTS immich_people_face (
   image_height INTEGER NOT NULL,
   embedding BLOB NOT NULL,
   score REAL NOT NULL,
-  source_type TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
 
@@ -73,12 +71,17 @@ def _parse_datetime(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def _connect_sqlite(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(db_path)
+
+
 class ImmichPeopleSqliteStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path).expanduser().resolve()
 
     def initialize(self) -> None:
-        conn = connect_sqlite(self.db_path)
+        conn = _connect_sqlite(self.db_path)
         try:
             conn.executescript(SCHEMA_SQL)
             conn.commit()
@@ -87,7 +90,7 @@ class ImmichPeopleSqliteStore:
 
     def load_into_engine(self, engine: ImmichLikeFaceEngine) -> None:
         self.initialize()
-        conn = connect_sqlite(self.db_path)
+        conn = _connect_sqlite(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
             for row in conn.execute(
@@ -131,7 +134,6 @@ class ImmichPeopleSqliteStore:
                   image_height,
                   embedding,
                   score,
-                  source_type,
                   created_at
                 FROM immich_people_face
                 ORDER BY created_at, id
@@ -151,7 +153,6 @@ class ImmichPeopleSqliteStore:
                     image_height=int(row["image_height"]),
                     embedding=embedding,
                     score=float(row["score"]),
-                    source_type=str(row["source_type"]),
                     person_id=str(row["person_id"]) if row["person_id"] is not None else None,
                     created_at=_parse_datetime(str(row["created_at"])),
                 )
@@ -175,7 +176,7 @@ class ImmichPeopleSqliteStore:
         asset_ids: list[str],
     ) -> None:
         self.initialize()
-        conn = connect_sqlite(self.db_path)
+        conn = _connect_sqlite(self.db_path)
         try:
             source_id = self._upsert_source(conn, source_root=input_root)
             now = _utcnow().isoformat()
@@ -231,10 +232,9 @@ class ImmichPeopleSqliteStore:
                           image_height,
                           embedding,
                           score,
-                          source_type,
                           created_at
                         )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             face.id,
@@ -248,7 +248,6 @@ class ImmichPeopleSqliteStore:
                             int(face.image_height),
                             np.asarray(face.embedding, dtype=np.float32).tobytes(),
                             float(face.score),
-                            str(face.source_type),
                             face.created_at.isoformat(),
                         ),
                     )

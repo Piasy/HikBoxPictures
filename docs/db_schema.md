@@ -735,7 +735,6 @@
 | `image_height` | `INTEGER` | `NOT NULL` | 原图高 |
 | `embedding` | `BLOB` | `NOT NULL` | 512 维 `float32` 向量 |
 | `score` | `REAL` | `NOT NULL` | 检测分数 |
-| `source_type` | `TEXT` | `NOT NULL` | 当前固定为 `machine_learning` |
 | `created_at` | `TEXT` | `NOT NULL` | 创建时间 |
 
 索引：
