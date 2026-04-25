@@ -69,7 +69,7 @@ CREATE TABLE library_sources (
 
 ## Feature Slice 1: 初始化工作区
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

@@ -33,6 +33,7 @@ dev = [
 ]
 
 [project.scripts]
+hikbox = "hikbox.cli:main"
 hikbox-pictures = "hikbox_pictures.cli:cli_entry"
 hikbox-face-review = "hikbox_pictures.face_review_pipeline:main"
 
