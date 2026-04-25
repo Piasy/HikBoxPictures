@@ -15,7 +15,14 @@
 
 ## Split Specs
 
-当前已写入并进入 review gate 的子 spec 包括 Slice A 和 Slice B。Slice 0 与 Slice C-G 属于后续候选拆分；Slice 0 是后续实现的第一步，必须先写出对应子 spec 并通过 review，再进入实现。
+当前已写入并进入 review gate 的子 spec 包括 Slice 0、Slice A 和 Slice B。Slice C-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
+
+### Slice 0：真实验收小图库生成
+
+- [ ] Implementation status: Not done
+- Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-test-gallery-spec.md`
+- Scope: 生成并固化一套用于扫描、人物归属、WebUI、合并、排除和导出验收的真实小图库、manifest 和校验入口。
+- Acceptance summary: 固定测试图库和 `manifest.json` 直接入库，具体照片数量、类别矩阵和验收规则只在 Slice 0 子 spec 中定义；manifest 明确 expected_person_groups 和 expected_exports，且不得作为产品逻辑输入。
 
 ### Slice A：工作区与源目录
 
@@ -29,17 +36,11 @@
 - [ ] Implementation status: Not done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-scan-artifacts-spec.md`
 - Scope: 在 Slice A 基础上扫描源目录照片，生成 asset、metadata、face observation、main embedding、crop/context，并支持批次级恢复；公共入口是 `hikbox scan start --workspace <path> [--batch-size <n>]`。
-- Acceptance summary: 至少 50 张真实小图库以 `--batch-size 10` 扫描后，可在 DB、embedding 库、产物目录和日志中观察完整结果；信号中断后重跑不重复处理已提交批次。
+- Acceptance summary: 使用 Slice 0 定义的固定入库测试图库以 `--batch-size 10` 扫描后，可在 DB、embedding 库、产物目录和日志中观察完整结果；信号中断后重跑不重复处理已提交批次。
 
 ## Candidate Future Split Specs
 
-以下候选拆分只记录产品化路线，不代表已批准或可实现的 spec。每一项都必须单独补写 `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-<slice>-spec.md`，包含完整行为、验收标准和自动化验证，并通过 reviewer 后，才能移动到 `Split Specs`。
-
-### Candidate Slice 0：真实验收小图库生成
-
-- Planned spec path: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-test-gallery-spec.md`
-- Scope: 生成并固化一套用于扫描、人物归属、WebUI 和导出验收的真实小图库与 manifest；可使用图像生成 agent 生成同一人物多张不同照片、不同人物合照、无脸/损坏/非支持后缀、HEIC/HEIF Live MOV 配对样本。
-- Acceptance summary: 小图库至少包含 50 张照片，覆盖多人物、多姿态、同一人物多图、不同人物合照、无脸/损坏/非支持后缀、Live MOV 正反例；manifest 明确 expected_person_groups 和 expected_exports，且不得作为实现逻辑输入。
+以下候选拆分只记录产品化路线，不代表已批准或可实现的 spec。每一项都必须单独补写 `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-<slice>-spec.md`，包含完整行为、验收标准和自动化验证，并通过 reviewer 后，才能移动到 `Split Specs`。候选项不使用 implementation checkbox。
 
 ### Candidate C：v6 在线人物归属
 
@@ -83,14 +84,14 @@
 
 ## 验收集 Manifest Contract
 
-后续端到端验收使用固定真实小图库和人工标注 manifest。测试图库生成会作为独立子 spec 管理；在该子 spec 写出前，Slice B 可先引用以下共同契约。manifest 是验收输入契约，至少包含：
+后续端到端验收使用 Slice 0 定义的固定入库真实小图库和人工标注 manifest。测试图库的照片数量、类别矩阵、文件细节和 fixture 验收规则只在 `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-test-gallery-spec.md` 中定义；其它子 spec 只引用该共同基线，不复述图库细节。
+
+manifest 是验收输入契约，包含：
 
 - `people`：人物标签、期望显示名、是否期望扫描后自动形成匿名人物。
 - `assets`：照片文件名、拍摄月份、应包含的人物标签、是否存在 Live MOV 配对。
 - `expected_person_groups`：扫描后哪些照片或 face 应归到同一个人物标签。
 - `expected_exports`：模板选择哪些人物时，哪些文件应导出到 `only/YYYY-MM` 或 `group/YYYY-MM`。
 - `tolerances`：允许不计入自动断言的边界照片或边界 face，避免真实模型偶发差异阻塞核心流程验收。
-
-测试图库基线要求：至少 50 张照片；至少 3 个期望自动成组人物；每个自动成组人物至少 8 张不同照片；至少 6 张包含两个或更多目标人物的合照；至少 3 张无脸或不应形成目标人物的图片；至少 1 组 HEIC/HEIF + 同目录隐藏 MOV Live Photo 正例；至少 1 组 JPG/PNG + 相似 MOV 反例；至少 1 个非支持后缀文件；至少 1 张损坏或不可解码图片。文件命名和 discover 排序必须稳定，便于通过正式 `--batch-size` 参数构造多批次恢复验收。
 
 manifest 不得作为实现逻辑的输入，只能作为测试断言数据。人物命名必须通过 WebUI 完成；测试可以先根据 `expected_person_groups` 在扫描结果中定位自动形成的匿名 person，再通过 Playwright 打开人物详情页提交命名表单。
