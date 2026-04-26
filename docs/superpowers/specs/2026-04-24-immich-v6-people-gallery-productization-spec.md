@@ -15,7 +15,7 @@
 
 ## Split Specs
 
-当前已写入并进入 review gate 的子 spec 包括 Slice 0、Slice A、Slice B、Slice C 和 Slice D。Slice E-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
+当前已写入并进入追踪的子 spec 包括 Slice 0、Slice A、Slice B、Slice C、Slice D 和 Slice E。Slice F-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
 
 ### Slice 0：真实验收小图库生成
 
@@ -54,15 +54,16 @@
 - Accepted concern (2026-04-26, code-quality review, Feature Slice 2 / AC-16): `idx_person_unique_active_display_name` 当前只约束原始 `display_name`，没有在数据库层直接表达“trim 后唯一”。Controller 接受该风险，因为本 slice 唯一公共写入口 `POST /people/{person_id}/name` 已先执行 trim 并做应用层重名校验；若后续新增其它命名写路径或批量修复脚本，应补充归一化唯一约束或等价迁移。
 - Accepted concern (2026-04-26, code-quality review, Feature Slice 2 / AC-16): PRG 成功反馈当前通过全局 cookie 传递 outcome，未绑定 `person_id`。Controller 接受该风险，因为当前 Cross-Slice Contract 已明确首版不保证多标签页一致性，当前单用户主路径行为符合 spec；若后续扩展多标签页或更复杂导航，应把反馈状态收敛到 `person_id` 或请求作用域。
 
+### Slice E：人物合并与最近一次撤销
+
+- [ ] Implementation status: Not done
+- Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-merge-undo-spec.md`
+- Scope: 在人物首页执行 two-person merge，并支持撤销最近一次仍可撤销的合并；公共入口是 WebUI/API。
+- Acceptance summary: two-person merge 后 loser 的 active assignment 真实迁移到 winner、loser 失效；后续新增 loser-like 样本继续归到 winner；若合并后尚未发生新的人物相关写入，则只允许撤销最近一次合并并恢复合并前可观察状态。
+
 ## Candidate Future Split Specs
 
 以下候选拆分只记录产品化路线，不代表已批准或可实现的 spec。每一项都必须单独补写 `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-<slice>-spec.md`，包含完整行为、验收标准和自动化验证，并通过 reviewer 后，才能移动到 `Split Specs`。候选项不使用 implementation checkbox。
-
-### Candidate E：人物合并与最近一次撤销
-
-- Planned spec path: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-merge-undo-spec.md`
-- Scope: 在人物首页批量合并人物，并支持撤销全局最近一次合并；公共入口是 WebUI/API。
-- Acceptance summary: 合并后 assignment 迁移到目标人物，源人物失效；撤销最近一次合并后人物和 assignment 恢复到合并前可观察状态。
 
 ### Candidate F：误归属排除
 

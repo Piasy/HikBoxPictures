@@ -1,4 +1,4 @@
-之前的一次推倒重来里，我过于相信 superpowers，写出来的 plan 我自己都基本没读，结果 codex 写了一坨屎（都是 mock/占位实现），我 reset 回去之后让他重做，他居然把 shit 分支的都 cherry-pick 过来了，把我都气笑了。
+第一次做的时候，我过于相信 superpowers，写出来的 plan 我自己都基本没读，结果 codex 写了一坨屎（都是 mock/占位实现），我 reset 回去之后让他重做，他居然把 shit 分支的都 cherry-pick 过来了，把我都气笑了。
 
 后来我改进了下 superpower，让他写 plan 阶段就 sub agent 写和 review，并特地强调不允许 mock/占位实现，结果连续干了一晚上（8h+），结果还是一坨屎，我让他复盘：
 - 严重：检测链路未接入真实检测模型与产物生成；聚类/质量门控/consensus/recall 未在产品主扫描链路执行；当前产品链路会给每张图补一条固定 face_observation（固定 bbox/质量），embedding 用路径 hash 伪造，归属用文件名正则 + 常量 similarity=0.90；
@@ -19,7 +19,14 @@
 后来我深度改进成了 LittlePower，实践过程中也有几点小发现：
 
 1. codex 发生 context compact 后，subagent 信息好像会丢失，导致 subagent 会泄露。
-2. gpt 5.4 写 spec（包括 review 和修订）感觉比 5.5 慢很多。
+2. gpt 5.4 写 spec（包括 review 和修订）感觉比 5.5 慢很多，老是纠结一些琐碎点。
+
+LittlePower 初步实践下来，效果满意，做出来的东西确实是可用的，关键指标，相同图库：
+
+- 重点人物 A: 827
+- 重点人物 B: 551
+
+和复刻原型结果基本一致。
 
 ---
 

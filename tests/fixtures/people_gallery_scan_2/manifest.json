@@ -1,0 +1,522 @@
+{
+  "assets": [
+    {
+      "capture_month": "2025-06",
+      "category": "single_target",
+      "checksum_sha256": "de706294972a75c5c67cfb21b17bc70704c79fcde6c3227ff1dd69bad88ccc57",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_alex"
+      ],
+      "file": "pg2_001_single_alex_11.jpg",
+      "id": "asset_201",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_alex"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-07",
+      "category": "single_target",
+      "checksum_sha256": "50092522382bd4e9fcd98e27aa3c9051f7a3436c2191944f518058bb41cb6b67",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_alex"
+      ],
+      "file": "pg2_002_single_alex_12.jpg",
+      "id": "asset_202",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_alex"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-08",
+      "category": "single_target",
+      "checksum_sha256": "266a2e90d3bb4bb7a50649bb4e470e8592c7e2283ad9fb6f24398b174b901d1f",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_alex"
+      ],
+      "file": "pg2_003_single_alex_13.jpg",
+      "id": "asset_203",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_alex"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-09",
+      "category": "single_target",
+      "checksum_sha256": "363811f9463a138e6162790ddc27f1d24a1ed3d0ad998480a1e00445aad1e0f9",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_alex"
+      ],
+      "file": "pg2_004_single_alex_14.jpg",
+      "id": "asset_204",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_alex"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-10",
+      "category": "single_target",
+      "checksum_sha256": "9136d229678a67cb5a7d78b1bb35729ff994c48c52143423768744ac347c35ed",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_alex"
+      ],
+      "file": "pg2_005_single_alex_15.jpg",
+      "id": "asset_205",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_alex"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-06",
+      "category": "single_target",
+      "checksum_sha256": "5f53163a162d155a280bf3709222b1d279ff16b188910c7c614903d699e44260",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_blair"
+      ],
+      "file": "pg2_006_single_blair_11.jpg",
+      "id": "asset_206",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_blair"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-07",
+      "category": "single_target",
+      "checksum_sha256": "0808006ad71885f5a54fb2d66da9ca6522cf3aaf31cce85ac00829261de560db",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_blair"
+      ],
+      "file": "pg2_007_single_blair_12.jpg",
+      "id": "asset_207",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_blair"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-08",
+      "category": "single_target",
+      "checksum_sha256": "58a2a93ca83f951177dc9dbb7017750ca32df234ddcb88fae32780ddad1a52cd",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_blair"
+      ],
+      "file": "pg2_008_single_blair_13.jpg",
+      "id": "asset_208",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_blair"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-09",
+      "category": "single_target",
+      "checksum_sha256": "840d4e0b095b31c4ba5dbd416313953fbce20d8293e47e75253763d65a1b9122",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_blair"
+      ],
+      "file": "pg2_009_single_blair_14.jpg",
+      "id": "asset_209",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_blair"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-10",
+      "category": "single_target",
+      "checksum_sha256": "7a8a04848a0679c9caae1075dcb097525c04df328dab3f83b3f26207193d3f9e",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_blair"
+      ],
+      "file": "pg2_010_single_blair_15.jpg",
+      "id": "asset_210",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_blair"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-06",
+      "category": "single_target",
+      "checksum_sha256": "26365b03e405a967f8281c9cbfbb0f7229828b978e459ff114998c74ea6e4064",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_casey"
+      ],
+      "file": "pg2_011_single_casey_11.jpg",
+      "id": "asset_211",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_casey"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-07",
+      "category": "single_target",
+      "checksum_sha256": "add551711596d3e90e9f07a172d3254e51e100a5e797eb32c4ce642cbe4d7cad",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_casey"
+      ],
+      "file": "pg2_012_single_casey_12.jpg",
+      "id": "asset_212",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_casey"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-08",
+      "category": "single_target",
+      "checksum_sha256": "44b0b0512dbc207572f36d67564eccd268247d1935b640eb6f180f5c1076f376",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_casey"
+      ],
+      "file": "pg2_013_single_casey_13.jpg",
+      "id": "asset_213",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_casey"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-09",
+      "category": "single_target",
+      "checksum_sha256": "3cf0d961d6f6453f967c739b3f8ae543218cbb05bb9b2dd8432061e32b608b0b",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_casey"
+      ],
+      "file": "pg2_014_single_casey_14.jpg",
+      "id": "asset_214",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_casey"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    },
+    {
+      "capture_month": "2025-10",
+      "category": "single_target",
+      "checksum_sha256": "a761366bf98a72827cd61321251bb32a92f588c4a2cf238d237e0dcaf94373eb",
+      "decode_expected": true,
+      "expected_target_people": [
+        "target_casey"
+      ],
+      "file": "pg2_015_single_casey_15.jpg",
+      "id": "asset_215",
+      "is_corrupt": false,
+      "is_faceless": false,
+      "is_unsupported_extension": false,
+      "live_photo": {
+        "expected_pair": false,
+        "mov_file": null,
+        "role": "none"
+      },
+      "people": [
+        "target_casey"
+      ],
+      "scan_supported": true,
+      "tolerance": false
+    }
+  ],
+  "checksums": {
+    "pg2_001_single_alex_11.jpg": "de706294972a75c5c67cfb21b17bc70704c79fcde6c3227ff1dd69bad88ccc57",
+    "pg2_002_single_alex_12.jpg": "50092522382bd4e9fcd98e27aa3c9051f7a3436c2191944f518058bb41cb6b67",
+    "pg2_003_single_alex_13.jpg": "266a2e90d3bb4bb7a50649bb4e470e8592c7e2283ad9fb6f24398b174b901d1f",
+    "pg2_004_single_alex_14.jpg": "363811f9463a138e6162790ddc27f1d24a1ed3d0ad998480a1e00445aad1e0f9",
+    "pg2_005_single_alex_15.jpg": "9136d229678a67cb5a7d78b1bb35729ff994c48c52143423768744ac347c35ed",
+    "pg2_006_single_blair_11.jpg": "5f53163a162d155a280bf3709222b1d279ff16b188910c7c614903d699e44260",
+    "pg2_007_single_blair_12.jpg": "0808006ad71885f5a54fb2d66da9ca6522cf3aaf31cce85ac00829261de560db",
+    "pg2_008_single_blair_13.jpg": "58a2a93ca83f951177dc9dbb7017750ca32df234ddcb88fae32780ddad1a52cd",
+    "pg2_009_single_blair_14.jpg": "840d4e0b095b31c4ba5dbd416313953fbce20d8293e47e75253763d65a1b9122",
+    "pg2_010_single_blair_15.jpg": "7a8a04848a0679c9caae1075dcb097525c04df328dab3f83b3f26207193d3f9e",
+    "pg2_011_single_casey_11.jpg": "26365b03e405a967f8281c9cbfbb0f7229828b978e459ff114998c74ea6e4064",
+    "pg2_012_single_casey_12.jpg": "add551711596d3e90e9f07a172d3254e51e100a5e797eb32c4ce642cbe4d7cad",
+    "pg2_013_single_casey_13.jpg": "44b0b0512dbc207572f36d67564eccd268247d1935b640eb6f180f5c1076f376",
+    "pg2_014_single_casey_14.jpg": "3cf0d961d6f6453f967c739b3f8ae543218cbb05bb9b2dd8432061e32b608b0b",
+    "pg2_015_single_casey_15.jpg": "a761366bf98a72827cd61321251bb32a92f588c4a2cf238d237e0dcaf94373eb"
+  },
+  "expected_exports": {
+    "target_alex": {
+      "selected_people": [
+        "target_alex"
+      ],
+      "only": {
+        "2025-06": [
+          "pg2_001_single_alex_11.jpg"
+        ],
+        "2025-07": [
+          "pg2_002_single_alex_12.jpg"
+        ],
+        "2025-08": [
+          "pg2_003_single_alex_13.jpg"
+        ],
+        "2025-09": [
+          "pg2_004_single_alex_14.jpg"
+        ],
+        "2025-10": [
+          "pg2_005_single_alex_15.jpg"
+        ]
+      },
+      "group": {}
+    },
+    "target_blair": {
+      "selected_people": [
+        "target_blair"
+      ],
+      "only": {
+        "2025-06": [
+          "pg2_006_single_blair_11.jpg"
+        ],
+        "2025-07": [
+          "pg2_007_single_blair_12.jpg"
+        ],
+        "2025-08": [
+          "pg2_008_single_blair_13.jpg"
+        ],
+        "2025-09": [
+          "pg2_009_single_blair_14.jpg"
+        ],
+        "2025-10": [
+          "pg2_010_single_blair_15.jpg"
+        ]
+      },
+      "group": {}
+    },
+    "target_casey": {
+      "selected_people": [
+        "target_casey"
+      ],
+      "only": {
+        "2025-06": [
+          "pg2_011_single_casey_11.jpg"
+        ],
+        "2025-07": [
+          "pg2_012_single_casey_12.jpg"
+        ],
+        "2025-08": [
+          "pg2_013_single_casey_13.jpg"
+        ],
+        "2025-09": [
+          "pg2_014_single_casey_14.jpg"
+        ],
+        "2025-10": [
+          "pg2_015_single_casey_15.jpg"
+        ]
+      },
+      "group": {}
+    }
+  },
+  "expected_person_groups": {
+    "target_alex": [
+      "asset_201",
+      "asset_202",
+      "asset_203",
+      "asset_204",
+      "asset_205"
+    ],
+    "target_blair": [
+      "asset_206",
+      "asset_207",
+      "asset_208",
+      "asset_209",
+      "asset_210"
+    ],
+    "target_casey": [
+      "asset_211",
+      "asset_212",
+      "asset_213",
+      "asset_214",
+      "asset_215"
+    ]
+  },
+  "people": [
+    {
+      "display_name": "Alex Chen",
+      "expected_auto_person": true,
+      "label": "target_alex",
+      "role": "target"
+    },
+    {
+      "display_name": "Blair Lin",
+      "expected_auto_person": true,
+      "label": "target_blair",
+      "role": "target"
+    },
+    {
+      "display_name": "Casey Wu",
+      "expected_auto_person": true,
+      "label": "target_casey",
+      "role": "target"
+    }
+  ],
+  "provenance": {
+    "generated_by": "Codex 基于已入库 people_gallery_scan 单人照派生生成并做最小必要收边，fixture 直接入库供增量扫描测试复用。",
+    "method": "从主 fixture 中每个目标人物挑选 5 张稳定单人照，优先做轻微裁剪回缩、亮度/对比度/色彩微调与 JPEG 重编码；若某变体在 det_thresh=0.7 下掉出检测，则自动回退到更保守的同人物变体。",
+    "model_probe": "使用本机 buffalo_l det_10g.onnx 以 det_thresh=0.7 对 15 张增量单人照做真实人脸检测探针。",
+    "source_images": [
+      "tests/fixtures/people_gallery_scan/pg_001_single_alex_01.jpg",
+      "tests/fixtures/people_gallery_scan/pg_003_single_alex_03.jpg",
+      "tests/fixtures/people_gallery_scan/pg_005_single_alex_05.jpg",
+      "tests/fixtures/people_gallery_scan/pg_007_single_alex_07.jpg",
+      "tests/fixtures/people_gallery_scan/pg_009_single_alex_09.jpg",
+      "tests/fixtures/people_gallery_scan/pg_011_single_blair_01.jpg",
+      "tests/fixtures/people_gallery_scan/pg_013_single_blair_03.jpg",
+      "tests/fixtures/people_gallery_scan/pg_015_single_blair_05.jpg",
+      "tests/fixtures/people_gallery_scan/pg_017_single_blair_07.jpg",
+      "tests/fixtures/people_gallery_scan/pg_019_single_blair_09.jpg",
+      "tests/fixtures/people_gallery_scan/pg_021_single_casey_01.jpg",
+      "tests/fixtures/people_gallery_scan/pg_023_single_casey_03.jpg",
+      "tests/fixtures/people_gallery_scan/pg_025_single_casey_05.jpg",
+      "tests/fixtures/people_gallery_scan/pg_027_single_casey_07.jpg",
+      "tests/fixtures/people_gallery_scan/pg_029_single_casey_09.jpg"
+    ]
+  },
+  "schema_version": 1,
+  "tolerances": {
+    "assets": {},
+    "notes": "15 张增量单人照均为核心样本，不得进入 tolerance。"
+  }
+}
