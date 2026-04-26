@@ -163,3 +163,29 @@ CREATE INDEX idx_person_face_assignments_face_id
 CREATE UNIQUE INDEX idx_person_face_assignments_unique_active_face
   ON person_face_assignments(face_observation_id)
   WHERE active = 1;
+
+CREATE TABLE person_merge_operations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  winner_person_id TEXT NOT NULL REFERENCES person(id),
+  loser_person_id TEXT NOT NULL REFERENCES person(id),
+  winner_display_name_before TEXT,
+  winner_is_named_before INTEGER NOT NULL CHECK (winner_is_named_before IN (0, 1)),
+  winner_status_before TEXT NOT NULL CHECK (winner_status_before IN ('active', 'inactive')),
+  loser_display_name_before TEXT,
+  loser_is_named_before INTEGER NOT NULL CHECK (loser_is_named_before IN (0, 1)),
+  loser_status_before TEXT NOT NULL CHECK (loser_status_before IN ('active', 'inactive')),
+  merged_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_person_merge_operations_merged_at
+  ON person_merge_operations(id DESC, merged_at DESC);
+
+CREATE TABLE person_merge_operation_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES person_merge_operations(id),
+  assignment_id INTEGER NOT NULL REFERENCES person_face_assignments(id),
+  person_role TEXT NOT NULL CHECK (person_role IN ('winner', 'loser'))
+);
+
+CREATE INDEX idx_person_merge_operation_assignments_merge_id
+  ON person_merge_operation_assignments(merge_operation_id, person_role, assignment_id);

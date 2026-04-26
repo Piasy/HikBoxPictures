@@ -25,7 +25,7 @@
 
 ## Feature Slice 1: 人物合并
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

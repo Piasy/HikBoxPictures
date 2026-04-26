@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from typing import Any
 
 import httpx
 import pytest
@@ -126,6 +127,134 @@ CREATE TABLE person_face_assignments (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
+);
+
+CREATE TABLE person_merge_operations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  winner_person_id TEXT NOT NULL REFERENCES person(id),
+  loser_person_id TEXT NOT NULL REFERENCES person(id),
+  winner_display_name_before TEXT,
+  winner_is_named_before INTEGER NOT NULL,
+  winner_status_before TEXT NOT NULL,
+  loser_display_name_before TEXT,
+  loser_is_named_before INTEGER NOT NULL,
+  loser_status_before TEXT NOT NULL,
+  merged_at TEXT NOT NULL
+);
+
+CREATE TABLE person_merge_operation_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES person_merge_operations(id),
+  assignment_id INTEGER NOT NULL REFERENCES person_face_assignments(id),
+  person_role TEXT NOT NULL
+);
+""".strip()
+BROKEN_WEBUI_LIBRARY_SQL_MISSING_ASSIGNMENT_UPDATED_AT = """
+CREATE TABLE schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+
+CREATE TABLE library_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL UNIQUE,
+  label TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE assets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_id INTEGER NOT NULL REFERENCES library_sources(id),
+  absolute_path TEXT NOT NULL UNIQUE,
+  file_name TEXT NOT NULL,
+  file_extension TEXT NOT NULL,
+  capture_month TEXT NOT NULL,
+  file_fingerprint TEXT NOT NULL,
+  processing_status TEXT NOT NULL,
+  failure_reason TEXT,
+  live_photo_mov_path TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE scan_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  plan_fingerprint TEXT NOT NULL UNIQUE,
+  batch_size INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  command TEXT NOT NULL,
+  total_batches INTEGER NOT NULL DEFAULT 0,
+  completed_batches INTEGER NOT NULL DEFAULT 0,
+  failed_assets INTEGER NOT NULL DEFAULT 0,
+  success_faces INTEGER NOT NULL DEFAULT 0,
+  artifact_files INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
+CREATE TABLE face_observations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  face_index INTEGER NOT NULL,
+  bbox_x1 REAL NOT NULL,
+  bbox_y1 REAL NOT NULL,
+  bbox_x2 REAL NOT NULL,
+  bbox_y2 REAL NOT NULL,
+  image_width INTEGER NOT NULL,
+  image_height INTEGER NOT NULL,
+  score REAL NOT NULL,
+  crop_path TEXT NOT NULL,
+  context_path TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE person (
+  id TEXT PRIMARY KEY,
+  display_name TEXT,
+  is_named INTEGER NOT NULL DEFAULT 0 CHECK (is_named IN (0, 1)),
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE person_name_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id TEXT NOT NULL REFERENCES person(id),
+  event_type TEXT NOT NULL,
+  old_display_name TEXT,
+  new_display_name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE person_face_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id TEXT NOT NULL REFERENCES person(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observations(id),
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE person_merge_operations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  winner_person_id TEXT NOT NULL REFERENCES person(id),
+  loser_person_id TEXT NOT NULL REFERENCES person(id),
+  winner_display_name_before TEXT,
+  winner_is_named_before INTEGER NOT NULL,
+  winner_status_before TEXT NOT NULL,
+  loser_display_name_before TEXT,
+  loser_is_named_before INTEGER NOT NULL,
+  loser_status_before TEXT NOT NULL,
+  merged_at TEXT NOT NULL
+);
+
+CREATE TABLE person_merge_operation_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES person_merge_operations(id),
+  assignment_id INTEGER NOT NULL REFERENCES person_face_assignments(id),
+  person_role TEXT NOT NULL
 );
 """.strip()
 
@@ -305,6 +434,54 @@ def _create_broken_webui_workspace(workspace: Path, external_root: Path, source_
         embedding_conn.close()
 
 
+def _create_broken_webui_workspace_missing_assignment_updated_at(
+    workspace: Path,
+    external_root: Path,
+    source_dir: Path,
+) -> None:
+    workspace.mkdir(parents=True, exist_ok=True)
+    hikbox_dir = workspace / ".hikbox"
+    hikbox_dir.mkdir(parents=True, exist_ok=True)
+    (external_root / "artifacts" / "crops").mkdir(parents=True, exist_ok=True)
+    (external_root / "artifacts" / "context").mkdir(parents=True, exist_ok=True)
+    (external_root / "logs").mkdir(parents=True, exist_ok=True)
+    (hikbox_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "config_version": 1,
+                "external_root": str(external_root.resolve()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    library_db = hikbox_dir / "library.db"
+    embedding_db = hikbox_dir / "embedding.db"
+    library_conn = sqlite3.connect(library_db)
+    try:
+        with library_conn:
+            library_conn.executescript(BROKEN_WEBUI_LIBRARY_SQL_MISSING_ASSIGNMENT_UPDATED_AT)
+            library_conn.execute(
+                """
+                INSERT INTO library_sources (path, label, active, created_at)
+                VALUES (?, 'broken-source', 1, '2026-04-24T00:00:00Z')
+                """,
+                (str(source_dir.resolve()),),
+            )
+    finally:
+        library_conn.close()
+
+    embedding_conn = sqlite3.connect(embedding_db)
+    try:
+        with embedding_conn:
+            embedding_conn.executescript(OLD_SLICE_A_EMBEDDING_SQL)
+    finally:
+        embedding_conn.close()
+
+
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -358,6 +535,94 @@ def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
         process.kill()
         stdout_text, stderr_text = process.communicate(timeout=30)
     return stdout_text, stderr_text
+
+
+def _fetch_all(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
+    connection = sqlite3.connect(db_path)
+    try:
+        return [tuple(row) for row in connection.execute(sql, params).fetchall()]
+    finally:
+        connection.close()
+
+
+def _read_merge_slice_db_snapshot(library_db: Path) -> dict[str, Any]:
+    return {
+        "people": _fetch_all(
+            library_db,
+            """
+            SELECT id, display_name, is_named, status, updated_at
+            FROM person
+            ORDER BY id ASC
+            """,
+        ),
+        "active_assignments": _fetch_all(
+            library_db,
+            """
+            SELECT id, person_id, face_observation_id, active, updated_at
+            FROM person_face_assignments
+            ORDER BY id ASC
+            """,
+        ),
+        "merge_operations": _fetch_all(
+            library_db,
+            """
+            SELECT id, winner_person_id, loser_person_id
+            FROM person_merge_operations
+            ORDER BY id ASC
+            """,
+        ),
+        "merge_assignments": _fetch_all(
+            library_db,
+            """
+            SELECT merge_operation_id, assignment_id, person_role
+            FROM person_merge_operation_assignments
+            ORDER BY id ASC
+            """,
+        ),
+    }
+
+
+def _load_manifest() -> dict[str, object]:
+    return json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))
+
+
+def _asset_assignment_rows(library_db: Path) -> dict[str, list[tuple[int, str]]]:
+    rows = _fetch_all(
+        library_db,
+        """
+        SELECT
+          assets.file_name,
+          face_observations.face_index,
+          person_face_assignments.person_id
+        FROM person_face_assignments
+        INNER JOIN face_observations
+          ON face_observations.id = person_face_assignments.face_observation_id
+        INNER JOIN assets
+          ON assets.id = face_observations.asset_id
+        WHERE person_face_assignments.active = 1
+        ORDER BY assets.file_name ASC, face_observations.face_index ASC
+        """,
+    )
+    result: dict[str, list[tuple[int, str]]] = {}
+    for file_name, face_index, person_id in rows:
+        result.setdefault(str(file_name), []).append((int(face_index), str(person_id)))
+    return result
+
+
+def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> dict[str, str]:
+    assignment_rows = _asset_assignment_rows(library_db)
+    mapping: dict[str, str] = {}
+    for label in manifest["expected_person_groups"]:
+        observed_person_ids: set[str] = set()
+        for asset in manifest["assets"]:
+            if asset["expected_target_people"] != [label]:
+                continue
+            file_name = str(asset["file"])
+            observed_person_ids.update(person_id for _, person_id in assignment_rows.get(file_name, []))
+        assert observed_person_ids, f"{label} 缺少 target assignment"
+        assert len(observed_person_ids) == 1, observed_person_ids
+        mapping[str(label)] = next(iter(observed_person_ids))
+    return mapping
 
 
 def test_serve_fails_without_initialized_workspace_and_leaves_port_closed(tmp_path: Path) -> None:
@@ -562,6 +827,30 @@ def test_serve_fails_cleanly_when_webui_schema_columns_are_incompatible(tmp_path
     assert not _port_is_listening(port)
 
 
+def test_serve_fails_cleanly_when_person_face_assignments_updated_at_is_missing(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-broken-assignment-updated-at"
+    external_root = tmp_path / "external-root-broken-assignment-updated-at"
+    source_dir = tmp_path / "source-broken-assignment-updated-at"
+    source_dir.mkdir()
+    (source_dir / "sample.jpg").write_bytes((FIXTURE_DIR / "pg_001_single_alex_01.jpg").read_bytes())
+    _create_broken_webui_workspace_missing_assignment_updated_at(workspace, external_root, source_dir)
+    port = _find_free_port()
+
+    result = _run_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+    )
+
+    assert result.returncode != 0
+    assert "schema" in result.stderr
+    assert "person_face_assignments.updated_at" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not _port_is_listening(port)
+
+
 def test_serve_fails_when_scan_is_running_and_does_not_bind_port(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-running-scan"
     external_root = tmp_path / "external-root-running-scan"
@@ -628,5 +917,146 @@ def test_serve_renders_empty_state_and_missing_person_returns_404(tmp_path: Path
         assert "empty" in people_page.text or "暂无人物" in people_page.text
         assert missing_person.status_code == 404
         assert "not-a-real-person" in missing_person.text or "未找到" in missing_person.text
+    finally:
+        _terminate_process(process)
+
+
+def test_serve_merge_rejects_crafted_requests_without_db_changes(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-merge-crafted"
+    external_root = tmp_path / "external-root-merge-crafted"
+    manifest = _load_manifest()
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, FIXTURE_DIR)
+    assert add_result.returncode == 0
+
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    target_person_ids = _expected_target_mapping(library_db, manifest)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    blair_person_id = target_person_ids["target_blair"]
+    winner_person_id = min(alex_person_id, casey_person_id)
+    loser_person_id = casey_person_id if winner_person_id == alex_person_id else alex_person_id
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        invalid_cases = [
+            ({"person_id": [alex_person_id]}, "必须恰好选择 2 个人物"),
+            ({"person_id": [alex_person_id, alex_person_id]}, "不能重复选择同一个人物"),
+            (
+                {"person_id": [alex_person_id, "00000000-0000-0000-0000-000000000000"]},
+                "未找到可合并的人物",
+            ),
+        ]
+        for payload, expected_message in invalid_cases:
+            snapshot_before = _read_merge_slice_db_snapshot(library_db)
+            response = httpx.post(
+                f"{base_url}/people/merge",
+                data=payload,
+                follow_redirects=False,
+                timeout=5.0,
+            )
+            assert response.status_code == 400
+            assert expected_message in response.text
+            assert _read_merge_slice_db_snapshot(library_db) == snapshot_before
+
+        valid_merge_response = httpx.post(
+            f"{base_url}/people/merge",
+            data={"person_id": [casey_person_id, alex_person_id]},
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert valid_merge_response.status_code == 303
+
+        snapshot_before_inactive_attempt = _read_merge_slice_db_snapshot(library_db)
+        inactive_response = httpx.post(
+            f"{base_url}/people/merge",
+            data={"person_id": [loser_person_id, blair_person_id]},
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert inactive_response.status_code == 400
+        assert "不能合并已失效的人物" in inactive_response.text
+        assert _read_merge_slice_db_snapshot(library_db) == snapshot_before_inactive_attempt
+    finally:
+        _terminate_process(process)
+
+
+def test_serve_merge_rolls_back_when_fault_injection_fails_mid_transaction(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-merge-fault"
+    external_root = tmp_path / "external-root-merge-fault"
+    manifest = _load_manifest()
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, FIXTURE_DIR)
+    assert add_result.returncode == 0
+
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    target_person_ids = _expected_target_mapping(library_db, manifest)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    db_snapshot_before_merge = _read_merge_slice_db_snapshot(library_db)
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        env_updates={"HIKBOX_TEST_MERGE_FAIL_STAGE": "after_assignment_migration"},
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        response = httpx.post(
+            f"{base_url}/people/merge",
+            data={"person_id": [casey_person_id, alex_person_id]},
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert response.status_code == 500
+        assert "人物合并失败" in response.text
+        assert _read_merge_slice_db_snapshot(library_db) == db_snapshot_before_merge
+
+        people_page = httpx.get(f"{base_url}/people", timeout=5.0)
+        alex_detail = httpx.get(f"{base_url}/people/{alex_person_id}", timeout=5.0)
+        casey_detail = httpx.get(f"{base_url}/people/{casey_person_id}", timeout=5.0)
+        assert people_page.status_code == 200
+        assert alex_person_id in people_page.text
+        assert casey_person_id in people_page.text
+        assert alex_detail.status_code == 200
+        assert casey_detail.status_code == 200
     finally:
         _terminate_process(process)

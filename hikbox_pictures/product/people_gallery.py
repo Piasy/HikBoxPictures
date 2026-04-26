@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from math import ceil
+import os
 from pathlib import Path
 import sqlite3
 
@@ -20,6 +21,8 @@ REQUIRED_WEBUI_TABLES = (
     "person",
     "person_face_assignments",
     "person_name_events",
+    "person_merge_operations",
+    "person_merge_operation_assignments",
 )
 REQUIRED_WEBUI_COLUMNS = {
     "assets": {
@@ -48,6 +51,7 @@ REQUIRED_WEBUI_COLUMNS = {
         "person_id",
         "face_observation_id",
         "active",
+        "updated_at",
     },
     "person_name_events": {
         "id",
@@ -56,6 +60,24 @@ REQUIRED_WEBUI_COLUMNS = {
         "old_display_name",
         "new_display_name",
         "created_at",
+    },
+    "person_merge_operations": {
+        "id",
+        "winner_person_id",
+        "loser_person_id",
+        "winner_display_name_before",
+        "winner_is_named_before",
+        "winner_status_before",
+        "loser_display_name_before",
+        "loser_is_named_before",
+        "loser_status_before",
+        "merged_at",
+    },
+    "person_merge_operation_assignments": {
+        "id",
+        "merge_operation_id",
+        "assignment_id",
+        "person_role",
     },
 }
 
@@ -109,12 +131,35 @@ class PersonNameChangeResult:
     outcome: str
 
 
+@dataclass(frozen=True)
+class PersonMergeResult:
+    winner_person_id: str
+    loser_person_id: str
+
+
 class PersonNameValidationError(PeopleGalleryError):
     """人物命名校验失败。"""
 
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class PersonMergeValidationError(PeopleGalleryError):
+    """人物合并校验失败。"""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class MergeCandidate:
+    person_id: str
+    display_name: str | None
+    is_named: bool
+    status: str
+    sample_count: int
 
 
 def ensure_webui_schema_ready(workspace_context: WorkspaceContext) -> None:
@@ -450,9 +495,210 @@ def submit_person_name(
     return PersonNameChangeResult(outcome="renamed")
 
 
+def submit_people_merge(
+    workspace_context: WorkspaceContext,
+    *,
+    person_ids: list[str],
+) -> PersonMergeResult:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        normalized_person_ids = [person_id.strip() for person_id in person_ids if person_id.strip()]
+        if len(normalized_person_ids) != 2:
+            raise PersonMergeValidationError("必须恰好选择 2 个人物。", code="invalid_count")
+        if normalized_person_ids[0] == normalized_person_ids[1]:
+            raise PersonMergeValidationError("不能重复选择同一个人物。", code="duplicate_person")
+
+        person_rows = connection.execute(
+            """
+            SELECT
+              person.id,
+              person.display_name,
+              person.is_named,
+              person.status,
+              COUNT(person_face_assignments.id) AS sample_count
+            FROM person
+            LEFT JOIN person_face_assignments
+              ON person_face_assignments.person_id = person.id
+             AND person_face_assignments.active = 1
+            WHERE person.id IN (?, ?)
+            GROUP BY person.id, person.display_name, person.is_named, person.status
+            """,
+            (normalized_person_ids[0], normalized_person_ids[1]),
+        ).fetchall()
+        if len(person_rows) != 2:
+            raise PersonMergeValidationError("未找到可合并的人物。", code="person_not_found")
+
+        candidates_by_id = {
+            str(row["id"]): MergeCandidate(
+                person_id=str(row["id"]),
+                display_name=None if row["display_name"] is None else str(row["display_name"]),
+                is_named=bool(row["is_named"]),
+                status=str(row["status"]),
+                sample_count=int(row["sample_count"]),
+            )
+            for row in person_rows
+        }
+        candidates = [candidates_by_id[person_id] for person_id in normalized_person_ids]
+        for candidate in candidates:
+            if candidate.status != "active":
+                raise PersonMergeValidationError("不能合并已失效的人物。", code="inactive_person")
+            if candidate.sample_count < 1:
+                raise PersonMergeValidationError("未找到可合并的人物。", code="person_not_found")
+
+        winner, loser = _pick_merge_winner(candidates)
+        winner_assignment_ids_before = _load_active_assignment_ids_for_update(connection, winner.person_id)
+        loser_assignment_ids_before = _load_active_assignment_ids_for_update(connection, loser.person_id)
+        now = utc_now_text()
+
+        connection.execute(
+            """
+            UPDATE person_face_assignments
+            SET person_id = ?,
+                updated_at = ?
+            WHERE person_id = ?
+              AND active = 1
+            """,
+            (winner.person_id, now, loser.person_id),
+        )
+        _maybe_inject_merge_failure("after_assignment_migration")
+
+        connection.execute(
+            """
+            UPDATE person
+            SET updated_at = ?
+            WHERE id = ?
+            """,
+            (now, winner.person_id),
+        )
+        connection.execute(
+            """
+            UPDATE person
+            SET status = 'inactive',
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, loser.person_id),
+        )
+        _maybe_inject_merge_failure("after_loser_inactivation")
+
+        cursor = connection.execute(
+            """
+            INSERT INTO person_merge_operations (
+              winner_person_id,
+              loser_person_id,
+              winner_display_name_before,
+              winner_is_named_before,
+              winner_status_before,
+              loser_display_name_before,
+              loser_is_named_before,
+              loser_status_before,
+              merged_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                winner.person_id,
+                loser.person_id,
+                winner.display_name,
+                int(winner.is_named),
+                winner.status,
+                loser.display_name,
+                int(loser.is_named),
+                loser.status,
+                now,
+            ),
+        )
+        merge_operation_id = int(cursor.lastrowid)
+        _maybe_inject_merge_failure("after_merge_operation_insert")
+
+        for assignment_id in winner_assignment_ids_before:
+            connection.execute(
+                """
+                INSERT INTO person_merge_operation_assignments (
+                  merge_operation_id,
+                  assignment_id,
+                  person_role
+                )
+                VALUES (?, ?, 'winner')
+                """,
+                (merge_operation_id, assignment_id),
+            )
+        for assignment_id in loser_assignment_ids_before:
+            connection.execute(
+                """
+                INSERT INTO person_merge_operation_assignments (
+                  merge_operation_id,
+                  assignment_id,
+                  person_role
+                )
+                VALUES (?, ?, 'loser')
+                """,
+                (merge_operation_id, assignment_id),
+            )
+        _maybe_inject_merge_failure("after_merge_operation_assignments")
+        connection.commit()
+    except PersonMergeValidationError:
+        connection.rollback()
+        raise
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise PeopleGalleryError("人物合并失败，请稍后重试。") from exc
+    except RuntimeError as exc:
+        connection.rollback()
+        raise PeopleGalleryError("人物合并失败，请稍后重试。") from exc
+    finally:
+        connection.close()
+
+    return PersonMergeResult(
+        winner_person_id=winner.person_id,
+        loser_person_id=loser.person_id,
+    )
+
+
 def build_anonymous_label(person_id: str) -> str:
     normalized = person_id.replace("-", "")
     return f"匿名人物 #{normalized[:8]}"
+
+
+def _pick_merge_winner(candidates: list[MergeCandidate]) -> tuple[MergeCandidate, MergeCandidate]:
+    first, second = candidates
+    if first.is_named and second.is_named:
+        raise PersonMergeValidationError("不支持合并两个已命名人物。", code="both_named")
+    if first.is_named and not second.is_named:
+        return first, second
+    if second.is_named and not first.is_named:
+        return second, first
+    if first.sample_count > second.sample_count:
+        return first, second
+    if second.sample_count > first.sample_count:
+        return second, first
+    if first.person_id <= second.person_id:
+        return first, second
+    return second, first
+
+
+def _load_active_assignment_ids_for_update(connection: sqlite3.Connection, person_id: str) -> list[int]:
+    return [
+        int(row[0])
+        for row in connection.execute(
+            """
+            SELECT id
+            FROM person_face_assignments
+            WHERE person_id = ?
+              AND active = 1
+            ORDER BY id ASC
+            """,
+            (person_id,),
+        ).fetchall()
+    ]
+
+
+def _maybe_inject_merge_failure(stage: str) -> None:
+    # 仅用于自动化验证事务回滚；未设置环境变量时不会影响正常逻辑。
+    if os.environ.get("HIKBOX_TEST_MERGE_FAIL_STAGE") == stage:
+        raise RuntimeError(f"merge fault injected at stage={stage}")
 
 
 def _find_missing_tables(*, db_path: Path, required_tables: tuple[str, ...]) -> list[str]:

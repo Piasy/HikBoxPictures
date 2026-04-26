@@ -1,6 +1,6 @@
 # 数据库 Schema 说明（当前已实现）
 
-本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」以及 Slice D / Feature Slice 2「人物命名与重命名」。本文不承诺后续 merge / exclusion / export 等 future slice 的 schema。
+本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」、Slice D / Feature Slice 2「人物命名与重命名」，以及 Slice E / Feature Slice 1「人物合并」。本文不承诺 undo / exclusion / export 等尚未落地 slice 的 schema。
 
 ## 1. 存储布局
 
@@ -324,7 +324,7 @@ CREATE UNIQUE INDEX idx_person_unique_active_display_name
 - `id`：匿名人物 UUID。
 - `display_name`：首版匿名人物为空，后续 WebUI 命名后才会有值。
 - `is_named`：`0` 表示匿名人物，`1` 表示已命名人物。
-- `status`：当前 Slice C 只写 `active`；后续 merge/撤销等功能再引入失效语义。
+- `status`：`active` 表示仍可见且可继续接收 active assignment 的人物；`inactive` 表示该人物已在真实 merge 中作为 loser 失效，不再出现在首页、详情页或后续可操作人物集合中。
 - `updated_at`：人物记录最近一次真正发生状态变化的时间；命名/重命名会更新，no-op 不会更新。
 
 运行时语义：
@@ -333,6 +333,7 @@ CREATE UNIQUE INDEX idx_person_unique_active_display_name
 - 重复执行同一 `scan start` 时不会重复创建已存在的匿名人物。
 - WebUI 命名写入前会先做首尾空白裁剪；裁剪后为空会拒绝写入。
 - active 且 `is_named=1` 的人物之间，`display_name` 必须按裁剪后的完整字符串精确唯一；当前不做大小写折叠或别名归并。
+- 当前 Slice E 的真实 merge 会把 loser 的全部 active assignment 迁移到 winner，并把 loser 标记为 `inactive`；winner 的 `id`、`display_name`、`is_named` 保持不变。
 
 ### 3.9 `person_name_events`
 
@@ -451,8 +452,77 @@ CREATE UNIQUE INDEX idx_person_face_assignments_unique_active_face
 
 运行时语义：
 
-- 当前 Slice C 只新增 active assignment，不实现 merge / undo / exclusion，因此不会自动失效旧 assignment。
+- 在线归属新增的 active assignment 仍然只写一条 active 记录；当前 Slice E 的 merge 不会新建第二条 assignment，而是直接把 loser 现有 active assignment 的 `person_id` 迁移到 winner，并更新 `updated_at`。
 - 已有 active assignment 的 face 不会再次作为待归属候选，重复 `scan start` 也不会重复写入 assignment。
+- 因为在线归属读取“已有 active assignment 的 face 当前所属 `person_id`”作为历史锚点，merge 后 loser 旧样本上的 active assignment 已经改指向 winner，所以后续新增的 loser-like 样本会继续归到 winner，而不会 resurrect loser。
+
+### 3.12 `person_merge_operations`
+
+```sql
+CREATE TABLE person_merge_operations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  winner_person_id TEXT NOT NULL REFERENCES person(id),
+  loser_person_id TEXT NOT NULL REFERENCES person(id),
+  winner_display_name_before TEXT,
+  winner_is_named_before INTEGER NOT NULL CHECK (winner_is_named_before IN (0, 1)),
+  winner_status_before TEXT NOT NULL CHECK (winner_status_before IN ('active', 'inactive')),
+  loser_display_name_before TEXT,
+  loser_is_named_before INTEGER NOT NULL CHECK (loser_is_named_before IN (0, 1)),
+  loser_status_before TEXT NOT NULL CHECK (loser_status_before IN ('active', 'inactive')),
+  merged_at TEXT NOT NULL
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_person_merge_operations_merged_at
+  ON person_merge_operations(id DESC, merged_at DESC);
+```
+
+字段语义：
+
+- `winner_person_id`：本次 two-person merge 的 canonical winner。
+- `loser_person_id`：本次 two-person merge 中被失效的人物。
+- `winner_display_name_before` / `winner_is_named_before` / `winner_status_before`：winner 在 merge 前的可观察状态快照。
+- `loser_display_name_before` / `loser_is_named_before` / `loser_status_before`：loser 在 merge 前的可观察状态快照。
+- `merged_at`：本次 merge 成功提交时间，带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
+
+运行时语义：
+
+- 当前 Slice E 只支持 exactly-two merge，因此每次成功 merge 恰好写入一条 `person_merge_operations`。
+- winner 规则固定为：一个已命名 + 一个匿名时已命名人物赢；两个匿名时样本数更多者赢；样本数相同时 `person_id` 更小者赢；两个已命名人物直接拒绝。
+- merge 事务只有在 assignment 迁移、loser 置 `inactive`、真相记录与 assignment 快照全部成功落库后才会提交；任一步失败都会整体回滚。
+- 当前表只承载 Slice 1 已实现的 merge 真相记录；undo 的可见行为和额外撤销状态尚未落地，因此本文不承诺相关字段。
+
+### 3.13 `person_merge_operation_assignments`
+
+```sql
+CREATE TABLE person_merge_operation_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_operation_id INTEGER NOT NULL REFERENCES person_merge_operations(id),
+  assignment_id INTEGER NOT NULL REFERENCES person_face_assignments(id),
+  person_role TEXT NOT NULL CHECK (person_role IN ('winner', 'loser'))
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_person_merge_operation_assignments_merge_id
+  ON person_merge_operation_assignments(merge_operation_id, person_role, assignment_id);
+```
+
+字段语义：
+
+- `merge_operation_id`：所属 `person_merge_operations.id`。
+- `assignment_id`：参与本次 merge 的 active assignment，在 merge 前归属于 winner 或 loser。
+- `person_role`：该 assignment 在 merge 前属于 `winner` 还是 `loser`。
+
+运行时语义：
+
+- 每次成功 merge 会把 merge 前 winner 与 loser 的 active assignment id 集合完整快照到该表。
+- 这张表的当前用途是保留 Slice 1 已批准契约所需的 merge 真相与可验证快照；它不意味着 undo 入口已经实现。
 
 ## 4. `embedding.db`
 

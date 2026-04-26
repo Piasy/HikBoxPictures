@@ -60,6 +60,8 @@
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-merge-undo-spec.md`
 - Scope: 在人物首页执行 two-person merge，并支持撤销最近一次仍可撤销的合并；公共入口是 WebUI/API。
 - Acceptance summary: two-person merge 后 loser 的 active assignment 真实迁移到 winner、loser 失效；后续新增 loser-like 样本继续归到 winner；若合并后尚未发生新的人物相关写入，则只允许撤销最近一次合并并恢复合并前可观察状态。
+- Accepted concern (2026-04-26, code-quality review, Feature Slice 1): `submit_people_merge()` 在 merge 成功时会更新 winner 的 `person.updated_at`。Controller 接受该风险，因为当前 Slice E / Feature Slice 1 尚未实现 undo eligibility 判定，这个字段不会影响当前合并主路径；到后续实现“merge 后是否发生新人物相关写入”的撤销资格判断时，不得把 `person.updated_at` 当作唯一依据，应改用独立账本或等价判据。
+- Accepted concern (2026-04-26, code-quality review, Feature Slice 1): 首页 merge 表单当前依赖前端脚本把 checkbox 选择同步成隐藏 `person_id` 字段，checkbox 本身没有直接携带 `name=\"person_id\"`。Controller 接受该风险，因为当前首版 WebUI 明确是本机单用户、少量原生 JS 增强路径，真实公共入口与服务端校验已通过验收；若后续增强无 JS 可用性或需要降低模板维护复杂度，应把 checkbox 提交语义收敛为原生 `name=\"person_id\"`，脚本只做增强而不承载核心提交流程。
 
 ### Slice F：误归属排除
 

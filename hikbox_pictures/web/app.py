@@ -17,7 +17,9 @@ from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import load_assignment_context_path
 from hikbox_pictures.product.people_gallery import load_people_home_page
 from hikbox_pictures.product.people_gallery import load_person_detail_page
+from hikbox_pictures.product.people_gallery import PersonMergeValidationError
 from hikbox_pictures.product.people_gallery import PersonNameValidationError
+from hikbox_pictures.product.people_gallery import submit_people_merge
 from hikbox_pictures.product.people_gallery import submit_person_name
 from hikbox_pictures.product.sources import WorkspaceContext
 
@@ -25,10 +27,14 @@ from hikbox_pictures.product.sources import WorkspaceContext
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 NAME_FEEDBACK_COOKIE = "people_name_feedback"
+HOME_FEEDBACK_COOKIE = "people_home_feedback"
 NAME_FEEDBACK_MESSAGES = {
     "named": {"level": "info", "message": "名称已保存。"},
     "renamed": {"level": "info", "message": "名称已更新。"},
     "noop": {"level": "info", "message": "名称未变化。"},
+}
+HOME_FEEDBACK_MESSAGES = {
+    "merge_succeeded": {"level": "info", "message": "人物已合并。"},
 }
 
 
@@ -39,6 +45,27 @@ def create_people_gallery_app(
 ) -> FastAPI:
     app = FastAPI(title="HikBox People Gallery")
 
+    def _render_people_home(
+        request: Request,
+        *,
+        status_code: int = 200,
+        home_feedback: dict[str, str] | None = None,
+    ) -> HTMLResponse:
+        page = load_people_home_page(workspace_context)
+        response = templates.TemplateResponse(
+            request=request,
+            name="people_home.html",
+            context={
+                "page_title": "人物库浏览",
+                "people_page": page,
+                "home_feedback": home_feedback,
+            },
+            status_code=status_code,
+        )
+        if request.cookies.get(HOME_FEEDBACK_COOKIE) is not None and home_feedback is not None:
+            response.delete_cookie(HOME_FEEDBACK_COOKIE, path="/")
+        return response
+
     @app.get("/", include_in_schema=False)
     def people_root() -> RedirectResponse:
         return RedirectResponse(url="/people", status_code=302)
@@ -46,17 +73,51 @@ def create_people_gallery_app(
     @app.get("/people", response_class=HTMLResponse)
     def people_home(request: Request) -> HTMLResponse:
         try:
-            page = load_people_home_page(workspace_context)
+            return _render_people_home(
+                request,
+                home_feedback=_get_home_feedback(request),
+            )
         except PeopleGalleryError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return templates.TemplateResponse(
-            request=request,
-            name="people_home.html",
-            context={
-                "page_title": "人物库浏览",
-                "people_page": page,
-            },
+
+    @app.post("/people/merge", response_class=HTMLResponse)
+    async def people_merge_submit(request: Request) -> Response:
+        body = await request.body()
+        form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        person_ids = form_data.get("person_id", [])
+        try:
+            submit_people_merge(
+                workspace_context,
+                person_ids=[str(person_id) for person_id in person_ids],
+            )
+        except PersonMergeValidationError as exc:
+            try:
+                return _render_people_home(
+                    request,
+                    status_code=400,
+                    home_feedback={"level": "error", "message": str(exc)},
+                )
+            except PeopleGalleryError as page_exc:
+                raise HTTPException(status_code=500, detail=str(page_exc)) from page_exc
+        except PeopleGalleryError:
+            try:
+                return _render_people_home(
+                    request,
+                    status_code=500,
+                    home_feedback={"level": "error", "message": "人物合并失败，请稍后重试。"},
+                )
+            except PeopleGalleryError as page_exc:
+                raise HTTPException(status_code=500, detail=str(page_exc)) from page_exc
+
+        response = RedirectResponse(url="/people", status_code=303)
+        response.set_cookie(
+            HOME_FEEDBACK_COOKIE,
+            "merge_succeeded",
+            httponly=True,
+            samesite="lax",
+            path="/",
         )
+        return response
 
     @app.get("/people/{person_id}", response_class=HTMLResponse)
     def person_detail(
@@ -184,3 +245,10 @@ def _get_name_feedback(request: Request) -> dict[str, str] | None:
     if feedback_code is None:
         return None
     return NAME_FEEDBACK_MESSAGES.get(feedback_code)
+
+
+def _get_home_feedback(request: Request) -> dict[str, str] | None:
+    feedback_code = request.cookies.get(HOME_FEEDBACK_COOKIE)
+    if feedback_code is None:
+        return None
+    return HOME_FEEDBACK_MESSAGES.get(feedback_code)

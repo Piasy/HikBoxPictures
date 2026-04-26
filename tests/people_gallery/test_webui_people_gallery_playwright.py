@@ -13,6 +13,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from urllib.parse import parse_qs
 
 import httpx
 from playwright.sync_api import Page
@@ -23,6 +24,8 @@ from playwright.sync_api import sync_playwright
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
 MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
+FIXTURE_DIR_2 = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan_2"
+MANIFEST_PATH_2 = FIXTURE_DIR_2 / "manifest.json"
 SUPPORTED_SCAN_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 
 
@@ -115,6 +118,10 @@ def _find_model_root() -> Path:
 
 def _load_manifest() -> dict[str, object]:
     return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+
+
+def _load_incremental_manifest() -> dict[str, object]:
+    return json.loads(MANIFEST_PATH_2.read_text(encoding="utf-8"))
 
 
 def _find_free_port() -> int:
@@ -357,6 +364,79 @@ def _count_person_name_events(library_db: Path) -> int:
     return int(_fetch_one(library_db, "SELECT COUNT(*) FROM person_name_events")[0])
 
 
+def _read_person_merge_operations(library_db: Path) -> list[dict[str, object]]:
+    rows = _fetch_all(
+        library_db,
+        """
+        SELECT
+          id,
+          winner_person_id,
+          loser_person_id,
+          winner_display_name_before,
+          winner_is_named_before,
+          winner_status_before,
+          loser_display_name_before,
+          loser_is_named_before,
+          loser_status_before,
+          merged_at
+        FROM person_merge_operations
+        ORDER BY id ASC
+        """,
+    )
+    return [
+        {
+            "id": int(merge_id),
+            "winner_person_id": str(winner_person_id),
+            "loser_person_id": str(loser_person_id),
+            "winner_display_name_before": (
+                None if winner_display_name_before is None else str(winner_display_name_before)
+            ),
+            "winner_is_named_before": bool(winner_is_named_before),
+            "winner_status_before": str(winner_status_before),
+            "loser_display_name_before": None if loser_display_name_before is None else str(loser_display_name_before),
+            "loser_is_named_before": bool(loser_is_named_before),
+            "loser_status_before": str(loser_status_before),
+            "merged_at": str(merged_at),
+        }
+        for (
+            merge_id,
+            winner_person_id,
+            loser_person_id,
+            winner_display_name_before,
+            winner_is_named_before,
+            winner_status_before,
+            loser_display_name_before,
+            loser_is_named_before,
+            loser_status_before,
+            merged_at,
+        ) in rows
+    ]
+
+
+def _read_merge_operation_assignment_rows(
+    library_db: Path,
+    *,
+    merge_operation_id: int,
+) -> list[dict[str, object]]:
+    rows = _fetch_all(
+        library_db,
+        """
+        SELECT assignment_id, person_role
+        FROM person_merge_operation_assignments
+        WHERE merge_operation_id = ?
+        ORDER BY id ASC
+        """,
+        (merge_operation_id,),
+    )
+    return [
+        {
+            "assignment_id": int(assignment_id),
+            "person_role": str(person_role),
+        }
+        for assignment_id, person_role in rows
+    ]
+
+
 def _read_name_slice_db_snapshot(library_db: Path) -> dict[str, object]:
     return {
         "people": _fetch_all(
@@ -503,6 +583,92 @@ def _assert_name_prg_flow(
         and int(response["status"]) == 200
         for response in responses
     ), responses
+
+
+def _submit_merge_from_home(
+    page: Page,
+    *,
+    base_url: str,
+    person_ids: list[str],
+) -> None:
+    page.goto(f"{base_url}/people", wait_until="networkidle")
+    for person_id in person_ids:
+        checkbox = page.locator(f"[data-person-id='{person_id}'] [data-merge-checkbox]")
+        expect(checkbox).to_be_visible()
+        checkbox.check()
+    page.get_by_role("button", name="合并所选人物").click()
+    page.wait_for_url(re.compile(rf"{re.escape(base_url)}/people(?:\\?.*)?$"))
+    page.wait_for_load_state("networkidle")
+
+
+def _assert_merge_prg_flow(
+    *,
+    responses: list[dict[str, object]],
+    base_url: str,
+) -> None:
+    post_url = f"{base_url}/people/merge"
+    people_url = f"{base_url}/people"
+    assert any(
+        response["method"] == "POST"
+        and response["url"] == post_url
+        and int(response["status"]) == 303
+        for response in responses
+    ), responses
+    assert any(
+        response["method"] == "GET"
+        and response["url"] == people_url
+        and int(response["status"]) == 200
+        for response in responses
+    ), responses
+
+
+def _extract_merge_request_person_ids(
+    *,
+    requests: list[dict[str, object]],
+    base_url: str,
+) -> list[str]:
+    merge_url = f"{base_url}/people/merge"
+    for request in requests:
+        if request["method"] != "POST" or request["url"] != merge_url:
+            continue
+        body = str(request["post_data"] or "")
+        return [str(person_id) for person_id in parse_qs(body, keep_blank_values=True).get("person_id", [])]
+    raise AssertionError(f"未捕获到 {merge_url} 的 POST 请求: {requests}")
+
+
+def _manifest_files_for_target(manifest: dict[str, object], label: str) -> list[str]:
+    return [
+        str(asset["file"])
+        for asset in manifest["assets"]
+        if asset["expected_target_people"] == [label]
+    ]
+
+
+def _create_scanned_workspace(
+    tmp_path: Path,
+    *,
+    fixture_dir: Path = FIXTURE_DIR,
+    batch_size: int = 10,
+) -> tuple[Path, Path, Path, dict[str, object], dict[str, str]]:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    manifest = _load_manifest()
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, fixture_dir)
+    assert add_result.returncode == 0
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        str(batch_size),
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+    library_db = workspace / ".hikbox" / "library.db"
+    return workspace, external_root, library_db, manifest, _expected_target_mapping(library_db, manifest)
 
 
 def test_people_gallery_home_sections_sort_by_sample_count_with_slice0_gallery(tmp_path: Path) -> None:
@@ -1026,6 +1192,508 @@ def test_people_gallery_naming_via_real_serve_real_page_and_real_db(tmp_path: Pa
             assert _read_name_slice_db_snapshot(library_db) == db_snapshot_before_missing
             assert _count_person_name_events(library_db) == audit_count_before_missing
 
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_merge_via_real_serve_real_page_and_real_db(tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    incremental_manifest = _load_incremental_manifest()
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    blair_person_id = target_person_ids["target_blair"]
+    winner_person_id = min(alex_person_id, casey_person_id)
+    loser_person_id = casey_person_id if winner_person_id == alex_person_id else alex_person_id
+
+    alex_assignment_ids_before_merge = _read_active_assignment_ids(library_db, alex_person_id)
+    casey_assignment_ids_before_merge = _read_active_assignment_ids(library_db, casey_person_id)
+    blair_assignment_ids_before_merge = _read_active_assignment_ids(library_db, blair_person_id)
+    winner_assignment_ids_before_merge = _read_active_assignment_ids(library_db, winner_person_id)
+    loser_assignment_ids_before_merge = _read_active_assignment_ids(library_db, loser_person_id)
+    expected_union_assignment_ids = set(alex_assignment_ids_before_merge) | set(casey_assignment_ids_before_merge)
+    assert len(alex_assignment_ids_before_merge) == len(casey_assignment_ids_before_merge)
+    assert set(winner_assignment_ids_before_merge) | set(loser_assignment_ids_before_merge) == expected_union_assignment_ids
+    active_people_before_merge = set(_read_active_people(library_db))
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+            request_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            def _record_request(request: object) -> None:
+                request_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(request.url),
+                        "post_data": request.post_data,
+                    }
+                )
+
+            page.on("response", _record_response)
+            page.on("request", _record_request)
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            anonymous_order_before_merge = _people_section_person_ids_in_rendered_order(page, section="anonymous")
+            assert alex_person_id in anonymous_order_before_merge
+            assert casey_person_id in anonymous_order_before_merge
+
+            response_start = len(response_log)
+            request_start = len(request_log)
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+            _assert_merge_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+            )
+            posted_person_ids = _extract_merge_request_person_ids(
+                requests=request_log[request_start:],
+                base_url=base_url,
+            )
+            assert set(posted_person_ids) == {alex_person_id, casey_person_id}
+            expect(page.get_by_role("status")).to_contain_text("人物已合并")
+
+            home_cards_after_merge = _page_card_snapshot(page)
+            assert winner_person_id in home_cards_after_merge
+            assert loser_person_id not in home_cards_after_merge
+            assert set(home_cards_after_merge) == active_people_before_merge - {loser_person_id}
+            assert str(len(expected_union_assignment_ids)) in str(home_cards_after_merge[winner_person_id]["sample_count_text"])
+
+            winner_record_after_merge = _read_person_record(library_db, winner_person_id)
+            loser_record_after_merge = _read_person_record(library_db, loser_person_id)
+            assert winner_record_after_merge["status"] == "active"
+            assert loser_record_after_merge["status"] == "inactive"
+            assert loser_record_after_merge["display_name"] is None
+            assert loser_record_after_merge["is_named"] is False
+            assert set(_read_active_assignment_ids(library_db, winner_person_id)) == expected_union_assignment_ids
+            assert _read_active_assignment_ids(library_db, loser_person_id) == []
+
+            page.goto(f"{base_url}/people/{winner_person_id}", wait_until="networkidle")
+            rendered_assignment_ids = {
+                assignment_id for assignment_id, _, _ in _iter_rendered_assignment_cards(page)
+            }
+            assert rendered_assignment_ids == expected_union_assignment_ids
+
+            loser_detail_response = httpx.get(f"{base_url}/people/{loser_person_id}", timeout=5.0)
+            assert loser_detail_response.status_code == 404
+            assert "人物不存在" in loser_detail_response.text
+
+            merge_operations = _read_person_merge_operations(library_db)
+            assert len(merge_operations) == 1
+            assert merge_operations[0]["winner_person_id"] == winner_person_id
+            assert merge_operations[0]["loser_person_id"] == loser_person_id
+            merge_assignment_rows = _read_merge_operation_assignment_rows(
+                library_db,
+                merge_operation_id=int(merge_operations[0]["id"]),
+            )
+            assert {
+                int(row["assignment_id"])
+                for row in merge_assignment_rows
+                if row["person_role"] == "winner"
+            } == set(winner_assignment_ids_before_merge)
+            assert {
+                int(row["assignment_id"])
+                for row in merge_assignment_rows
+                if row["person_role"] == "loser"
+            } == set(loser_assignment_ids_before_merge)
+
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+    add_second_source_result = _add_source(workspace, FIXTURE_DIR_2)
+    assert add_second_source_result.returncode == 0, add_second_source_result.stderr
+    incremental_scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert incremental_scan_result.returncode == 0, incremental_scan_result.stderr
+
+    assignment_rows_after_incremental = _asset_assignment_rows(library_db)
+    for file_name in _manifest_files_for_target(incremental_manifest, "target_alex"):
+        assert {person_id for _, person_id, _ in assignment_rows_after_incremental[file_name]} == {winner_person_id}
+    for file_name in _manifest_files_for_target(incremental_manifest, "target_casey"):
+        assert {person_id for _, person_id, _ in assignment_rows_after_incremental[file_name]} == {winner_person_id}
+    for file_name in _manifest_files_for_target(incremental_manifest, "target_blair"):
+        assert {person_id for _, person_id, _ in assignment_rows_after_incremental[file_name]} == {blair_person_id}
+
+    expected_winner_count_after_incremental = len(expected_union_assignment_ids) + 10
+    expected_blair_count_after_incremental = len(blair_assignment_ids_before_merge) + 5
+    active_people_after_incremental = _read_active_people(library_db)
+    assert set(active_people_after_incremental) == active_people_before_merge - {loser_person_id}
+    assert int(active_people_after_incremental[winner_person_id]["sample_count"]) == expected_winner_count_after_incremental
+    assert int(active_people_after_incremental[blair_person_id]["sample_count"]) == expected_blair_count_after_incremental
+    assert _read_person_record(library_db, loser_person_id)["status"] == "inactive"
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            home_cards_after_incremental = _page_card_snapshot(page)
+            assert loser_person_id not in home_cards_after_incremental
+            assert str(expected_winner_count_after_incremental) in str(
+                home_cards_after_incremental[winner_person_id]["sample_count_text"]
+            )
+            assert str(expected_blair_count_after_incremental) in str(
+                home_cards_after_incremental[blair_person_id]["sample_count_text"]
+            )
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_merge_prefers_sample_count_over_request_order(tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    blair_person_id = target_person_ids["target_blair"]
+    first_merge_winner_person_id = min(alex_person_id, casey_person_id)
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            request_log: list[dict[str, object]] = []
+            response_log: list[dict[str, object]] = []
+
+            def _record_request(request: object) -> None:
+                request_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(request.url),
+                        "post_data": request.post_data,
+                    }
+                )
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("request", _record_request)
+            page.on("response", _record_response)
+
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+            merged_winner_assignment_ids = _read_active_assignment_ids(library_db, first_merge_winner_person_id)
+            blair_assignment_ids_before_second_merge = _read_active_assignment_ids(library_db, blair_person_id)
+            expected_assignment_ids_after_second_merge = set(merged_winner_assignment_ids) | set(
+                blair_assignment_ids_before_second_merge
+            )
+
+            response_start = len(response_log)
+            request_start = len(request_log)
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[blair_person_id, first_merge_winner_person_id],
+            )
+            _assert_merge_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+            )
+            posted_person_ids = _extract_merge_request_person_ids(
+                requests=request_log[request_start:],
+                base_url=base_url,
+            )
+            assert posted_person_ids == [blair_person_id, first_merge_winner_person_id]
+            expect(page.get_by_role("status")).to_contain_text("人物已合并")
+
+            home_cards_after_second_merge = _page_card_snapshot(page)
+            assert first_merge_winner_person_id in home_cards_after_second_merge
+            assert blair_person_id not in home_cards_after_second_merge
+            assert str(len(expected_assignment_ids_after_second_merge)) in str(
+                home_cards_after_second_merge[first_merge_winner_person_id]["sample_count_text"]
+            )
+            assert _read_person_record(library_db, first_merge_winner_person_id)["status"] == "active"
+            assert _read_person_record(library_db, blair_person_id)["status"] == "inactive"
+            assert set(_read_active_assignment_ids(library_db, first_merge_winner_person_id)) == (
+                expected_assignment_ids_after_second_merge
+            )
+            assert _read_active_assignment_ids(library_db, blair_person_id) == []
+
+            merge_operations = _read_person_merge_operations(library_db)
+            assert len(merge_operations) == 2
+            assert merge_operations[-1]["winner_person_id"] == first_merge_winner_person_id
+            assert merge_operations[-1]["loser_person_id"] == blair_person_id
+
+            loser_detail_response = httpx.get(f"{base_url}/people/{blair_person_id}", timeout=5.0)
+            assert loser_detail_response.status_code == 404
+            assert "人物不存在" in loser_detail_response.text
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_merge_prefers_named_person_over_anonymous_even_with_fewer_samples(tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    people_by_label = {str(person["label"]): person for person in manifest["people"]}
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    blair_person_id = target_person_ids["target_blair"]
+    merged_anonymous_winner_person_id = min(alex_person_id, casey_person_id)
+    blair_display_name = str(people_by_label["target_blair"]["display_name"])
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+            merged_anonymous_assignment_ids = _read_active_assignment_ids(library_db, merged_anonymous_winner_person_id)
+            blair_assignment_ids_before_merge = _read_active_assignment_ids(library_db, blair_person_id)
+
+            blair_detail_pattern = re.compile(
+                rf"{re.escape(base_url)}/people/{re.escape(blair_person_id)}(?:\\?.*)?$"
+            )
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+            response_start = len(response_log)
+            _submit_name_form(
+                page,
+                detail_url_pattern=blair_detail_pattern,
+                display_name=blair_display_name,
+            )
+            _assert_name_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+                person_id=blair_person_id,
+            )
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            response_start = len(response_log)
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[merged_anonymous_winner_person_id, blair_person_id],
+            )
+            _assert_merge_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+            )
+            expect(page.get_by_role("status")).to_contain_text("人物已合并")
+
+            winner_record = _read_person_record(library_db, blair_person_id)
+            loser_record = _read_person_record(library_db, merged_anonymous_winner_person_id)
+            assert winner_record["status"] == "active"
+            assert winner_record["is_named"] is True
+            assert winner_record["display_name"] == blair_display_name
+            assert loser_record["status"] == "inactive"
+            assert set(_read_active_assignment_ids(library_db, blair_person_id)) == (
+                set(blair_assignment_ids_before_merge) | set(merged_anonymous_assignment_ids)
+            )
+            assert _read_active_assignment_ids(library_db, merged_anonymous_winner_person_id) == []
+
+            merge_operations = _read_person_merge_operations(library_db)
+            assert len(merge_operations) == 2
+            assert merge_operations[-1]["winner_person_id"] == blair_person_id
+            assert merge_operations[-1]["loser_person_id"] == merged_anonymous_winner_person_id
+            assert merge_operations[-1]["winner_display_name_before"] == blair_display_name
+            assert merge_operations[-1]["winner_is_named_before"] is True
+            assert merge_operations[-1]["winner_status_before"] == "active"
+            assert merge_operations[-1]["loser_display_name_before"] is None
+            assert merge_operations[-1]["loser_is_named_before"] is False
+            assert merge_operations[-1]["loser_status_before"] == "active"
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            expect(
+                page.locator(f"[data-people-section='named'] [data-person-id='{blair_person_id}'] [data-person-label]")
+            ).to_have_text(blair_display_name)
+            expect(
+                page.locator(
+                    f"[data-people-section='anonymous'] [data-person-id='{merged_anonymous_winner_person_id}']"
+                )
+            ).to_have_count(0)
+
+            page.goto(f"{base_url}/people/{blair_person_id}", wait_until="networkidle")
+            expect(page.get_by_test_id("person-detail")).to_be_visible()
+            expect(page.locator("h1")).to_have_text(blair_display_name)
+            expect(page.locator("[data-testid='person-detail'] .sample-card")).to_have_count(
+                len(set(blair_assignment_ids_before_merge) | set(merged_anonymous_assignment_ids))
+            )
+
+            loser_detail_response = httpx.get(
+                f"{base_url}/people/{merged_anonymous_winner_person_id}",
+                timeout=5.0,
+            )
+            assert loser_detail_response.status_code == 404
+            assert "人物不存在" in loser_detail_response.text
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_merge_rejects_two_named_people_via_real_home(tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    people_by_label = {str(person["label"]): person for person in manifest["people"]}
+    alex_person_id = target_person_ids["target_alex"]
+    blair_person_id = target_person_ids["target_blair"]
+    alex_display_name = str(people_by_label["target_alex"]["display_name"])
+    blair_display_name = str(people_by_label["target_blair"]["display_name"])
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+
+            alex_detail_pattern = re.compile(
+                rf"{re.escape(base_url)}/people/{re.escape(alex_person_id)}(?:\\?.*)?$"
+            )
+            blair_detail_pattern = re.compile(
+                rf"{re.escape(base_url)}/people/{re.escape(blair_person_id)}(?:\\?.*)?$"
+            )
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=alex_person_id)
+            _submit_name_form(
+                page,
+                detail_url_pattern=alex_detail_pattern,
+                display_name=alex_display_name,
+            )
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+            _submit_name_form(
+                page,
+                detail_url_pattern=blair_detail_pattern,
+                display_name=blair_display_name,
+            )
+
+            db_snapshot_before_merge_attempt = _read_name_slice_db_snapshot(library_db)
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            response_start = len(response_log)
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[alex_person_id, blair_person_id],
+            )
+            assert not any(
+                response["method"] == "POST"
+                and response["url"] == f"{base_url}/people/merge"
+                and int(response["status"]) == 303
+                for response in response_log[response_start:]
+            )
+            expect(page.get_by_role("alert")).to_contain_text("不支持合并两个已命名人物")
+            assert _read_name_slice_db_snapshot(library_db) == db_snapshot_before_merge_attempt
+            assert _count_person_name_events(library_db) == 2
+            assert _read_person_merge_operations(library_db) == []
             browser.close()
     finally:
         _terminate_process(process)
