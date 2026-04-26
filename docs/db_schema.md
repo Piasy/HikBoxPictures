@@ -155,8 +155,8 @@ CREATE TABLE scan_sessions (
 - `batch_size`：本次命令使用的批次大小。
 - `status`：
   - `running`：存在未完成批次
-  - `completed`：全部批次已完成
-  - `failed`：worker 异常退出或批次提交失败
+  - `completed`：全部批次已完成，且同一 `scan start` 触发的 assignment 阶段已成功完成
+  - `failed`：worker 异常退出、批次提交失败，或后续 assignment 阶段失败
 - `command`：完整命令文本，例如 `hikbox scan start --workspace ... --batch-size 10`。
 - `total_batches`：该 session 的总批次数。
 - `completed_batches`：当前已完成批次数。
@@ -169,6 +169,7 @@ CREATE TABLE scan_sessions (
 
 - 成功恢复时复用已有 `scan_sessions` 记录，并基于 `scan_batches.status` 判断哪些批次可跳过。
 - 同一 `plan_fingerprint` 下，`completed_batches == total_batches` 时再次执行会直接跳过，不会新建第二个 session。
+- 当前实现即使 discover/批次阶段没有新增待处理批次，也会在同一个 `scan start` 里继续执行 assignment 阶段；只有 assignment 也成功完成后，session 才会保持 `completed`。
 
 ### 3.5 `scan_batches`
 
@@ -293,7 +294,125 @@ CREATE INDEX idx_face_observations_asset_id ON face_observations(asset_id, face_
 - `crop_path` 指向单人脸裁剪图。
 - `context_path` 指向整图缩放到最长边不超过 480 后绘制红色人脸框的 JPEG。
 - 当前实现的 artifact 文件名带 session/batch 作用域前缀，并包含 batch item 级唯一标识，不会在同批重复内容照片之间冲突，也不会在重扫时原地覆盖旧文件；只有当新结果成功提交后，旧路径对应文件才会被清理。
-- 当前实现重复扫描同一 asset 时，会先清理该 asset 旧的 `face_observations` 及其 `face_embeddings`，再写入本次结果，避免重复累积。
+- 当前实现对同一 asset 的重检采用 IoU 复用语义：归一化 bbox IoU `> 0.5` 的新检测框会复用旧 `face_observations.id`，并保留旧 `main` embedding 与既有 assignment；未被新检测框匹配的旧 face 会被删除并清理其 embedding / assignment；只有新增检测框才会写入新的 `face_observations` 与 `face_embeddings`。
+
+### 3.8 `person`
+
+```sql
+CREATE TABLE person (
+  id TEXT PRIMARY KEY,
+  display_name TEXT,
+  is_named INTEGER NOT NULL DEFAULT 0 CHECK (is_named IN (0, 1)),
+  status TEXT NOT NULL CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_person_status ON person(status, is_named, created_at);
+```
+
+字段语义：
+
+- `id`：匿名人物 UUID。
+- `display_name`：首版匿名人物为空，后续 WebUI 命名后才会有值。
+- `is_named`：`0` 表示匿名人物，`1` 表示已命名人物。
+- `status`：当前 Slice C 只写 `active`；后续 merge/撤销等功能再引入失效语义。
+
+运行时语义：
+
+- `hikbox scan start` 的 assignment 阶段只会在“自己 + 至少 2 个近邻”达到 `min_faces=3` 且无法复用已有人物时创建匿名 `person`。
+- 重复执行同一 `scan start` 时不会重复创建已存在的匿名人物。
+
+### 3.9 `assignment_runs`
+
+```sql
+CREATE TABLE assignment_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_session_id INTEGER NOT NULL REFERENCES scan_sessions(id),
+  algorithm_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  param_snapshot_json TEXT NOT NULL,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  assigned_count INTEGER NOT NULL DEFAULT 0,
+  new_person_count INTEGER NOT NULL DEFAULT 0,
+  deferred_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  orphan_embedding_count INTEGER NOT NULL DEFAULT 0,
+  orphan_embedding_keys_json TEXT NOT NULL DEFAULT '[]',
+  failure_reason TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_assignment_runs_session_id ON assignment_runs(scan_session_id, id);
+```
+
+字段语义：
+
+- `scan_session_id`：归属运行所属的 `scan_sessions.id`。
+- `algorithm_version`：当前固定为 `immich_v6_online_v1`。
+- `param_snapshot_json`：当前固定记录 `max_distance=0.5`、`min_faces=3`、`num_results=3`、`embedding_variant='main'`、`distance_metric='cosine_distance'`、`self_match_included=true`、`two_pass_deferred=true`。
+- `candidate_count` / `assigned_count` / `new_person_count` / `deferred_count` / `skipped_count` / `failed_count`：本次 assignment 摘要。
+- `orphan_embedding_count` / `orphan_embedding_keys_json`：记录未能关联到任何 `face_observations.id` 的孤儿 `main` embedding；这类数据只记 warning，不参与归属。
+- `failure_reason`：assignment 失败时的可读错误。
+
+运行时语义：
+
+- 每次执行公开入口 `hikbox scan start` 都会在进入 assignment 阶段时创建一条 `assignment_runs`。
+- 候选 active face 缺少 `main` embedding、embedding 维度不是 `512` 或 `vector_blob` 不可解码时，当前 run 记为 `failed`，对应 `scan_sessions.status` 也会记为 `failed`。
+- 无新增归属或所有候选都保持未归属时，run 仍可 `completed`，但日志会记 `assignment_skipped`。
+
+### 3.10 `person_face_assignments`
+
+```sql
+CREATE TABLE person_face_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id TEXT NOT NULL REFERENCES person(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observations(id),
+  assignment_run_id INTEGER NOT NULL REFERENCES assignment_runs(id),
+  assignment_source TEXT NOT NULL CHECK (assignment_source IN ('online_v6')),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+```
+
+索引与约束：
+
+```sql
+CREATE INDEX idx_person_face_assignments_person_id
+  ON person_face_assignments(person_id, active, face_observation_id);
+CREATE INDEX idx_person_face_assignments_face_id
+  ON person_face_assignments(face_observation_id, active, assignment_run_id);
+CREATE UNIQUE INDEX idx_person_face_assignments_unique_active_face
+  ON person_face_assignments(face_observation_id)
+  WHERE active = 1;
+```
+
+字段语义：
+
+- `person_id`：归属到的匿名/已命名人物。
+- `face_observation_id`：被归属的人脸 observation。
+- `assignment_run_id`：本次归属来自哪一次 `assignment_runs`。
+- `assignment_source`：当前固定为 `online_v6`。
+- `active`：同一张脸同时最多只允许一条 active assignment。
+- `evidence_json`：当前记录匹配到的近邻 face id 列表与距离摘要。
+
+运行时语义：
+
+- 当前 Slice C 只新增 active assignment，不实现 merge / undo / exclusion，因此不会自动失效旧 assignment。
+- 已有 active assignment 的 face 不会再次作为待归属候选，重复 `scan start` 也不会重复写入 assignment。
 
 ## 4. `embedding.db`
 
@@ -359,6 +478,11 @@ CREATE INDEX idx_face_embeddings_face_id ON face_embeddings(face_observation_id,
   - `batch_completed`
   - `scan_completed`
   - `scan_skipped`
+  - `assignment_started`
+  - `assignment_completed`
+  - `assignment_skipped`
+  - `assignment_failed`
+  - `assignment_warning`
 
 `scan.log.jsonl` 的单条记录会包含该事件最小必需字段，例如时间戳、`session_id`、`batch_id`、`batch_index`、统计摘要和模型根目录。
 
@@ -368,15 +492,19 @@ CREATE INDEX idx_face_embeddings_face_id ON face_embeddings(face_observation_id,
 - 支持后缀：`jpg`、`jpeg`、`png`、`heic`、`heif`，大小写不敏感。
 - 只有 `heic`/`heif` 尝试匹配同目录隐藏 `.MOV/.mov`，并把命中的绝对路径写入 `assets.live_photo_mov_path`。
 - `jpg`/`jpeg`/`png` 不做 live MOV 配对。
+- 当前扫描 worker 使用 `det_thresh=0.7` 调用 InsightFace `buffalo_l`。
 - 每批调用一个独立 worker 子进程处理真实 InsightFace 检测、embedding 与产物生成。
 - 主进程只在整批 worker 成功返回后，才统一提交 `assets`、`face_observations`、`face_embeddings` 和批次 `completed` 状态。
 - 单图失败不会阻断同批其它图片提交，但该图不会产生 `face_observations`、`face_embeddings` 或产物。
+- 当 discover/批次阶段收敛后，同一个 `hikbox scan start` 会继续执行在线 assignment 阶段。
+- assignment 只读取 `library.db` 中已存在的 active `face_observations` 和 `embedding.db` 中的 `main` embedding；不会重新读照片，也不会重新调用 InsightFace 做归属。
+- assignment 使用 HNSW 余弦索引执行两轮在线归属，算法版本固定为 `immich_v6_online_v1`，assignment 来源固定为 `online_v6`。
+- orphan `main` embedding 只记录 warning，不进入索引或候选；损坏候选 embedding 会使 assignment 与 `scan_sessions` 一起失败。
 
 ## 7. 未在本文承诺的内容
 
 以下内容尚未在当前实现中落地，因此不属于本文档承诺范围：
 
-- person、assignment、online_v6 归属链路
 - 命名、合并、排除、导出相关表
 - WebUI、服务端 API、导出账本
 - 任何 `schema_version > 1` 的 migration 规则

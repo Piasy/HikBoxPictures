@@ -12,6 +12,7 @@
 - 验收只通过一个测试用例完成：`tests/people_gallery/test_people_gallery_fixture.py`。该测试读取入库 fixture 和 manifest，执行 schema、文件、checksum、解码、类别数量、Live MOV 配对和真实 InsightFace 探针检查。
 - manifest 只能作为测试断言数据，不得作为产品逻辑输入。
 - 验收必须使用真实图片解码、真实文件系统、真实 manifest 校验和真实 InsightFace 可用性探针；mock/stub/no-op 路径不得满足验收。
+- 真实 InsightFace 探针必须与产品扫描检测语义对齐，固定使用 `buffalo_l det_10g.onnx` 且 `det_thresh=0.7`；不得再用更低阈值单独放宽 Slice 0 基线。
 - 所有临时探针报告和中间检查产物必须放在 `.tmp/people-gallery-test-gallery/` 下；不得在仓库根目录创建其它临时目录。
 
 ## Feature Slice 1: 入库真实验收小图库
@@ -62,14 +63,14 @@
 - AC-3：验收测试确认 3 个目标人物各有 10 张单目标人物照片；8 张目标人物合照精确包含 6 张双人合照和 2 张三人合照；`expected_person_groups` 和 `expected_exports` 能引用对应 asset。
 - AC-4：验收测试确认 manifest 中每个 `asset` 都能关联真实文件、checksum、拍摄月份、人物标签、Live MOV 正反例标记、无脸/损坏/非支持后缀标记和 tolerance 标记。
 - AC-5：验收测试确认 2 个 HEIC/HEIF + 隐藏 MOV 正例和 2 个 JPG/PNG + 相似 MOV 反例都真实存在，正例和反例在 manifest 中有明确标记，并可被后续扫描测试复用。
-- AC-6：验收测试使用真实 InsightFace 探针对核心目标人物照片运行后，3 个目标人物各有 10 张单目标人物照片可检测到人脸，8 张合照都可检测到两个或更多目标人物 face；探针结果写入 `.tmp/people-gallery-test-gallery/` 报告。
+- AC-6：验收测试使用真实 InsightFace 探针以 `det_thresh=0.7` 对核心目标人物照片运行后，3 个目标人物各有 10 张单目标人物照片可检测到人脸，8 张合照都可检测到两个或更多目标人物 face；探针结果写入 `.tmp/people-gallery-test-gallery/` 报告。
 - AC-7：验收测试重复运行不会修改 fixture 文件，且根据 manifest checksum 能发现任何意外文件内容变更。
 
 ### Automated Verification
 
 - 本 slice 只有一个自动化测试用例：执行 `pytest tests/people_gallery/test_people_gallery_fixture.py`。
 - 该测试必须一次性覆盖 AC-1 到 AC-7，并通过公共文件路径读取 `tests/fixtures/people_gallery_scan/` 与 `manifest.json`。
-- 该测试必须执行真实文件存在性检查、checksum 校验、图片解码、HEIC/HEIF 解码、损坏图片不可解码检查、类别数量检查、Live MOV 正反例检查和真实 InsightFace 探针。
+- 该测试必须执行真实文件存在性检查、checksum 校验、图片解码、HEIC/HEIF 解码、损坏图片不可解码检查、类别数量检查、Live MOV 正反例检查，以及与产品扫描一致的 `det_thresh=0.7` 真实 InsightFace 探针。
 - 该测试不得 import 产品扫描、人物归属、WebUI 或导出内部函数；不得用硬编码成功、空目录、fake detector、跳过 HEIC/HEIF 或直接修改 manifest 的方式通过。
 
 ### Done When

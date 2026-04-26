@@ -16,6 +16,7 @@ MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
 REPORT_DIR = REPO_ROOT / ".tmp" / "people-gallery-test-gallery"
 SUPPORTED_SCAN_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 TARGET_PEOPLE = {"target_alex", "target_blair", "target_casey"}
+REAL_PROBE_DET_THRESH = 0.7
 EXPECTED_CATEGORY_COUNTS = {
     "single_target": 30,
     "target_group": 8,
@@ -335,6 +336,7 @@ def _assert_real_insightface_probe(assets: list[dict[str, Any]]) -> None:
     assert single_counts == {label: 10 for label in sorted(TARGET_PEOPLE)}, f"InsightFace 单人通过分布错误: {dict(single_counts)}"
     assert group_passed == 8, f"InsightFace 合照通过数量错误: {group_passed}"
     report["summary"] = {
+        "det_thresh": REAL_PROBE_DET_THRESH,
         "single_target_passed_by_person": dict(sorted(single_counts.items())),
         "target_group_passed": group_passed,
     }
@@ -352,7 +354,7 @@ def _load_insightface_detector() -> Any:
     detector_path = model_root / "models" / "buffalo_l" / "det_10g.onnx"
     assert detector_path.exists(), f"缺少 InsightFace detector 模型: {detector_path}"
     detector = model_zoo.get_model(detector_path.as_posix(), providers=["CPUExecutionProvider"])
-    detector.prepare(ctx_id=0, det_thresh=0.5, input_size=(640, 640))
+    detector.prepare(ctx_id=0, det_thresh=REAL_PROBE_DET_THRESH, input_size=(640, 640))
     return detector
 
 

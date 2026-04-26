@@ -483,7 +483,7 @@
     {
       "capture_month": "2025-01",
       "category": "single_target",
-      "checksum_sha256": "05166fad531a022835e2f50160ad9eaebb8201f37f0eb1d5b2efbf6d979609e6",
+      "checksum_sha256": "2b21df59e2dde63309ddfc8f5e9d941623fbbc972795a8b52f4fd6e251e2bf2a",
       "decode_expected": true,
       "expected_target_people": [
         "target_casey"
@@ -531,7 +531,7 @@
     {
       "capture_month": "2025-03",
       "category": "single_target",
-      "checksum_sha256": "b00758334a90cdbe7995272e356bcee8032768451bfe55ff6fef4d2c37c8764d",
+      "checksum_sha256": "268973292ec01da1182df3a4a396694590525d36c083c0684ec5d9f1455dd898",
       "decode_expected": true,
       "expected_target_people": [
         "target_casey"
@@ -627,7 +627,7 @@
     {
       "capture_month": "2025-02",
       "category": "single_target",
-      "checksum_sha256": "43b3431f398f9e53e98f5b1cd63781ce628966cd58cc34bce5a332081722c44d",
+      "checksum_sha256": "471b1447bed69ae0804454b24fd8e40fcb05ac68e0a853e64ede333f0fa0f160",
       "decode_expected": true,
       "expected_target_people": [
         "target_casey"
@@ -675,7 +675,7 @@
     {
       "capture_month": "2025-04",
       "category": "single_target",
-      "checksum_sha256": "78fa308ad8acd921a5b49d1bdeff91258f0594590ea88133138b39cbefd20f46",
+      "checksum_sha256": "c98c2c8515a5cb6c0563815b81c2c493384d6f2b163e92c6c8a6d5cede5c14e2",
       "decode_expected": true,
       "expected_target_people": [
         "target_casey"
@@ -1264,15 +1264,15 @@
     "pg_018_single_blair_08.jpg": "221efa37bfa806edc6407a2914c99e2a3d40dbc407b159b27c4945a6a2cd2dc0",
     "pg_019_single_blair_09.jpg": "7716359bc9665ab1939bde67ddcac3d4f8a174a38740ebdb8448217d50c39ae5",
     "pg_020_single_blair_10.jpg": "95a353ff38a6086b4286a64fef730ea173f4584d7f4f2cd9f7d3ca042716d26c",
-    "pg_021_single_casey_01.jpg": "05166fad531a022835e2f50160ad9eaebb8201f37f0eb1d5b2efbf6d979609e6",
+    "pg_021_single_casey_01.jpg": "2b21df59e2dde63309ddfc8f5e9d941623fbbc972795a8b52f4fd6e251e2bf2a",
     "pg_022_single_casey_02.jpg": "7ee68fdaf360735c64b5025539af08d24ca412bc0a710166e852596218958557",
-    "pg_023_single_casey_03.jpg": "b00758334a90cdbe7995272e356bcee8032768451bfe55ff6fef4d2c37c8764d",
+    "pg_023_single_casey_03.jpg": "268973292ec01da1182df3a4a396694590525d36c083c0684ec5d9f1455dd898",
     "pg_024_single_casey_04.jpg": "f36a1245fba1a0aa553a38e4eec4f7778887339185b75b2ae1c153954d5f4af5",
     "pg_025_single_casey_05.jpg": "e38511a2b9484bd4816756dda0db82ab8d0ee65c913f18a4d0330a8e6fb1db8b",
     "pg_026_single_casey_06.jpg": "8ad7c73a4662a865aa024722b23c75bfc4627fd5d7d73ea42ea0695ffb605f9f",
-    "pg_027_single_casey_07.jpg": "43b3431f398f9e53e98f5b1cd63781ce628966cd58cc34bce5a332081722c44d",
+    "pg_027_single_casey_07.jpg": "471b1447bed69ae0804454b24fd8e40fcb05ac68e0a853e64ede333f0fa0f160",
     "pg_028_single_casey_08.jpg": "76a205eebb03169483253445d29ecf417bcb72d303ff7e376377506cca758c41",
-    "pg_029_single_casey_09.jpg": "78fa308ad8acd921a5b49d1bdeff91258f0594590ea88133138b39cbefd20f46",
+    "pg_029_single_casey_09.jpg": "c98c2c8515a5cb6c0563815b81c2c493384d6f2b163e92c6c8a6d5cede5c14e2",
     "pg_030_single_casey_10.jpg": "cf9612243a79d380c2e66eca0b8cf6ceed14135fee6ebfe13c43c941d5fc4c08",
     "pg_031_group_alex_blair_01.jpg": "aa36cd9825ca120225d0dfa317afe8d35209d12b373164c13e0c2ff0508f8f02",
     "pg_032_group_alex_blair_02.jpg": "9fc00b1e65c42b4cf31433f1857a8d8973f4231101652de8bbcaad24cbf68905",
@@ -1478,9 +1478,9 @@
     }
   ],
   "provenance": {
-    "generated_by": "Codex 一次性本地生成，fixture 直接入库，不依赖运行时生成脚本。",
-    "method": "从本地 insightface 示例图裁剪三名目标人物和非目标人物，叠加固定背景、轻微亮度/对比度变化，并用 pillow-heif 写入 HEIC/HEIF 样本。",
-    "model_probe": "使用本机 buffalo_l det_10g.onnx 进行生成前后人脸检测探针。",
+    "generated_by": "Codex 一次性本地生成并做最小必要的本地收边修正，fixture 直接入库，不依赖运行时生成脚本。",
+    "method": "从本地 insightface 示例图裁剪三名目标人物和非目标人物，叠加固定背景、轻微亮度/对比度变化，并用 pillow-heif 写入 HEIC/HEIF 样本；其中 4 张 Casey 单人图额外做统一轻微收边放大，使真实探针与产品扫描都基于同一 0.7 检测阈值稳定检出。",
+    "model_probe": "使用本机 buffalo_l det_10g.onnx 以 det_thresh=0.7 进行生成后真实人脸检测探针。",
     "source_images": [
       "insightface.data.images/t1.jpg"
     ]

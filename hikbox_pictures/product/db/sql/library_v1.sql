@@ -95,3 +95,56 @@ CREATE TABLE face_observations (
 );
 
 CREATE INDEX idx_face_observations_asset_id ON face_observations(asset_id, face_index);
+
+CREATE TABLE person (
+  id TEXT PRIMARY KEY,
+  display_name TEXT,
+  is_named INTEGER NOT NULL DEFAULT 0 CHECK (is_named IN (0, 1)),
+  status TEXT NOT NULL CHECK (status IN ('active', 'inactive')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_person_status ON person(status, is_named, created_at);
+
+CREATE TABLE assignment_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_session_id INTEGER NOT NULL REFERENCES scan_sessions(id),
+  algorithm_version TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  param_snapshot_json TEXT NOT NULL,
+  candidate_count INTEGER NOT NULL DEFAULT 0,
+  assigned_count INTEGER NOT NULL DEFAULT 0,
+  new_person_count INTEGER NOT NULL DEFAULT 0,
+  deferred_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  failed_count INTEGER NOT NULL DEFAULT 0,
+  orphan_embedding_count INTEGER NOT NULL DEFAULT 0,
+  orphan_embedding_keys_json TEXT NOT NULL DEFAULT '[]',
+  failure_reason TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_assignment_runs_session_id ON assignment_runs(scan_session_id, id);
+
+CREATE TABLE person_face_assignments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id TEXT NOT NULL REFERENCES person(id),
+  face_observation_id INTEGER NOT NULL REFERENCES face_observations(id),
+  assignment_run_id INTEGER NOT NULL REFERENCES assignment_runs(id),
+  assignment_source TEXT NOT NULL CHECK (assignment_source IN ('online_v6')),
+  active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  evidence_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_person_face_assignments_person_id
+  ON person_face_assignments(person_id, active, face_observation_id);
+CREATE INDEX idx_person_face_assignments_face_id
+  ON person_face_assignments(face_observation_id, active, assignment_run_id);
+CREATE UNIQUE INDEX idx_person_face_assignments_unique_active_face
+  ON person_face_assignments(face_observation_id)
+  WHERE active = 1;

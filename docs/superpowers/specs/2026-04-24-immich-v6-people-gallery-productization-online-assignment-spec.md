@@ -19,7 +19,7 @@
 
 ## Feature Slice 1: v6 在线人物归属
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

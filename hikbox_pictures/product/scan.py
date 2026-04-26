@@ -12,6 +12,11 @@ import sys
 
 import numpy as np
 
+from hikbox_pictures.product.online_assignment import ExistingAssetFace
+from hikbox_pictures.product.online_assignment import OnlineAssignmentError
+from hikbox_pictures.product.online_assignment import RedetectFace
+from hikbox_pictures.product.online_assignment import reconcile_asset_redetection
+from hikbox_pictures.product.online_assignment import run_online_assignment
 from hikbox_pictures.product.scan_shared import SUPPORTED_SCAN_SUFFIXES
 from hikbox_pictures.product.scan_shared import compute_capture_month
 from hikbox_pictures.product.scan_shared import compute_file_fingerprint
@@ -32,6 +37,9 @@ REQUIRED_LIBRARY_SCAN_TABLES = (
     "scan_batches",
     "scan_batch_items",
     "face_observations",
+    "person",
+    "assignment_runs",
+    "person_face_assignments",
 )
 REQUIRED_EMBEDDING_SCAN_TABLES = ("face_embeddings",)
 
@@ -88,6 +96,15 @@ def start_scan(
         )
         pending_batches = _load_pending_batches(workspace_context, session_id=session_id)
         if not pending_batches:
+            _refresh_session_summary(
+                workspace_context=workspace_context,
+                session_id=session_id,
+                final_status="running",
+            )
+            _run_assignment_stage(
+                workspace_context=workspace_context,
+                session_id=session_id,
+            )
             summary = _refresh_session_summary(
                 workspace_context=workspace_context,
                 session_id=session_id,
@@ -116,6 +133,10 @@ def start_scan(
                 session_id=session_id,
             )
 
+        _run_assignment_stage(
+            workspace_context=workspace_context,
+            session_id=session_id,
+        )
         summary = _refresh_session_summary(
             workspace_context=workspace_context,
             session_id=session_id,
@@ -396,15 +417,13 @@ def _ensure_scan_session(
                 connection.execute(
                     """
                     UPDATE scan_sessions
-                    SET status = CASE
-                        WHEN completed_batches = total_batches THEN 'completed'
-                        ELSE 'running'
-                    END
+                    SET status = 'running',
+                        completed_at = NULL
                     WHERE id = ?
                     """,
                     (int(row["id"]),),
                 )
-            return dict(row)
+            return {"id": int(row["id"]), "status": "running", "total_batches": int(row["total_batches"])}
 
         started_at = utc_now_text()
         with connection:
@@ -780,9 +799,21 @@ def _commit_batch_results(
             validated = validated_results[str(candidate["absolute_path"])]
             result = validated["raw_result"]
             asset_id = _upsert_asset(connection, candidate=candidate, result=result)
-            old_artifact_paths_to_cleanup.extend(_list_existing_face_artifact_paths(connection, asset_id=asset_id))
-            _clear_existing_face_rows(connection, asset_id=asset_id)
+            existing_face_ids, existing_faces = _load_existing_asset_face_state(
+                connection,
+                asset_id=asset_id,
+            )
             if str(result["status"]) == "failed":
+                old_artifact_paths_to_cleanup.extend(
+                    _list_face_artifact_paths(
+                        connection,
+                        face_ids=existing_face_ids,
+                    )
+                )
+                _delete_invalidated_face_rows(
+                    connection,
+                    face_ids=existing_face_ids,
+                )
                 connection.execute(
                     """
                     UPDATE scan_batch_items
@@ -810,7 +841,56 @@ def _commit_batch_results(
                 continue
 
             planned_faces = validated["faces"]
+            reconcile_result = reconcile_asset_redetection(
+                existing_faces=existing_faces,
+                redetected_faces=[
+                    RedetectFace(
+                        bbox=tuple(float(value) for value in planned_face["bbox"]),
+                        image_width=int(validated["image_width"]),
+                        image_height=int(validated["image_height"]),
+                        embedding=np.asarray(planned_face["embedding"], dtype=np.float32),
+                    )
+                    for planned_face in planned_faces
+                ],
+            )
+            reused_face_ids = {int(face_id) for face_id in reconcile_result.reused_face_ids}
+            invalidated_face_ids = [
+                face_id for face_id in existing_face_ids if face_id not in reused_face_ids
+            ]
+            old_artifact_paths_to_cleanup.extend(
+                _list_face_artifact_paths(
+                    connection,
+                    face_ids=invalidated_face_ids,
+                )
+            )
+            _delete_invalidated_face_rows(
+                connection,
+                face_ids=invalidated_face_ids,
+            )
+            next_face_index = _next_face_index_for_asset(connection, asset_id=asset_id)
             for planned_face in planned_faces:
+                reused_face_id = reconcile_result.reused_face_id_by_detection_index.get(int(planned_face["face_index"]))
+                if reused_face_id is not None:
+                    old_artifact_paths_to_cleanup.extend(
+                        _list_face_artifact_paths(
+                            connection,
+                            face_ids=[int(reused_face_id)],
+                        )
+                    )
+                    final_crop_path, final_context_path = _materialize_artifacts(
+                        planned_face=planned_face,
+                    )
+                    moved_artifact_paths.extend([final_crop_path, final_context_path])
+                    _update_reused_face_observation(
+                        connection,
+                        face_observation_id=int(reused_face_id),
+                        planned_face=planned_face,
+                        image_width=int(validated["image_width"]),
+                        image_height=int(validated["image_height"]),
+                        crop_path=final_crop_path,
+                        context_path=final_context_path,
+                    )
+                    continue
                 final_crop_path, final_context_path = _materialize_artifacts(
                     planned_face=planned_face,
                 )
@@ -835,7 +915,7 @@ def _commit_batch_results(
                     """,
                     (
                         asset_id,
-                        int(planned_face["face_index"]),
+                        next_face_index,
                         float(planned_face["bbox"][0]),
                         float(planned_face["bbox"][1]),
                         float(planned_face["bbox"][2]),
@@ -848,6 +928,7 @@ def _commit_batch_results(
                         utc_now_text(),
                     ),
                 )
+                next_face_index += 1
                 face_observation_id = int(face_cursor.lastrowid)
                 vector = planned_face["embedding"]
                 connection.execute(
@@ -953,6 +1034,24 @@ def _commit_batch_results(
         )
 
 
+def _run_assignment_stage(
+    *,
+    workspace_context: WorkspaceContext,
+    session_id: int,
+) -> None:
+    try:
+        run_online_assignment(
+            workspace_context=workspace_context,
+            scan_session_id=session_id,
+            append_log=lambda payload: _append_scan_log(
+                workspace_context=workspace_context,
+                payload=payload,
+            ),
+        )
+    except OnlineAssignmentError as exc:
+        raise ScanStartError(str(exc)) from exc
+
+
 def _upsert_asset(connection: sqlite3.Connection, *, candidate: dict[str, object], result: dict[str, object]) -> int:
     now = utc_now_text()
     connection.execute(
@@ -1021,6 +1120,179 @@ def _clear_existing_face_rows(connection: sqlite3.Connection, *, asset_id: int) 
             "DELETE FROM face_observations WHERE asset_id = ?",
             (asset_id,),
         )
+
+
+def _load_existing_asset_face_state(
+    connection: sqlite3.Connection,
+    *,
+    asset_id: int,
+) -> tuple[list[int], list[ExistingAssetFace]]:
+    rows = connection.execute(
+        """
+        SELECT
+          face_observations.id,
+          face_observations.bbox_x1,
+          face_observations.bbox_y1,
+          face_observations.bbox_x2,
+          face_observations.bbox_y2,
+          face_observations.image_width,
+          face_observations.image_height,
+          embedding.face_embeddings.dimension,
+          embedding.face_embeddings.vector_blob,
+          person_face_assignments.person_id
+        FROM face_observations
+        LEFT JOIN embedding.face_embeddings
+          ON embedding.face_embeddings.face_observation_id = face_observations.id
+         AND embedding.face_embeddings.variant = 'main'
+        LEFT JOIN person_face_assignments
+          ON person_face_assignments.face_observation_id = face_observations.id
+         AND person_face_assignments.active = 1
+        WHERE face_observations.asset_id = ?
+        ORDER BY face_observations.id ASC
+        """,
+        (asset_id,),
+    ).fetchall()
+    all_face_ids: list[int] = []
+    existing_faces: list[ExistingAssetFace] = []
+    for row in rows:
+        face_id = int(row[0])
+        all_face_ids.append(face_id)
+        vector_blob = row[8]
+        vector: np.ndarray | None = None
+        if row[7] is not None and int(row[7]) == 512 and isinstance(vector_blob, (bytes, bytearray, memoryview)):
+            try:
+                decoded_vector = np.frombuffer(bytes(vector_blob), dtype=np.float32)
+            except ValueError:
+                decoded_vector = None
+            if decoded_vector is not None and decoded_vector.shape == (512,):
+                vector = decoded_vector.copy()
+        existing_faces.append(
+            ExistingAssetFace(
+                face_id=str(face_id),
+                bbox=(float(row[1]), float(row[2]), float(row[3]), float(row[4])),
+                image_width=int(row[5]),
+                image_height=int(row[6]),
+                person_id=str(row[9]) if row[9] is not None else None,
+                embedding=vector,
+            )
+        )
+    return all_face_ids, existing_faces
+
+
+def _list_face_artifact_paths(connection: sqlite3.Connection, *, face_ids: list[int]) -> list[Path]:
+    if not face_ids:
+        return []
+    placeholders = ", ".join("?" for _ in face_ids)
+    rows = connection.execute(
+        f"""
+        SELECT crop_path, context_path
+        FROM face_observations
+        WHERE id IN ({placeholders})
+        ORDER BY id ASC
+        """,
+        face_ids,
+    ).fetchall()
+    paths: list[Path] = []
+    for crop_path, context_path in rows:
+        paths.append(Path(str(crop_path)))
+        paths.append(Path(str(context_path)))
+    return paths
+
+
+def _update_reused_face_observation(
+    connection: sqlite3.Connection,
+    *,
+    face_observation_id: int,
+    planned_face: dict[str, object],
+    image_width: int,
+    image_height: int,
+    crop_path: Path,
+    context_path: Path,
+) -> None:
+    connection.execute(
+        """
+        UPDATE face_observations
+        SET bbox_x1 = ?,
+            bbox_y1 = ?,
+            bbox_x2 = ?,
+            bbox_y2 = ?,
+            image_width = ?,
+            image_height = ?,
+            score = ?,
+            crop_path = ?,
+            context_path = ?
+        WHERE id = ?
+        """,
+        (
+            float(planned_face["bbox"][0]),
+            float(planned_face["bbox"][1]),
+            float(planned_face["bbox"][2]),
+            float(planned_face["bbox"][3]),
+            image_width,
+            image_height,
+            float(planned_face["score"]),
+            str(crop_path),
+            str(context_path),
+            face_observation_id,
+        ),
+    )
+
+
+def _delete_invalidated_face_rows(connection: sqlite3.Connection, *, face_ids: list[int]) -> None:
+    if not face_ids:
+        return
+    placeholders = ", ".join("?" for _ in face_ids)
+    person_rows = connection.execute(
+        f"""
+        SELECT DISTINCT person_id
+        FROM person_face_assignments
+        WHERE face_observation_id IN ({placeholders})
+          AND person_id IS NOT NULL
+        """,
+        face_ids,
+    ).fetchall()
+    connection.execute(
+        f"DELETE FROM person_face_assignments WHERE face_observation_id IN ({placeholders})",
+        face_ids,
+    )
+    connection.execute(
+        f"DELETE FROM embedding.face_embeddings WHERE face_observation_id IN ({placeholders})",
+        face_ids,
+    )
+    connection.execute(
+        f"DELETE FROM face_observations WHERE id IN ({placeholders})",
+        face_ids,
+    )
+    person_ids = [str(row[0]) for row in person_rows if row[0] is not None]
+    if not person_ids:
+        return
+    person_placeholders = ", ".join("?" for _ in person_ids)
+    connection.execute(
+        f"""
+        DELETE FROM person
+        WHERE id IN ({person_placeholders})
+          AND NOT EXISTS (
+            SELECT 1
+            FROM person_face_assignments
+            WHERE person_face_assignments.person_id = person.id
+              AND person_face_assignments.active = 1
+          )
+        """,
+        person_ids,
+    )
+
+
+def _next_face_index_for_asset(connection: sqlite3.Connection, *, asset_id: int) -> int:
+    row = connection.execute(
+        """
+        SELECT COALESCE(MAX(face_index), -1) + 1
+        FROM face_observations
+        WHERE asset_id = ?
+        """,
+        (asset_id,),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _list_existing_face_artifact_paths(connection: sqlite3.Connection, *, asset_id: int) -> list[Path]:
@@ -1252,9 +1524,6 @@ def _refresh_session_summary(
         artifact_files = success_faces * 2
         status = final_status
         completed_at = utc_now_text() if final_status == "completed" else None
-        if final_status == "running" and completed_batches == total_batches:
-            status = "completed"
-            completed_at = utc_now_text()
         with connection:
             connection.execute(
                 """
