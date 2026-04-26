@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="detail-head">
+    <div>
+      <a class="back-link" href="/people">返回人物首页</a>
+      <h1>{{ detail_page.display_label }}</h1>
+      <p>{{ detail_page.sample_count }} 个 active 样本，当前第 {{ detail_page.current_page }} / {{ detail_page.total_pages }} 页。</p>
+    </div>
+  </div>
+
+  <section class="panel detail-shell" data-testid="person-detail" data-person-id="{{ detail_page.person_id }}">
+    <span class="sr-only" data-current-page="{{ detail_page.current_page }}"></span>
+    <span class="sr-only" data-total-pages="{{ detail_page.total_pages }}"></span>
+
+    <div class="sample-grid">
+      {% for sample in detail_page.samples %}
+        <article class="sample-card" data-assignment-id="{{ sample.assignment_id }}" data-asset-id="{{ sample.asset_id }}">
+          <img src="/images/assignments/{{ sample.assignment_id }}/context" alt="{{ detail_page.display_label }} 样本 {{ loop.index }}">
+          <div class="sample-card-body">
+            <div class="sample-card-meta">
+              <span>assignment #{{ sample.assignment_id }}</span>
+              {% if sample.is_live %}
+                <span class="live-badge" data-live-badge>Live</span>
+              {% endif %}
+            </div>
+          </div>
+        </article>
+      {% endfor %}
+    </div>
+
+    {% if detail_page.total_pages > 1 %}
+      <nav class="pagination" aria-label="详情分页">
+        {% for page_number in detail_page.page_numbers %}
+          {% if page_number == detail_page.current_page %}
+            <span class="page-chip is-current">第 {{ page_number }} 页</span>
+          {% else %}
+            <a class="page-chip" href="/people/{{ detail_page.person_id }}?page={{ page_number }}">第 {{ page_number }} 页</a>
+          {% endif %}
+        {% endfor %}
+      </nav>
+    {% endif %}
+  </section>
+{% endblock %}

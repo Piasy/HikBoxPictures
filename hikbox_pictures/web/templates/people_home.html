@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="hero">
+    <h1>人物库浏览</h1>
+    <p>只展示当前仍有 active assignment 的人物。点击任意人物卡即可进入详情页查看真实 context 样本。</p>
+  </section>
+
+  {% if not people_page.has_people %}
+    <section class="panel empty-state" data-empty-state="true">
+      <p>暂无人物。请先执行 <code>hikbox scan start</code> 完成扫描与在线归属。</p>
+    </section>
+  {% endif %}
+
+  <section class="panel section-block">
+    <div class="section-head">
+      <h2>已命名人物</h2>
+      <p>显示所有 <code>display_name</code> 已生效的人物。</p>
+    </div>
+    {% if people_page.named_people %}
+      <div class="people-grid">
+        {% for person in people_page.named_people %}
+          <article class="person-card" data-person-id="{{ person.person_id }}">
+            <a href="/people/{{ person.person_id }}">
+              <img src="/images/assignments/{{ person.cover_assignment_id }}/context" alt="{{ person.display_label }}">
+              <div class="person-card-body">
+                <p class="person-card-title" data-person-label>{{ person.display_label }}</p>
+                <div class="person-card-meta">
+                  <span data-sample-count>{{ person.sample_count }} 个样本</span>
+                  <span>查看详情</span>
+                </div>
+              </div>
+            </a>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="section-empty">暂无已命名人物。</p>
+    {% endif %}
+  </section>
+
+  <section class="panel section-block">
+    <div class="section-head">
+      <h2>匿名人物</h2>
+      <p>显示自动形成但尚未命名的人物。</p>
+    </div>
+    {% if people_page.anonymous_people %}
+      <div class="people-grid">
+        {% for person in people_page.anonymous_people %}
+          <article class="person-card" data-person-id="{{ person.person_id }}">
+            <a href="/people/{{ person.person_id }}">
+              <img src="/images/assignments/{{ person.cover_assignment_id }}/context" alt="{{ person.display_label }}">
+              <div class="person-card-body">
+                <p class="person-card-title" data-person-label>{{ person.display_label }}</p>
+                <div class="person-card-meta">
+                  <span data-sample-count>{{ person.sample_count }} 个样本</span>
+                  <span>查看详情</span>
+                </div>
+              </div>
+            </a>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="section-empty">暂无匿名人物。</p>
+    {% endif %}
+  </section>
+{% endblock %}

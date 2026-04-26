@@ -24,7 +24,7 @@
 
 ## Feature Slice 1: 人物库浏览
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

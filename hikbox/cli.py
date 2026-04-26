@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from hikbox_pictures.product.serve import ServeStartError
+from hikbox_pictures.product.serve import serve_workspace
 from hikbox_pictures.product.scan import ScanStartError
 from hikbox_pictures.product.scan import start_scan
 from hikbox_pictures.product.sources import WorkspaceAccessError
@@ -54,6 +56,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=200,
         type=_positive_int,
         help="每批处理的照片数量，必须为正整数，默认 200。",
+    )
+
+    serve_parser = subparsers.add_parser("serve", prog="hikbox serve")
+    serve_parser.add_argument("--workspace", required=True, help="工作区目录")
+    serve_parser.add_argument(
+        "--port",
+        default=8000,
+        type=_tcp_port,
+        help="监听端口，默认 8000。",
+    )
+    serve_parser.add_argument(
+        "--person-detail-page-size",
+        default=200,
+        type=_positive_person_detail_page_size,
+        help="人物详情页分页大小，必须为正整数，默认 200。",
     )
 
     return parser
@@ -109,6 +126,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         return 0
 
+    if args.command == "serve":
+        try:
+            serve_workspace(
+                workspace=Path(args.workspace),
+                port=int(args.port),
+                person_detail_page_size=int(args.person_detail_page_size),
+            )
+        except (WorkspaceAccessError, ServeStartError) as exc:
+            print(f"serve 失败: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     parser.print_usage(sys.stderr)
     print("参数错误: 不支持的命令。", file=sys.stderr)
     return 2
@@ -121,4 +150,24 @@ def _positive_int(raw: str) -> int:
         raise argparse.ArgumentTypeError("--batch-size 必须是正整数。") from exc
     if value < 1:
         raise argparse.ArgumentTypeError("--batch-size 必须是正整数。")
+    return value
+
+
+def _positive_person_detail_page_size(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--person-detail-page-size 必须是正整数。") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("--person-detail-page-size 必须是正整数。")
+    return value
+
+
+def _tcp_port(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--port 必须是 1-65535 之间的整数。") from exc
+    if value < 1 or value > 65535:
+        raise argparse.ArgumentTypeError("--port 必须是 1-65535 之间的整数。")
     return value

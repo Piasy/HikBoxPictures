@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <section class="panel not-found">
+    <h1>未找到人物</h1>
+    <p class="not-found-text">未找到 person_id={{ person_id }} 对应的人物，或该人物当前没有可浏览的 active assignment。</p>
+    <p class="not-found-text"><a class="back-link" href="/people">返回人物首页</a></p>
+  </section>
+{% endblock %}

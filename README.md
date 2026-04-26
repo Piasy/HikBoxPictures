@@ -56,7 +56,7 @@ hikbox source list --workspace /path/to/workspace
 hikbox scan start --workspace /path/to/workspace
 ```
 
-WebUI 的 `hikbox serve` 入口属于后续产品化 slice 的目标；在实现落地前，不要把它当作当前已可用命令。
+WebUI 的 `hikbox serve` 入口已经实现，可用于在本机启动人物库浏览页面；当前支持 `hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`。
 
 ## Playwright 与前端验收
 
