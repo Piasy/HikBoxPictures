@@ -170,6 +170,7 @@ CREATE TABLE scan_sessions (
 - 成功恢复时复用已有 `scan_sessions` 记录，并基于 `scan_batches.status` 判断哪些批次可跳过。
 - 同一 `plan_fingerprint` 下，`completed_batches == total_batches` 时再次执行会直接跳过，不会新建第二个 session。
 - 当前实现即使 discover/批次阶段没有新增待处理批次，也会在同一个 `scan start` 里继续执行 assignment 阶段；只有 assignment 也成功完成后，session 才会保持 `completed`。
+- CLI 执行 `hikbox-pictures scan start` 时默认每 10 秒向 `stderr` 打印一次进度，固定格式为“阶段、已完成批次数/总批次数、已完成照片数/总照片数”；批处理阶段的照片进度来自 worker stdout 的 `batch_progress` 事件，在线归属阶段由主进程在 assignment 阶段切换时输出。
 
 ### 3.5 `scan_batches`
 

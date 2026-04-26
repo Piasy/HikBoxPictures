@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import hashlib
 import json
 import os
@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import threading
 
 import numpy as np
 
@@ -42,6 +43,7 @@ REQUIRED_LIBRARY_SCAN_TABLES = (
     "person_face_assignments",
 )
 REQUIRED_EMBEDDING_SCAN_TABLES = ("face_embeddings",)
+_SCAN_PROGRESS_INTERVAL_SECONDS = 10.0
 
 
 def start_scan(
@@ -81,6 +83,10 @@ def start_scan(
                 command=command,
             )
         session_id = int(session["id"])
+        progress_state = _load_scan_progress_state(
+            workspace_context=workspace_context,
+            session_id=session_id,
+        )
         _append_scan_log(
             workspace_context=workspace_context,
             payload={
@@ -104,6 +110,7 @@ def start_scan(
             _run_assignment_stage(
                 workspace_context=workspace_context,
                 session_id=session_id,
+                progress_state=progress_state,
             )
             summary = _refresh_session_summary(
                 workspace_context=workspace_context,
@@ -131,11 +138,13 @@ def start_scan(
                 workspace_context=workspace_context,
                 batch=batch,
                 session_id=session_id,
+                progress_state=progress_state,
             )
 
         _run_assignment_stage(
             workspace_context=workspace_context,
             session_id=session_id,
+            progress_state=progress_state,
         )
         summary = _refresh_session_summary(
             workspace_context=workspace_context,
@@ -556,11 +565,78 @@ def _load_resumable_session(workspace_context: WorkspaceContext) -> dict[str, ob
     return dict(row)
 
 
+def _load_scan_progress_state(
+    *,
+    workspace_context: WorkspaceContext,
+    session_id: int,
+) -> dict[str, int]:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT
+              COUNT(*) AS total_batches,
+              COALESCE(SUM(item_count), 0) AS total_items,
+              COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_batches,
+              COALESCE(SUM(CASE WHEN status = 'completed' THEN item_count ELSE 0 END), 0) AS completed_items
+            FROM scan_batches
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise ScanStartError("scan 进度初始化失败。") from exc
+    finally:
+        connection.close()
+    assert row is not None
+    return {
+        "total_batches": int(row[0]),
+        "total_items": int(row[1]),
+        "completed_batches": int(row[2]),
+        "completed_items": int(row[3]),
+    }
+
+
+def _print_scan_progress(
+    *,
+    stage: str,
+    total_batches: int,
+    completed_batches: int,
+    total_items: int,
+    completed_items: int,
+) -> None:
+    print(
+        f"scan 进度: 阶段={stage}，批次 {completed_batches}/{total_batches}，照片 {completed_items}/{total_items}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _report_batch_progress(
+    *,
+    progress_state: dict[str, int],
+    payload: dict[str, object],
+) -> None:
+    raw_completed_items = payload.get("completed_items")
+    raw_total_items = payload.get("total_items")
+    if not isinstance(raw_completed_items, int) or not isinstance(raw_total_items, int) or raw_total_items <= 0:
+        return
+    completed_items = max(0, min(raw_completed_items, raw_total_items))
+    _print_scan_progress(
+        stage="批处理",
+        total_batches=progress_state["total_batches"],
+        completed_batches=progress_state["completed_batches"],
+        total_items=progress_state["total_items"],
+        completed_items=progress_state["completed_items"] + completed_items,
+    )
+
+
 def _run_batch(
     *,
     workspace_context: WorkspaceContext,
     batch: dict[str, object],
     session_id: int,
+    progress_state: dict[str, int],
 ) -> None:
     batch_id = int(batch["id"])
     batch_index = int(batch["batch_index"])
@@ -597,35 +673,22 @@ def _run_batch(
                 {
                     "model_root": str(workspace_context.model_root_path),
                     "staging_dir": str(staging_dir),
+                    "progress_interval_seconds": _SCAN_PROGRESS_INTERVAL_SECONDS,
                     "items": items,
                 },
                 ensure_ascii=False,
             ),
             encoding="utf-8",
         )
-        completed_process = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "hikbox_pictures.product.scan_worker",
-                "--input-json",
-                str(input_path),
-                "--output-json",
-                str(output_path),
-            ],
-            cwd=workspace_context.workspace_path,
-            text=True,
-            capture_output=True,
-            check=False,
+        worker_result = _run_scan_worker(
+            workspace_context=workspace_context,
+            input_path=input_path,
+            output_path=output_path,
+            progress_callback=lambda payload: _report_batch_progress(
+                progress_state=progress_state,
+                payload=payload,
+            ),
         )
-        if completed_process.returncode != 0:
-            raise ScanStartError(
-                completed_process.stderr.strip() or completed_process.stdout.strip() or "scan worker 异常退出"
-            )
-        try:
-            worker_result = json.loads(output_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ScanStartError("worker 输出无效。") from exc
 
         _commit_batch_results(
             workspace_context=workspace_context,
@@ -635,6 +698,8 @@ def _run_batch(
             candidates=items,
             worker_result=worker_result,
         )
+        progress_state["completed_batches"] += 1
+        progress_state["completed_items"] += len(items)
     except OSError as exc:
         failure_message = f"本地文件操作失败：{exc}"
         _best_effort_mark_batch_failed(
@@ -661,6 +726,86 @@ def _run_batch(
     finally:
         if staging_dir is not None:
             shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _run_scan_worker(
+    *,
+    workspace_context: WorkspaceContext,
+    input_path: Path,
+    output_path: Path,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "hikbox_pictures.product.scan_worker",
+            "--input-json",
+            str(input_path),
+            "--output-json",
+            str(output_path),
+        ],
+        cwd=workspace_context.workspace_path,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=1,
+    )
+    stderr_lines: list[str] = []
+
+    stdout_thread = threading.Thread(
+        target=_consume_scan_worker_stdout,
+        args=(process.stdout, progress_callback),
+        name="scan-worker-stdout",
+        daemon=True,
+    )
+    stderr_thread = threading.Thread(
+        target=_consume_scan_worker_stderr,
+        args=(process.stderr, stderr_lines),
+        name="scan-worker-stderr",
+        daemon=True,
+    )
+    stdout_thread.start()
+    stderr_thread.start()
+    return_code = process.wait()
+    stdout_thread.join()
+    stderr_thread.join()
+
+    if return_code != 0:
+        raise ScanStartError("".join(stderr_lines).strip() or "scan worker 异常退出")
+    try:
+        return json.loads(output_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ScanStartError("worker 输出无效。") from exc
+
+
+def _consume_scan_worker_stdout(
+    stream,
+    progress_callback: Callable[[dict[str, object]], None] | None,
+) -> None:
+    if stream is None:
+        return
+    for raw_line in stream:
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (
+            isinstance(payload, dict)
+            and payload.get("event") == "batch_progress"
+            and progress_callback is not None
+        ):
+            progress_callback(payload)
+
+
+def _consume_scan_worker_stderr(stream, stderr_lines: list[str]) -> None:
+    if stream is None:
+        return
+    for raw_line in stream:
+        stderr_lines.append(raw_line)
 
 
 def _load_batch_candidates(workspace_context: WorkspaceContext, *, batch_id: int) -> list[dict[str, object]]:
@@ -1038,6 +1183,7 @@ def _run_assignment_stage(
     *,
     workspace_context: WorkspaceContext,
     session_id: int,
+    progress_state: dict[str, int],
 ) -> None:
     try:
         run_online_assignment(
@@ -1046,6 +1192,13 @@ def _run_assignment_stage(
             append_log=lambda payload: _append_scan_log(
                 workspace_context=workspace_context,
                 payload=payload,
+            ),
+            progress_callback=lambda _event: _print_scan_progress(
+                stage="在线归属",
+                total_batches=progress_state["total_batches"],
+                completed_batches=progress_state["completed_batches"],
+                total_items=progress_state["total_items"],
+                completed_items=progress_state["completed_items"],
             ),
         )
     except OnlineAssignmentError as exc:

@@ -401,6 +401,7 @@ def run_online_assignment(
     workspace_context: WorkspaceContext,
     scan_session_id: int,
     append_log: Callable[[dict[str, object]], None],
+    progress_callback: Callable[[str], None] | None = None,
 ) -> AssignmentRunResult:
     params = AssignmentParams()
     assignment_run_id = _create_assignment_run(
@@ -409,6 +410,8 @@ def run_online_assignment(
         params=params,
     )
     try:
+        if progress_callback is not None:
+            progress_callback("started")
         append_log(
             {
                 "timestamp": utc_now_text(),
@@ -459,6 +462,8 @@ def run_online_assignment(
                 "orphan_embedding_count": len(orphan_keys),
             }
         )
+        if progress_callback is not None:
+            progress_callback("completed" if event_name == "assignment_completed" else "skipped")
         return result
     except Exception as exc:  # noqa: BLE001
         failure_reason = _format_assignment_failure_reason(exc)
@@ -480,6 +485,8 @@ def run_online_assignment(
                 "reason": raised_reason,
             },
         )
+        if progress_callback is not None:
+            progress_callback("failed")
         if isinstance(exc, OnlineAssignmentError) and raised_reason == failure_reason:
             raise
         raise OnlineAssignmentError(raised_reason) from exc

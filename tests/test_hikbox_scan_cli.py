@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,9 @@ import time
 import numpy as np
 from PIL import Image
 import pytest
+
+import hikbox_pictures.product.scan as scan_module
+import hikbox_pictures.product.scan_worker as scan_worker_module
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -621,6 +625,175 @@ def test_scan_start_runs_fixture_pipeline_and_persists_outputs(tmp_path: Path) -
     assert {record["event"] for record in spy_records} == {"faceanalysis_init"}
     assert {record["name"] for record in spy_records} == {"buffalo_l"}
     assert {record["root"] for record in spy_records} == {str((workspace / ".hikbox" / "models" / "insightface").resolve())}
+
+
+def test_scan_worker_emits_batch_progress_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    input_path = tmp_path / "input.json"
+    output_path = tmp_path / "output.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "model_root": str(tmp_path / "models"),
+                "staging_dir": str(tmp_path / "staging"),
+                "items": [
+                    {
+                        "absolute_path": str((tmp_path / "photo-1.jpg").resolve()),
+                        "file_fingerprint": "fingerprint-1",
+                        "item_index": 1,
+                    },
+                    {
+                        "absolute_path": str((tmp_path / "photo-2.jpg").resolve()),
+                        "file_fingerprint": "fingerprint-2",
+                        "item_index": 2,
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class _FakeBackend:
+        def __init__(self, *, model_root: Path) -> None:
+            self.model_root = model_root
+
+        def detect(self, image_path: Path) -> tuple[int, int, list[dict[str, object]]]:
+            time.sleep(0.12)
+            return (320, 240, [])
+
+    monkeypatch.setattr(scan_worker_module, "_InsightFaceWorkerBackend", _FakeBackend)
+    monkeypatch.setattr(scan_worker_module, "_SCAN_WORKER_PROGRESS_INTERVAL_SECONDS", 0.05, raising=False)
+
+    exit_code = scan_worker_module.main(
+        [
+            "--input-json",
+            str(input_path),
+            "--output-json",
+            str(output_path),
+        ]
+    )
+
+    assert exit_code == 0
+    stdout_lines = [line for line in capsys.readouterr().out.splitlines() if line.strip()]
+    progress_events = [json.loads(line) for line in stdout_lines]
+    assert any(
+        event.get("event") == "batch_progress" and event.get("total_items") == 2
+        for event in progress_events
+    )
+    assert output_path.is_file()
+
+
+def test_start_scan_prints_batch_and_assignment_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys,
+) -> None:
+    workspace = tmp_path / "workspace-progress"
+    external_root = tmp_path / "external-root-progress"
+    source_dir = tmp_path / "source-progress"
+    _write_named_source_copies(source_dir, ["photo_01.jpg", "photo_02.jpg", "photo_03.jpg"])
+
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    add_result = _add_source(workspace, source_dir)
+    assert add_result.returncode == 0
+
+    def _build_worker_payload(command: list[str]) -> tuple[dict[str, object], Path]:
+        input_json = Path(command[command.index("--input-json") + 1])
+        output_json = Path(command[command.index("--output-json") + 1])
+        payload = json.loads(input_json.read_text(encoding="utf-8"))
+        output_json.write_text(
+            json.dumps(
+                {
+                    "model_root": str(payload["model_root"]),
+                    "processed_at": "2026-04-26T00:00:00Z",
+                    "items": [
+                        {
+                            "absolute_path": str(item["absolute_path"]),
+                            "status": "succeeded",
+                            "image_width": 320,
+                            "image_height": 240,
+                            "face_count": 0,
+                            "detections": [],
+                            "artifacts": [],
+                        }
+                        for item in payload["items"]
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return payload, output_json
+
+    def _fake_run(command: list[str], **_kwargs) -> subprocess.CompletedProcess[str]:
+        _build_worker_payload(command)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    class _FakePopen:
+        def __init__(self, command: list[str], **_kwargs) -> None:
+            payload, _output_json = _build_worker_payload(command)
+            total_items = len(payload["items"])
+            self.args = command
+            self.returncode = 0
+            self.stdout = io.StringIO(
+                "".join(
+                    json.dumps(
+                        {
+                            "event": "batch_progress",
+                            "completed_items": completed_items,
+                            "total_items": total_items,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                    for completed_items in range(1, total_items + 1)
+                )
+            )
+            self.stderr = io.StringIO("")
+
+        def wait(self) -> int:
+            return self.returncode
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def communicate(self) -> tuple[str, str]:
+            return (self.stdout.read(), self.stderr.read())
+
+    def _fake_run_online_assignment(
+        *,
+        workspace_context,
+        scan_session_id: int,
+        append_log,
+        progress_callback=None,
+    ) -> None:
+        append_log(
+            {
+                "timestamp": "2026-04-26T00:00:00Z",
+                "event": "assignment_started",
+                "session_id": scan_session_id,
+                "assignment_run_id": 1,
+            }
+        )
+        if progress_callback is not None:
+            progress_callback("started")
+            progress_callback("completed")
+
+    monkeypatch.setattr(scan_module.subprocess, "run", _fake_run)
+    monkeypatch.setattr(scan_module.subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(scan_module, "run_online_assignment", _fake_run_online_assignment)
+    monkeypatch.setattr(scan_module, "_SCAN_PROGRESS_INTERVAL_SECONDS", 0.5, raising=False)
+
+    scan_module.start_scan(
+        workspace=workspace,
+        batch_size=2,
+        command_args=["scan", "start", "--workspace", str(workspace), "--batch-size", "2"],
+    )
+
+    progress_lines = _scan_progress_lines(capsys.readouterr().err)
+    assert "scan 进度: 阶段=批处理，批次 0/2，照片 1/3" in progress_lines
+    assert "scan 进度: 阶段=在线归属，批次 2/2，照片 3/3" in progress_lines
 
 
 def test_scan_start_fails_when_embedding_dimension_is_not_512_and_logs_failure(tmp_path: Path) -> None:
@@ -1475,6 +1648,27 @@ import subprocess as _subprocess
 _ORIGINAL_SUBPROCESS_RUN = _subprocess.run
 _subprocess.run = _spy_subprocess_run
 
+import hikbox_pictures.product.scan as _scan
+_ORIGINAL_RUN_SCAN_WORKER = getattr(_scan, "_run_scan_worker", None)
+
+
+def _corrupt_worker_result(worker_result):
+    first_item = worker_result["items"][0]
+    if first_item["status"] == "succeeded" and first_item["detections"]:
+        first_item["detections"][0]["embedding"] = first_item["detections"][0]["embedding"][:128]
+    return worker_result
+
+
+def _spy_run_scan_worker(*args, **kwargs):
+    worker_result = _ORIGINAL_RUN_SCAN_WORKER(*args, **kwargs)
+    if _CORRUPT_WORKER_OUTPUT:
+        worker_result = _corrupt_worker_result(worker_result)
+    return worker_result
+
+
+if _ORIGINAL_RUN_SCAN_WORKER is not None:
+    _scan._run_scan_worker = _spy_run_scan_worker
+
 import shutil as _shutil
 _ORIGINAL_SHUTIL_MOVE = _shutil.move
 _ARTIFACT_MOVE_COUNT = 0
@@ -1491,7 +1685,6 @@ def _spy_shutil_move(src, dst, *args, **kwargs):
 
 _shutil.move = _spy_shutil_move
 
-import hikbox_pictures.product.scan as _scan
 _ORIGINAL_SCAN_CLEANUP = _scan._cleanup_final_artifacts
 _OLD_ARTIFACT_CLEANUP_FAILED = False
 
@@ -1525,8 +1718,13 @@ def _normalized_stderr(stderr_text: str) -> str:
         line
         for line in stderr_text.splitlines()
         if line.strip() != "Matplotlib is building the font cache; this may take a moment."
+        and not line.strip().startswith("scan 进度:")
     ]
     return "\n".join(lines).strip()
+
+
+def _scan_progress_lines(stderr_text: str) -> list[str]:
+    return [line.strip() for line in stderr_text.splitlines() if line.strip().startswith("scan 进度:")]
 
 
 def _write_named_source_copies(source_dir: Path, file_names: list[str]) -> None:

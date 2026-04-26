@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import json
 from pathlib import Path
+import threading
 
 from PIL import ImageDraw
 import numpy as np
@@ -22,6 +24,9 @@ class FatalWorkerError(WorkerError):
     """必须使整个 worker 失败的错误。"""
 
 
+_SCAN_WORKER_PROGRESS_INTERVAL_SECONDS = 10.0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hikbox_pictures.product.scan_worker")
     parser.add_argument("--input-json", required=True)
@@ -29,7 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         payload = json.loads(Path(args.input_json).read_text(encoding="utf-8"))
-        result = run_worker(payload)
+        result = run_worker(payload, progress_callback=_emit_progress_event)
         Path(args.output_json).write_text(
             json.dumps(result, ensure_ascii=False),
             encoding="utf-8",
@@ -39,27 +44,102 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def run_worker(payload: dict[str, object]) -> dict[str, object]:
+def run_worker(
+    payload: dict[str, object],
+    *,
+    progress_callback: Callable[[dict[str, object]], None] | None = None,
+) -> dict[str, object]:
     batch_items = payload["items"]
     if not isinstance(batch_items, list) or not batch_items:
         raise WorkerError("worker 输入缺少批次 items。")
     model_root = Path(str(payload["model_root"]))
     staging_dir = Path(str(payload["staging_dir"]))
+    progress_interval_seconds = float(
+        payload.get("progress_interval_seconds", _SCAN_WORKER_PROGRESS_INTERVAL_SECONDS)
+    )
     backend = _InsightFaceWorkerBackend(model_root=model_root)
     results: list[dict[str, object]] = []
-    for item in batch_items:
-        results.append(
-            _process_item(
-                backend=backend,
-                item=item,
-                staging_dir=staging_dir,
+    progress_reporter = _BatchProgressReporter(
+        total_items=len(batch_items),
+        emit_event=progress_callback,
+        interval_seconds=progress_interval_seconds,
+    )
+    try:
+        progress_reporter.start()
+        for item in batch_items:
+            results.append(
+                _process_item(
+                    backend=backend,
+                    item=item,
+                    staging_dir=staging_dir,
+                )
             )
-        )
+            progress_reporter.mark_item_completed()
+    finally:
+        progress_reporter.close()
     return {
         "model_root": str(model_root),
         "processed_at": utc_now_text(),
         "items": results,
     }
+
+
+class _BatchProgressReporter:
+    def __init__(
+        self,
+        *,
+        total_items: int,
+        emit_event: Callable[[dict[str, object]], None] | None,
+        interval_seconds: float,
+    ) -> None:
+        self._total_items = total_items
+        self._emit_event = emit_event
+        self._interval_seconds = max(interval_seconds, 0.0)
+        self._completed_items = 0
+        self._last_emitted_items = -1
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._emit_event is None or self._interval_seconds <= 0:
+            return
+        self._thread = threading.Thread(target=self._run, name="scan-worker-progress", daemon=True)
+        self._thread.start()
+
+    def mark_item_completed(self) -> None:
+        with self._lock:
+            self._completed_items += 1
+
+    def close(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self._interval_seconds, 0.1))
+        self._emit(force=True)
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self._interval_seconds):
+            self._emit(force=False)
+
+    def _emit(self, *, force: bool) -> None:
+        if self._emit_event is None:
+            return
+        with self._lock:
+            completed_items = self._completed_items
+            if completed_items == self._last_emitted_items:
+                return
+            self._last_emitted_items = completed_items
+        self._emit_event(
+            {
+                "event": "batch_progress",
+                "completed_items": completed_items,
+                "total_items": self._total_items,
+            }
+        )
+
+
+def _emit_progress_event(payload: dict[str, object]) -> None:
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 class _InsightFaceWorkerBackend:
