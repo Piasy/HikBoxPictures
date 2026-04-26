@@ -15,7 +15,7 @@
 
 ## Split Specs
 
-当前已写入并进入追踪的子 spec 包括 Slice 0、Slice A、Slice B、Slice C、Slice D 和 Slice E。Slice F-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
+当前已写入并进入追踪的子 spec 包括 Slice 0、Slice A、Slice B、Slice C、Slice D、Slice E 和 Slice F。Slice G 仍属后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
 
 ### Slice 0：真实验收小图库生成
 
@@ -61,21 +61,22 @@
 - Scope: 在人物首页执行 two-person merge，并支持撤销最近一次仍可撤销的合并；公共入口是 WebUI/API。
 - Acceptance summary: two-person merge 后 loser 的 active assignment 真实迁移到 winner、loser 失效；后续新增 loser-like 样本继续归到 winner；若合并后尚未发生新的人物相关写入，则只允许撤销最近一次合并并恢复合并前可观察状态。
 
+### Slice F：误归属排除
+
+- [ ] Implementation status: Not done
+- Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-exclusion-spec.md`
+- Scope: 在人物详情页批量排除当前 person 下的误归属样本，持久化 exclusion 真相，并在后续 `scan start` 中阻止这些 face 回到被排除的 person；公共入口是 WebUI/API 和真实 `scan start`。
+- Acceptance summary: 批量排除后 active assignment 失效、exclusion 记录落库、详情页样本移除；仅重扫 `tests/fixtures/people_gallery_scan/` 时被排除 face 保持未归属；在“命名 alex -> merge alex/blair -> 排除所有旧 blair -> 加入 `tests/fixtures/people_gallery_scan_2/`”这条路径里，旧 blair face 与新增 blair face 会重新形成 active 匿名 blair person，而不会回到 alex winner。
+
 ## Candidate Future Split Specs
 
 以下候选拆分只记录产品化路线，不代表已批准或可实现的 spec。每一项都必须单独补写 `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-<slice>-spec.md`，包含完整行为、验收标准和自动化验证，并通过 reviewer 后，才能移动到 `Split Specs`。候选项不使用 implementation checkbox。
 
-### Candidate F：误归属排除
-
-- Planned spec path: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-exclusion-spec.md`
-- Scope: 在人物详情页排除单个或多个误归属样本，且后续扫描不得自动归回同一人物；公共入口是 WebUI/API。
-- Acceptance summary: 排除后 active assignment 失效、exclusion 记录落库、详情页样本移除；重扫后被排除 face 不回到原人物。
-
 ### Candidate G：导出模板与执行
 
 - Planned spec path: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-export-template-spec.md`
-- Scope: 基于已命名人物创建导出模板，预览并导出同时包含指定人物的照片，按 only/group 与月份分桶；公共入口是 WebUI/API 和导出文件树。
-- Acceptance summary: 模板预览与 manifest `expected_exports` 一致；执行后真实文件树、Live MOV 配对复制和导出账本可验证。
+- Scope: 基于已命名人物创建导出模板，预览并导出同时包含指定人物的照片，按 only/group 与月份分桶，并定义可观察导出运行态及其对命名、合并、撤销合并、排除等人物写操作的锁定；公共入口是 WebUI/API 和导出文件树。
+- Acceptance summary: 模板预览与 manifest `expected_exports` 一致；执行后真实文件树、Live MOV 配对复制和导出账本可验证；导出运行中人物写操作被公共入口拒绝。
 
 ## Cross-Slice Contracts
 
@@ -85,7 +86,7 @@
 - `hikbox-pictures serve` 固定监听 `localhost/127.0.0.1`；首版不提供 `--host` 配置。
 - WebUI 使用 FastAPI + Jinja2 服务端渲染，可用少量原生 JS 增强表单提交、局部刷新和确认弹窗；首版不引入 React/Vue 等前端框架。
 - 扫描运行期间禁止启动 WebUI；存在 `running` 扫描会话时，`hikbox-pictures serve --workspace <path>` 必须失败退出且不监听端口。
-- 导出运行中禁止命名、合并、撤销合并、排除等人物归属写操作。
+- 导出运行中禁止命名、合并、撤销合并、排除等人物归属写操作；这把锁的可观察运行态和自动化验收由后续 Slice G 定义。
 - 页面自动化验收以 Python Playwright + pytest 为主，截图不作为默认必留产物；只有在视觉或布局不确定、需要人工复核、用户明确要求，或正在排查视觉回归时才保存到 `.tmp/<task-name>/`。JSON 报告和服务日志按调试需要保存到 `.tmp/<task-name>/`。
 
 ## 验收集 Manifest Contract
