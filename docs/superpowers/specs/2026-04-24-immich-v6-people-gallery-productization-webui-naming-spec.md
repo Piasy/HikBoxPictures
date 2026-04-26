@@ -11,8 +11,8 @@
 - 公共入口是 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`；首版不新增独立 `rename-person` CLI，也不要求公开 JSON API。
 - `hikbox-pictures serve` 固定监听本机 `localhost/127.0.0.1`；本 slice 不提供 `--host` 参数，也不定义 host 相关配置或校验分支。
 - `--port` 是可选参数；省略时固定监听 `8000`。自动化验收为了避免并发冲突，必须显式传入 `--port <free-port>`，不得依赖默认端口抢占成功。
-- `--person-detail-page-size` 是 `serve` 的可选参数，只影响人物详情页样本分页；默认值固定为 `200`，传入值必须是正整数。
-- 本 slice 的分页验收只验证显式传入 `--person-detail-page-size 7` 时的公开页面行为；不为默认值 `200` 单独增加服务级注入或分页验收逻辑。
+- `--person-detail-page-size` 是 `serve` 的可选参数，只影响人物详情页样本分页；默认值固定为 `204`，传入值必须是正整数。
+- 本 slice 的分页验收只验证显式传入 `--person-detail-page-size 7` 时的公开页面行为；默认值 `204` 通过服务级默认参数测试覆盖。
 - WebUI 只面向本机单用户、`localhost` 使用；首版不做账号系统、多用户协作、远程访问和多标签页一致性保障。
 - WebUI 根路径必须可直接进入人物首页；实现可以直接渲染人物首页，也可以把 `/` 重定向到 `/people`，但用户不需要手工猜测入口。
 - 存在 `running` 扫描会话时，`hikbox-pictures serve` 必须失败退出且不监听端口；不得提供“边扫描边命名”的并发写路径。
@@ -28,7 +28,7 @@
 
 ### Behavior
 
-- `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 启动本机 WebUI；服务固定监听 `localhost/127.0.0.1`，默认 `--port=8000`、`--person-detail-page-size=200`。
+- `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 启动本机 WebUI；服务固定监听 `localhost/127.0.0.1`，默认 `--port=8000`、`--person-detail-page-size=204`。
 - 人物首页必须展示两个视觉区块：`已命名人物` 和 `匿名人物`。
 - 首页只展示 `status='active'` 且仍有 active assignment 的 person。匿名区只展示已创建但尚未命名的 person；未归属 face 不出现在首页。
 - 每张人物卡至少展示：代表 context 图、当前显示名或稳定匿名标识、active assignment 样本数、进入详情页的可点击入口。已命名人物卡的可见名称必须等于该 person 的 `display_name`；匿名人物卡必须展示非空、跨刷新稳定的匿名标识，并且同一 person 在 `/`、`/people` 和重复刷新之间保持一致。

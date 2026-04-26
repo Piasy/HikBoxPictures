@@ -70,9 +70,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument(
         "--person-detail-page-size",
-        default=200,
+        default=204,
         type=_positive_person_detail_page_size,
-        help="人物详情页分页大小，必须为正整数，默认 200。",
+        help="人物详情页分页大小，必须为正整数，默认 204。",
     )
 
     return parser

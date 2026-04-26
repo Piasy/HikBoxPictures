@@ -27,8 +27,8 @@
 - Playwright 交互优先使用 role/name 等语义定位，并结合页面暴露的稳定 `data-*` 标识与 DB/artifact 对齐；不要把截图识别或脆弱 CSS selector 作为主断言。
 - 运行 Python Playwright 用例前，优先按 README 执行：
   - `source .venv/bin/activate`
-  - `./scripts/setup_playwright_zh_fonts.sh`
   - `python3 -m playwright install chromium`
+- 只有在需要截图留档、做页面视觉检查，或排查中文渲染问题时，才额外执行 `./scripts/setup_playwright_zh_fonts.sh`。
 
 ## Playwright 调试约定
 

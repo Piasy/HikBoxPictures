@@ -400,6 +400,30 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _copy_fixture_files(source_dir: Path, file_names: list[str]) -> None:
+    source_dir.mkdir(parents=True, exist_ok=True)
+    for file_name in file_names:
+        shutil.copy2(FIXTURE_DIR / file_name, source_dir / file_name)
+
+
+def _set_person_created_at_order(library_db: Path, person_ids: list[str]) -> None:
+    connection = sqlite3.connect(library_db)
+    try:
+        with connection:
+            for index, person_id in enumerate(person_ids, start=1):
+                timestamp = f"2026-04-24T00:00:{index:02d}Z"
+                connection.execute(
+                    """
+                    UPDATE person
+                    SET created_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, timestamp, person_id),
+                )
+    finally:
+        connection.close()
+
+
 def _page_card_snapshot(page: Page) -> dict[str, dict[str, object]]:
     cards = page.locator("[data-person-id]")
     result: dict[str, dict[str, object]] = {}
@@ -439,6 +463,14 @@ def _people_section_person_ids(page: Page, *, section: str) -> set[str]:
     }
 
 
+def _people_section_person_ids_in_rendered_order(page: Page, *, section: str) -> list[str]:
+    cards = page.locator(f"[data-people-section='{section}'] [data-person-id]")
+    return [
+        str(cards.nth(index).get_attribute("data-person-id"))
+        for index in range(cards.count())
+    ]
+
+
 def _submit_name_form(
     page: Page,
     *,
@@ -471,6 +503,111 @@ def _assert_name_prg_flow(
         and int(response["status"]) == 200
         for response in responses
     ), responses
+
+
+def test_people_gallery_home_sections_sort_by_sample_count_with_slice0_gallery(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    source_dir = tmp_path / "slice0-subset"
+    manifest = _load_manifest()
+    _copy_fixture_files(
+        source_dir,
+        [
+            "pg_001_single_alex_01.jpg",
+            "pg_002_single_alex_02.jpg",
+            "pg_003_single_alex_03.jpg",
+            "pg_011_single_blair_01.jpg",
+            "pg_012_single_blair_02.jpg",
+            "pg_013_single_blair_03.jpg",
+            "pg_014_single_blair_04.jpg",
+            "pg_015_single_blair_05.jpg",
+            "pg_021_single_casey_01.jpg",
+            "pg_022_single_casey_02.jpg",
+            "pg_023_single_casey_03.jpg",
+            "pg_024_single_casey_04.jpg",
+        ],
+    )
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, source_dir)
+    assert add_result.returncode == 0
+
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "6",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    target_person_ids = _expected_target_mapping(library_db, manifest)
+    alex_person_id = target_person_ids["target_alex"]
+    blair_person_id = target_person_ids["target_blair"]
+    casey_person_id = target_person_ids["target_casey"]
+    expected_people = _read_active_people(library_db)
+    assert expected_people[alex_person_id]["sample_count"] == 3
+    assert expected_people[blair_person_id]["sample_count"] == 5
+    assert expected_people[casey_person_id]["sample_count"] == 4
+    _set_person_created_at_order(library_db, [alex_person_id, casey_person_id, blair_person_id])
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            assert _people_section_person_ids_in_rendered_order(page, section="anonymous") == [
+                blair_person_id,
+                casey_person_id,
+                alex_person_id,
+            ]
+
+            alex_detail_pattern = re.compile(
+                rf"{re.escape(base_url)}/people/{re.escape(alex_person_id)}(?:\\?.*)?$"
+            )
+            blair_detail_pattern = re.compile(
+                rf"{re.escape(base_url)}/people/{re.escape(blair_person_id)}(?:\\?.*)?$"
+            )
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=alex_person_id)
+            _submit_name_form(
+                page,
+                detail_url_pattern=alex_detail_pattern,
+                display_name="A-Low Sample",
+            )
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+            _submit_name_form(
+                page,
+                detail_url_pattern=blair_detail_pattern,
+                display_name="Z-High Sample",
+            )
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            assert _people_section_person_ids_in_rendered_order(page, section="named") == [
+                blair_person_id,
+                alex_person_id,
+            ]
+            assert _people_section_person_ids_in_rendered_order(page, section="anonymous") == [
+                casey_person_id,
+            ]
+
+            browser.close()
+    finally:
+        _terminate_process(process)
 
 
 def test_people_gallery_browse_via_real_serve_and_real_page(tmp_path: Path) -> None:

@@ -14,6 +14,8 @@ import time
 import httpx
 import pytest
 
+import hikbox_pictures.cli as cli_module
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
@@ -374,6 +376,49 @@ def test_serve_fails_without_initialized_workspace_and_leaves_port_closed(tmp_pa
     assert "工作区" in result.stderr
     assert "Traceback" not in result.stderr
     assert not _port_is_listening(port)
+
+
+def test_serve_uses_204_as_default_person_detail_page_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_serve_workspace(
+        *,
+        workspace: Path,
+        port: int,
+        person_detail_page_size: int,
+    ) -> None:
+        captured_calls.append(
+            {
+                "workspace": workspace,
+                "port": port,
+                "person_detail_page_size": person_detail_page_size,
+            }
+        )
+
+    monkeypatch.setattr(cli_module, "serve_workspace", fake_serve_workspace)
+
+    exit_code = cli_module.main(
+        [
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            "45678",
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured_calls == [
+        {
+            "workspace": workspace,
+            "port": 45678,
+            "person_detail_page_size": 204,
+        }
+    ]
 
 
 def test_serve_rejects_invalid_person_detail_page_size(tmp_path: Path) -> None:

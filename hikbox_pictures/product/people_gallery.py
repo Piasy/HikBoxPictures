@@ -181,6 +181,7 @@ def load_people_home_page(workspace_context: WorkspaceContext) -> PeopleHomePage
             GROUP BY person.id, person.display_name, person.is_named, person.created_at
             ORDER BY
               person.is_named DESC,
+              sample_count DESC,
               CASE
                 WHEN person.display_name IS NULL THEN ''
                 ELSE person.display_name

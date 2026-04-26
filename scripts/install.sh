@@ -114,9 +114,6 @@ log "安装项目及开发依赖（包含 deepface、tf-keras）"
 log "安装 Playwright Chromium 浏览器"
 "${VENV_PYTHON}" -m playwright install chromium
 
-log "准备 Playwright 中文字体"
-"${ROOT_DIR}/scripts/setup_playwright_zh_fonts.sh"
-
 cat <<DONE
 
 安装完成。
@@ -124,9 +121,13 @@ cat <<DONE
 当前环境说明：
 - Python 版本固定为 ${PYTHON_VERSION}
 - .venv 由 uv 管理的本地 Python 创建，不依赖系统 Python
-- Chromium 浏览器与 Playwright 中文字体已准备完成
+- Chromium 浏览器已准备完成
 
 常用命令：
   source "${VENV_DIR}/bin/activate"
   ./scripts/run_tests.sh
+
+按需命令：
+  ./scripts/setup_playwright_zh_fonts.sh
+  仅在需要 Playwright 截图或视觉排查中文渲染时执行
 DONE
