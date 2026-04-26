@@ -29,13 +29,11 @@ def add_source(
     *,
     workspace: Path,
     source_path: Path,
-    label: str,
     command_args: list[str],
 ) -> None:
     workspace_context = load_workspace_context(workspace)
     source_dir_path = _resolve_source_directory(source_path)
-    if not label.strip():
-        raise SourceRegistryError("参数错误: --label 不能为空白。")
+    label = source_dir_path.name
 
     created_at = _utc_now_text()
     try:

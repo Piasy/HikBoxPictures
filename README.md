@@ -41,8 +41,10 @@ hikbox-pictures init --workspace /path/to/workspace --external-root /path/to/ext
 添加照片 source：
 
 ```bash
-hikbox-pictures source add --workspace /path/to/workspace /path/to/source --label fixture
+hikbox-pictures source add --workspace /path/to/workspace /path/to/source
 ```
+
+命令会自动将源目录的目录名写入 `label`。
 
 查看 source：
 

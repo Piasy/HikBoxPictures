@@ -77,7 +77,7 @@ CREATE TABLE library_sources (
 字段语义：
 
 - `path`：照片源目录绝对路径。
-- `label`：用户可读标签。
+- `label`：用户可读标签；当前由 `hikbox-pictures source add` 自动取源目录的目录名。
 - `active`：`1` 表示 active，`0` 表示 inactive。
 - `created_at`：带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
 

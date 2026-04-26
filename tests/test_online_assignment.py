@@ -44,7 +44,7 @@ def _initialize_assignment_workspace(tmp_path: Path) -> tuple[object, int, int]:
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     initialize_workspace(workspace=workspace, external_root=external_root, command_args=["init"])
-    add_source(workspace=workspace, source_path=source_dir, label="fixture", command_args=["source", "add"])
+    add_source(workspace=workspace, source_path=source_dir, command_args=["source", "add"])
     workspace_context = load_workspace_context(workspace)
     connection = sqlite3.connect(workspace_context.library_db_path)
     try:

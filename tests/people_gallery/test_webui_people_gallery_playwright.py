@@ -93,8 +93,6 @@ def _add_source(workspace: Path, source_dir: Path) -> subprocess.CompletedProces
         "--workspace",
         str(workspace),
         str(source_dir),
-        "--label",
-        "fixture",
     )
 
 

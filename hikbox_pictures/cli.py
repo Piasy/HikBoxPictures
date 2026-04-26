@@ -43,7 +43,6 @@ def build_parser() -> argparse.ArgumentParser:
     source_add_parser = source_subparsers.add_parser("add", prog=f"{CLI_PROGRAM} source add")
     source_add_parser.add_argument("--workspace", required=True, help="工作区目录")
     source_add_parser.add_argument("source_path", help="源目录")
-    source_add_parser.add_argument("--label", required=True, help="源目录标签")
 
     source_list_parser = source_subparsers.add_parser("list", prog=f"{CLI_PROGRAM} source list")
     source_list_parser.add_argument("--workspace", required=True, help="工作区目录")
@@ -100,7 +99,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             add_source(
                 workspace=Path(args.workspace),
                 source_path=Path(args.source_path),
-                label=args.label,
                 command_args=list(argv) if argv is not None else sys.argv[1:],
             )
         except (WorkspaceAccessError, SourceRegistryError) as exc:

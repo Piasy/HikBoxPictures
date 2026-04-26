@@ -219,7 +219,7 @@ def test_commit_batch_results_reuses_existing_face_assignment_on_redetect(tmp_pa
     Image.new("RGB", (640, 480), color=(160, 140, 120)).save(image_path)
 
     initialize_workspace(workspace=workspace, external_root=external_root, command_args=["init"])
-    add_source(workspace=workspace, source_path=source_dir, label="fixture", command_args=["source", "add"])
+    add_source(workspace=workspace, source_path=source_dir, command_args=["source", "add"])
     workspace_context = load_workspace_context(workspace)
 
     session_id, candidates = _insert_session_batch_item(
@@ -389,7 +389,7 @@ def test_commit_batch_results_failed_redetect_cleans_existing_faces_assignments_
     Image.new("RGB", (640, 480), color=(150, 120, 90)).save(image_path)
 
     initialize_workspace(workspace=workspace, external_root=external_root, command_args=["init"])
-    add_source(workspace=workspace, source_path=source_dir, label="fixture", command_args=["source", "add"])
+    add_source(workspace=workspace, source_path=source_dir, command_args=["source", "add"])
     workspace_context = load_workspace_context(workspace)
 
     session_id, candidates = _insert_session_batch_item(
@@ -543,7 +543,7 @@ def test_commit_batch_results_redetect_invalidates_old_face_even_when_old_embedd
     Image.new("RGB", (640, 480), color=(120, 130, 140)).save(image_path)
 
     initialize_workspace(workspace=workspace, external_root=external_root, command_args=["init"])
-    add_source(workspace=workspace, source_path=source_dir, label="fixture", command_args=["source", "add"])
+    add_source(workspace=workspace, source_path=source_dir, command_args=["source", "add"])
     workspace_context = load_workspace_context(workspace)
 
     session_id, candidates = _insert_session_batch_item(
@@ -725,7 +725,7 @@ def test_commit_batch_results_reuses_dirty_iou_matched_face_and_refreshes_artifa
     Image.new("RGB", (640, 480), color=(140, 125, 110)).save(image_path)
 
     initialize_workspace(workspace=workspace, external_root=external_root, command_args=["init"])
-    add_source(workspace=workspace, source_path=source_dir, label="fixture", command_args=["source", "add"])
+    add_source(workspace=workspace, source_path=source_dir, command_args=["source", "add"])
     workspace_context = load_workspace_context(workspace)
 
     session_id, candidates = _insert_session_batch_item(

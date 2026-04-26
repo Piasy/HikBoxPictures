@@ -88,7 +88,7 @@ def _read_log_texts(logs_dir: Path) -> list[str]:
     ]
 
 
-def test_source_add_persists_record_and_source_list_returns_json_and_success_log(
+def test_source_add_uses_source_directory_name_as_label_and_source_list_returns_json_and_success_log(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -105,8 +105,6 @@ def test_source_add_persists_record_and_source_list_returns_json_and_success_log
         "--workspace",
         str(workspace),
         str(source_dir),
-        "--label",
-        "family",
     )
 
     assert add_result.returncode == 0
@@ -119,7 +117,7 @@ def test_source_add_persists_record_and_source_list_returns_json_and_success_log
     assert db_sources[0] == {
         "id": 1,
         "path": str(source_dir.resolve()),
-        "label": "family",
+        "label": source_dir.name,
         "active": 1,
         "created_at": created_at,
     }
@@ -138,7 +136,7 @@ def test_source_add_persists_record_and_source_list_returns_json_and_success_log
         "sources": [
             {
                 "id": 1,
-                "label": "family",
+                "label": source_dir.name,
                 "path": str(source_dir.resolve()),
                 "active": True,
                 "created_at": created_at,
@@ -149,7 +147,7 @@ def test_source_add_persists_record_and_source_list_returns_json_and_success_log
     log_texts = _read_log_texts(external_root / "logs")
     assert any("hikbox-pictures source add" in log_text for log_text in log_texts)
     assert any(str(source_dir.resolve()) in log_text for log_text in log_texts)
-    assert any('"label": "family"' in log_text for log_text in log_texts)
+    assert any(f'"label": "{source_dir.name}"' in log_text for log_text in log_texts)
     assert any('"result": "success"' in log_text for log_text in log_texts)
 
 
@@ -185,8 +183,6 @@ def test_source_add_and_list_fail_without_initialized_workspace_and_do_not_creat
         "--workspace",
         str(workspace),
         str(source_dir),
-        "--label",
-        "family",
     )
     list_result = _run_hikbox(
         "source",
@@ -204,7 +200,7 @@ def test_source_add_and_list_fail_without_initialized_workspace_and_do_not_creat
     assert not (workspace / ".hikbox").exists()
 
 
-def test_source_commands_require_workspace_and_label_arguments(tmp_path: Path) -> None:
+def test_source_commands_require_workspace_and_source_path_arguments(tmp_path: Path) -> None:
     source_dir = tmp_path / "photos"
     source_dir.mkdir()
 
@@ -212,22 +208,19 @@ def test_source_commands_require_workspace_and_label_arguments(tmp_path: Path) -
         "source",
         "add",
         str(source_dir),
-        "--label",
-        "family",
     )
-    add_missing_label_result = _run_hikbox(
+    add_missing_source_path_result = _run_hikbox(
         "source",
         "add",
         "--workspace",
         str(tmp_path / "workspace"),
-        str(source_dir),
     )
     list_missing_workspace_result = _run_hikbox("source", "list")
 
     assert add_missing_workspace_result.returncode != 0
     assert "--workspace" in add_missing_workspace_result.stderr
-    assert add_missing_label_result.returncode != 0
-    assert "--label" in add_missing_label_result.stderr
+    assert add_missing_source_path_result.returncode != 0
+    assert "source_path" in add_missing_source_path_result.stderr
     assert list_missing_workspace_result.returncode != 0
     assert "--workspace" in list_missing_workspace_result.stderr
 
@@ -254,8 +247,6 @@ def test_source_commands_fail_when_workspace_config_or_database_is_missing(tmp_p
         "--workspace",
         str(workspace_missing_config),
         str(source_dir),
-        "--label",
-        "family",
     )
 
     assert add_missing_config_result.returncode != 0
@@ -345,13 +336,11 @@ runpy.run_module("hikbox_pictures", run_name="__main__")
     assert "Traceback" not in list_result.stderr
 
 
-def test_source_add_rejects_invalid_paths_and_blank_label_without_inserting_rows(
+def test_source_add_rejects_invalid_paths_without_inserting_rows(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
     external_root = tmp_path / "external-root"
-    valid_source_dir = tmp_path / "photos-valid"
-    valid_source_dir.mkdir()
     missing_source_dir = tmp_path / "photos-missing"
     file_source_path = tmp_path / "photos.txt"
     file_source_path.write_text("not-a-directory", encoding="utf-8")
@@ -370,8 +359,6 @@ def test_source_add_rejects_invalid_paths_and_blank_label_without_inserting_rows
             "--workspace",
             str(workspace),
             str(missing_source_dir),
-            "--label",
-            "missing",
         )
         file_result = _run_hikbox(
             "source",
@@ -379,8 +366,6 @@ def test_source_add_rejects_invalid_paths_and_blank_label_without_inserting_rows
             "--workspace",
             str(workspace),
             str(file_source_path),
-            "--label",
-            "file",
         )
         unreadable_result = _run_hikbox(
             "source",
@@ -388,17 +373,6 @@ def test_source_add_rejects_invalid_paths_and_blank_label_without_inserting_rows
             "--workspace",
             str(workspace),
             str(unreadable_source_dir),
-            "--label",
-            "unreadable",
-        )
-        blank_label_result = _run_hikbox(
-            "source",
-            "add",
-            "--workspace",
-            str(workspace),
-            str(valid_source_dir),
-            "--label",
-            "   ",
         )
     finally:
         unreadable_source_dir.chmod(unreadable_original_mode)
@@ -409,9 +383,6 @@ def test_source_add_rejects_invalid_paths_and_blank_label_without_inserting_rows
     assert "目录" in file_result.stderr
     assert unreadable_result.returncode != 0
     assert "不可读" in unreadable_result.stderr
-    assert blank_label_result.returncode != 0
-    assert "label" in blank_label_result.stderr
-    assert "Traceback" not in blank_label_result.stderr
     assert _read_sources(workspace / ".hikbox" / "library.db") == []
 
 
@@ -451,8 +422,6 @@ sys.argv = [
     "--workspace",
     {str(workspace)!r},
     {str(source_dir)!r},
-    "--label",
-    "family",
 ]
 runpy.run_module("hikbox_pictures", run_name="__main__")
 """
@@ -464,7 +433,7 @@ runpy.run_module("hikbox_pictures", run_name="__main__")
     assert _read_sources(workspace / ".hikbox" / "library.db") == []
 
 
-def test_source_add_rejects_duplicate_path_without_changing_original_label(
+def test_source_add_rejects_duplicate_path_without_changing_existing_record(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "workspace"
@@ -481,8 +450,6 @@ def test_source_add_rejects_duplicate_path_without_changing_original_label(
         "--workspace",
         str(workspace),
         str(source_dir),
-        "--label",
-        "family",
     )
     duplicate_add_result = _run_hikbox(
         "source",
@@ -490,8 +457,6 @@ def test_source_add_rejects_duplicate_path_without_changing_original_label(
         "--workspace",
         str(workspace),
         str(source_dir),
-        "--label",
-        "renamed",
     )
 
     assert first_add_result.returncode == 0
@@ -501,7 +466,7 @@ def test_source_add_rejects_duplicate_path_without_changing_original_label(
         {
             "id": 1,
             "path": str(source_dir.resolve()),
-            "label": "family",
+            "label": source_dir.name,
             "active": 1,
             "created_at": _read_sources(workspace / ".hikbox" / "library.db")[0]["created_at"],
         }
@@ -531,8 +496,6 @@ def test_source_add_fails_cleanly_and_rolls_back_when_success_log_cannot_be_writ
         "--workspace",
         str(workspace),
         str(source_dir),
-        "--label",
-        "family",
     )
 
     assert add_result.returncode != 0
@@ -558,8 +521,6 @@ def test_source_list_returns_multiple_sources_in_id_order(tmp_path: Path) -> Non
         "--workspace",
         str(workspace),
         str(source_dir_a),
-        "--label",
-        "family",
     )
     second_add_result = _run_hikbox(
         "source",
@@ -567,8 +528,6 @@ def test_source_list_returns_multiple_sources_in_id_order(tmp_path: Path) -> Non
         "--workspace",
         str(workspace),
         str(source_dir_b),
-        "--label",
-        "travel",
     )
     list_result = _run_hikbox(
         "source",
@@ -583,7 +542,7 @@ def test_source_list_returns_multiple_sources_in_id_order(tmp_path: Path) -> Non
     db_sources = _read_sources(workspace / ".hikbox" / "library.db")
     assert len(db_sources) == 2
     assert [source["id"] for source in db_sources] == [1, 2]
-    assert [source["label"] for source in db_sources] == ["family", "travel"]
+    assert [source["label"] for source in db_sources] == [source_dir_a.name, source_dir_b.name]
 
     payload = json.loads(list_result.stdout)
     assert list_result.returncode == 0

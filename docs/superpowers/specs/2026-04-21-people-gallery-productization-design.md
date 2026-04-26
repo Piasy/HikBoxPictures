@@ -665,7 +665,7 @@ hikbox-pictures
     set-external-root <abs_path>
   source
     list
-    add <abs_path> [--label <name>]
+    add <abs_path>
     remove <source_id>
     enable <source_id>
     disable <source_id>
@@ -740,7 +740,7 @@ hikbox-pictures init --workspace /data/hikbox_ws
 hikbox-pictures config set-external-root /data/hikbox_external --workspace /data/hikbox_ws
 
 # 2) 注册源目录并启动扫描
-hikbox-pictures source add /photos/family --label family --workspace /data/hikbox_ws
+hikbox-pictures source add /photos/family --workspace /data/hikbox_ws
 hikbox-pictures scan start-or-resume --workspace /data/hikbox_ws
 hikbox-pictures scan status --latest --workspace /data/hikbox_ws
 
