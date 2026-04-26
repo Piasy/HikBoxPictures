@@ -18,8 +18,10 @@ from hikbox_pictures.product.people_gallery import load_assignment_context_path
 from hikbox_pictures.product.people_gallery import load_people_home_page
 from hikbox_pictures.product.people_gallery import load_person_detail_page
 from hikbox_pictures.product.people_gallery import PersonMergeValidationError
+from hikbox_pictures.product.people_gallery import PersonMergeUndoValidationError
 from hikbox_pictures.product.people_gallery import PersonNameValidationError
 from hikbox_pictures.product.people_gallery import submit_people_merge
+from hikbox_pictures.product.people_gallery import submit_people_merge_undo
 from hikbox_pictures.product.people_gallery import submit_person_name
 from hikbox_pictures.product.sources import WorkspaceContext
 
@@ -35,6 +37,7 @@ NAME_FEEDBACK_MESSAGES = {
 }
 HOME_FEEDBACK_MESSAGES = {
     "merge_succeeded": {"level": "info", "message": "人物已合并。"},
+    "merge_undo_succeeded": {"level": "info", "message": "最近一次合并已撤销。"},
 }
 
 
@@ -113,6 +116,39 @@ def create_people_gallery_app(
         response.set_cookie(
             HOME_FEEDBACK_COOKIE,
             "merge_succeeded",
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.post("/people/merge/undo", response_class=HTMLResponse)
+    def people_merge_undo_submit(request: Request) -> Response:
+        try:
+            submit_people_merge_undo(workspace_context)
+        except PersonMergeUndoValidationError as exc:
+            try:
+                return _render_people_home(
+                    request,
+                    status_code=400,
+                    home_feedback={"level": "error", "message": str(exc)},
+                )
+            except PeopleGalleryError as page_exc:
+                raise HTTPException(status_code=500, detail=str(page_exc)) from page_exc
+        except PeopleGalleryError:
+            try:
+                return _render_people_home(
+                    request,
+                    status_code=500,
+                    home_feedback={"level": "error", "message": "撤销最近一次合并失败，请稍后重试。"},
+                )
+            except PeopleGalleryError as page_exc:
+                raise HTTPException(status_code=500, detail=str(page_exc)) from page_exc
+
+        response = RedirectResponse(url="/people", status_code=303)
+        response.set_cookie(
+            HOME_FEEDBACK_COOKIE,
+            "merge_undo_succeeded",
             httponly=True,
             samesite="lax",
             path="/",

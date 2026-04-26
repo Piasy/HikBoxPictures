@@ -56,7 +56,7 @@
 
 ### Slice E：人物合并与最近一次撤销
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-merge-undo-spec.md`
 - Scope: 在人物首页执行 two-person merge，并支持撤销最近一次仍可撤销的合并；公共入口是 WebUI/API。
 - Acceptance summary: two-person merge 后 loser 的 active assignment 真实迁移到 winner、loser 失效；后续新增 loser-like 样本继续归到 winner；若合并后尚未发生新的人物相关写入，则只允许撤销最近一次合并并恢复合并前可观察状态。

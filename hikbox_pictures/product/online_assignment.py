@@ -642,10 +642,11 @@ def _commit_assignment_result(
                       display_name,
                       is_named,
                       status,
+                      write_revision,
                       created_at,
                       updated_at
                     )
-                    VALUES (?, NULL, 0, 'active', ?, ?)
+                    VALUES (?, NULL, 0, 'active', 0, ?, ?)
                     """,
                     (person_id, now, now),
                 )
@@ -681,6 +682,15 @@ def _commit_assignment_result(
                         now,
                         now,
                     ),
+                )
+                connection.execute(
+                    """
+                    UPDATE person
+                    SET write_revision = write_revision + 1,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, decision.person_id),
                 )
             connection.execute(
                 """

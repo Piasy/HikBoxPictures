@@ -1404,6 +1404,19 @@ def _delete_invalidated_face_rows(connection: sqlite3.Connection, *, face_ids: l
         """,
         face_ids,
     ).fetchall()
+    person_ids = [str(row[0]) for row in person_rows if row[0] is not None]
+    if person_ids:
+        person_placeholders = ", ".join("?" for _ in person_ids)
+        now = utc_now_text()
+        connection.execute(
+            f"""
+            UPDATE person
+            SET write_revision = write_revision + 1,
+                updated_at = ?
+            WHERE id IN ({person_placeholders})
+            """,
+            (now, *person_ids),
+        )
     connection.execute(
         f"DELETE FROM person_face_assignments WHERE face_observation_id IN ({placeholders})",
         face_ids,
@@ -1416,7 +1429,6 @@ def _delete_invalidated_face_rows(connection: sqlite3.Connection, *, face_ids: l
         f"DELETE FROM face_observations WHERE id IN ({placeholders})",
         face_ids,
     )
-    person_ids = [str(row[0]) for row in person_rows if row[0] is not None]
     if not person_ids:
         return
     person_placeholders = ", ".join("?" for _ in person_ids)

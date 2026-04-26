@@ -101,6 +101,7 @@ CREATE TABLE person (
   display_name TEXT,
   is_named INTEGER NOT NULL DEFAULT 0 CHECK (is_named IN (0, 1)),
   status TEXT NOT NULL CHECK (status IN ('active', 'inactive')),
+  write_revision INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -174,7 +175,10 @@ CREATE TABLE person_merge_operations (
   loser_display_name_before TEXT,
   loser_is_named_before INTEGER NOT NULL CHECK (loser_is_named_before IN (0, 1)),
   loser_status_before TEXT NOT NULL CHECK (loser_status_before IN ('active', 'inactive')),
-  merged_at TEXT NOT NULL
+  winner_write_revision_after_merge INTEGER NOT NULL,
+  loser_write_revision_after_merge INTEGER NOT NULL,
+  merged_at TEXT NOT NULL,
+  undone_at TEXT
 );
 
 CREATE INDEX idx_person_merge_operations_merged_at

@@ -105,7 +105,7 @@
 
 ## Feature Slice 2: 最近一次撤销
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

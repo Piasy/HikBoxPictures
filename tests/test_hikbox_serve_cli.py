@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -550,7 +551,7 @@ def _read_merge_slice_db_snapshot(library_db: Path) -> dict[str, Any]:
         "people": _fetch_all(
             library_db,
             """
-            SELECT id, display_name, is_named, status, updated_at
+            SELECT id, display_name, is_named, status, write_revision, updated_at
             FROM person
             ORDER BY id ASC
             """,
@@ -566,7 +567,13 @@ def _read_merge_slice_db_snapshot(library_db: Path) -> dict[str, Any]:
         "merge_operations": _fetch_all(
             library_db,
             """
-            SELECT id, winner_person_id, loser_person_id
+            SELECT
+              id,
+              winner_person_id,
+              loser_person_id,
+              winner_write_revision_after_merge,
+              loser_write_revision_after_merge,
+              undone_at
             FROM person_merge_operations
             ORDER BY id ASC
             """,
@@ -623,6 +630,24 @@ def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> d
         assert len(observed_person_ids) == 1, observed_person_ids
         mapping[str(label)] = next(iter(observed_person_ids))
     return mapping
+
+
+def _read_person_page_status(base_url: str, person_id: str) -> int:
+    return int(httpx.get(f"{base_url}/people/{person_id}", timeout=5.0).status_code)
+
+
+def _read_person_write_revision(library_db: Path, person_id: str) -> int:
+    return int(
+        _fetch_all(
+            library_db,
+            """
+            SELECT write_revision
+            FROM person
+            WHERE id = ?
+            """,
+            (person_id,),
+        )[0][0]
+    )
 
 
 def test_serve_fails_without_initialized_workspace_and_leaves_port_closed(tmp_path: Path) -> None:
@@ -1002,6 +1027,38 @@ def test_serve_merge_rejects_crafted_requests_without_db_changes(tmp_path: Path)
         _terminate_process(process)
 
 
+def test_serve_undo_rejects_crafted_request_when_no_merge_exists(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-undo-no-merge"
+    external_root = tmp_path / "external-root-undo-no-merge"
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+
+    library_db = workspace / ".hikbox" / "library.db"
+    snapshot_before = _read_merge_slice_db_snapshot(library_db)
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        response = httpx.post(
+            f"{base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert response.status_code == 400
+        assert "当前没有可撤销的最近一次合并" in response.text
+        assert _read_merge_slice_db_snapshot(library_db) == snapshot_before
+    finally:
+        _terminate_process(process)
+
+
 def test_serve_merge_rolls_back_when_fault_injection_fails_mid_transaction(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-merge-fault"
     external_root = tmp_path / "external-root-merge-fault"
@@ -1060,3 +1117,401 @@ def test_serve_merge_rolls_back_when_fault_injection_fails_mid_transaction(tmp_p
         assert casey_detail.status_code == 200
     finally:
         _terminate_process(process)
+
+
+def test_serve_undo_rolls_back_when_fault_injection_fails_mid_transaction(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-undo-fault"
+    external_root = tmp_path / "external-root-undo-fault"
+    manifest = _load_manifest()
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, FIXTURE_DIR)
+    assert add_result.returncode == 0
+
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    target_person_ids = _expected_target_mapping(library_db, manifest)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+
+    merge_port = _find_free_port()
+    merge_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(merge_port),
+    )
+    merge_base_url = f"http://127.0.0.1:{merge_port}"
+    try:
+        _wait_for_http_ready(f"{merge_base_url}/")
+        merge_response = httpx.post(
+            f"{merge_base_url}/people/merge",
+            data={"person_id": [casey_person_id, alex_person_id]},
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert merge_response.status_code == 303
+    finally:
+        _terminate_process(merge_process)
+
+    db_snapshot_before_undo_attempt = _read_merge_slice_db_snapshot(library_db)
+
+    fault_port = _find_free_port()
+    fault_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(fault_port),
+        env_updates={"HIKBOX_TEST_UNDO_FAIL_STAGE": "after_assignment_restore"},
+    )
+    fault_base_url = f"http://127.0.0.1:{fault_port}"
+    try:
+        _wait_for_http_ready(f"{fault_base_url}/")
+        response = httpx.post(
+            f"{fault_base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert response.status_code == 500
+        assert "撤销最近一次合并失败" in response.text
+        assert _read_merge_slice_db_snapshot(library_db) == db_snapshot_before_undo_attempt
+
+        merge_operations = _fetch_all(
+            library_db,
+            """
+            SELECT id, undone_at
+            FROM person_merge_operations
+            ORDER BY id ASC
+            """,
+        )
+        assert len(merge_operations) == 1
+        assert merge_operations[0][1] is None
+    finally:
+        _terminate_process(fault_process)
+
+    success_port = _find_free_port()
+    success_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(success_port),
+    )
+    success_base_url = f"http://127.0.0.1:{success_port}"
+    try:
+        _wait_for_http_ready(f"{success_base_url}/")
+        success_response = httpx.post(
+            f"{success_base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert success_response.status_code == 303
+        people_page = httpx.get(f"{success_base_url}/people", timeout=5.0)
+        assert people_page.status_code == 200
+        assert _read_person_page_status(success_base_url, alex_person_id) == 200
+        assert _read_person_page_status(success_base_url, casey_person_id) == 200
+        merge_operations = _fetch_all(
+            library_db,
+            """
+            SELECT id, undone_at
+            FROM person_merge_operations
+            ORDER BY id ASC
+            """,
+        )
+        assert len(merge_operations) == 1
+        assert merge_operations[0][1] is not None
+    finally:
+        _terminate_process(success_process)
+
+
+def test_serve_undo_allows_only_one_real_rollback_under_concurrency(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-undo-concurrency"
+    external_root = tmp_path / "external-root-undo-concurrency"
+    manifest = _load_manifest()
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, FIXTURE_DIR)
+    assert add_result.returncode == 0
+
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    target_person_ids = _expected_target_mapping(library_db, manifest)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+
+    merge_port = _find_free_port()
+    merge_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(merge_port),
+    )
+    merge_base_url = f"http://127.0.0.1:{merge_port}"
+    try:
+        _wait_for_http_ready(f"{merge_base_url}/")
+        merge_response = httpx.post(
+            f"{merge_base_url}/people/merge",
+            data={"person_id": [casey_person_id, alex_person_id]},
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert merge_response.status_code == 303
+    finally:
+        _terminate_process(merge_process)
+
+    trace_file = tmp_path / ".tmp" / "people-gallery-merge-undo" / "undo-overlap-trace.log"
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        env_updates={
+            "HIKBOX_TEST_UNDO_HOLD_SECONDS": "0.5",
+            "HIKBOX_TEST_UNDO_TRACE_FILE": str(trace_file),
+        },
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+
+        def _post_undo() -> httpx.Response:
+            return httpx.post(
+                f"{base_url}/people/merge/undo",
+                follow_redirects=False,
+                timeout=10.0,
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(lambda _: _post_undo(), range(2)))
+
+        status_codes = sorted(response.status_code for response in responses)
+        assert status_codes == [303, 400]
+        error_response = next(response for response in responses if response.status_code == 400)
+        assert "最近一次成功合并已经撤销" in error_response.text or "当前没有可撤销的最近一次合并" in error_response.text
+        trace_lines = trace_file.read_text(encoding="utf-8").splitlines()
+        trace_events = [line.rsplit(" ", maxsplit=1)[1] for line in trace_lines]
+        assert trace_events.count("handler_enter") == 2, trace_lines
+        first_terminal_index = min(
+            index
+            for index, event in enumerate(trace_events)
+            if event in {"request_succeeded", "validation_failed", "request_failed"}
+        )
+        second_handler_enter_index = [
+            index for index, event in enumerate(trace_events) if event == "handler_enter"
+        ][1]
+        assert second_handler_enter_index < first_terminal_index, trace_lines
+
+        merge_rows = _fetch_all(
+            library_db,
+            """
+            SELECT id, winner_person_id, loser_person_id, undone_at
+            FROM person_merge_operations
+            ORDER BY id ASC
+            """,
+        )
+        assert len(merge_rows) == 1
+        assert merge_rows[0][3] is not None
+        assert _read_person_page_status(base_url, alex_person_id) == 200
+        assert _read_person_page_status(base_url, casey_person_id) == 200
+    finally:
+        _terminate_process(process)
+
+
+def test_serve_undo_rejects_incomplete_merge_snapshot_without_db_changes(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-undo-broken-snapshot"
+    external_root = tmp_path / "external-root-undo-broken-snapshot"
+    manifest = _load_manifest()
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, FIXTURE_DIR)
+    assert add_result.returncode == 0
+
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    target_person_ids = _expected_target_mapping(library_db, manifest)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+
+    merge_port = _find_free_port()
+    merge_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(merge_port),
+    )
+    merge_base_url = f"http://127.0.0.1:{merge_port}"
+    try:
+        _wait_for_http_ready(f"{merge_base_url}/")
+        merge_response = httpx.post(
+            f"{merge_base_url}/people/merge",
+            data={"person_id": [casey_person_id, alex_person_id]},
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert merge_response.status_code == 303
+    finally:
+        _terminate_process(merge_process)
+
+    snapshot_before_undo_attempt = _read_merge_slice_db_snapshot(library_db)
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        env_updates={"HIKBOX_TEST_BREAK_LATEST_MERGE_SNAPSHOT": "1"},
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        response = httpx.post(
+            f"{base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert response.status_code == 400
+        assert "最近一次合并快照不完整" in response.text
+        assert _read_merge_slice_db_snapshot(library_db) == snapshot_before_undo_attempt
+        assert _read_person_page_status(base_url, alex_person_id) in {200, 404}
+        assert _read_person_page_status(base_url, casey_person_id) in {200, 404}
+    finally:
+        _terminate_process(process)
+
+
+def test_serve_undo_rejects_after_scan_invalidation_deletes_winner_assignment(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-undo-invalidation"
+    external_root = tmp_path / "external-root-undo-invalidation"
+    source_dir = tmp_path / "scan-source"
+    shutil.copytree(FIXTURE_DIR, source_dir)
+    manifest = _load_manifest()
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, source_dir)
+    assert add_result.returncode == 0
+
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    target_person_ids = _expected_target_mapping(library_db, manifest)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    winner_person_id = min(alex_person_id, casey_person_id)
+
+    merge_port = _find_free_port()
+    merge_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(merge_port),
+    )
+    merge_base_url = f"http://127.0.0.1:{merge_port}"
+    try:
+        _wait_for_http_ready(f"{merge_base_url}/")
+        merge_response = httpx.post(
+            f"{merge_base_url}/people/merge",
+            data={"person_id": [casey_person_id, alex_person_id]},
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert merge_response.status_code == 303
+    finally:
+        _terminate_process(merge_process)
+
+    merge_operation_row = _fetch_all(
+        library_db,
+        """
+        SELECT winner_write_revision_after_merge
+        FROM person_merge_operations
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+    )[0]
+    winner_revision_after_merge = int(merge_operation_row[0])
+    target_file = next(
+        str(asset["file"])
+        for asset in manifest["assets"]
+        if asset["expected_target_people"] == ["target_alex"]
+    )
+    (source_dir / target_file).write_bytes(b"not-a-valid-image-anymore")
+
+    rescan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert rescan_result.returncode == 0, rescan_result.stderr
+    assert _read_person_write_revision(library_db, winner_person_id) > winner_revision_after_merge
+
+    undo_snapshot_before_attempt = _read_merge_slice_db_snapshot(library_db)
+    undo_port = _find_free_port()
+    undo_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(undo_port),
+    )
+    undo_base_url = f"http://127.0.0.1:{undo_port}"
+    try:
+        _wait_for_http_ready(f"{undo_base_url}/")
+        undo_response = httpx.post(
+            f"{undo_base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert undo_response.status_code == 400
+        assert "合并之后已发生新的人物相关写入" in undo_response.text
+        assert _read_merge_slice_db_snapshot(library_db) == undo_snapshot_before_attempt
+    finally:
+        _terminate_process(undo_process)

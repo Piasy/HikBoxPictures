@@ -26,6 +26,22 @@
   {% endif %}
 
   {% if people_page.has_people %}
+    <form method="post" action="/people/merge/undo" data-undo-form>
+      <section class="panel merge-toolbar">
+        <p>只支持撤销最近一次成功合并；如果该次 merge 之后已经发生新的真实人物相关写入，则撤销会被拒绝。</p>
+        <div>
+          <button
+            type="submit"
+            data-undo-submit
+            {% if not people_page.can_undo_latest_merge %}
+              disabled
+            {% endif %}
+          >
+            撤销最近一次合并
+          </button>
+        </div>
+      </section>
+    </form>
     <form method="post" action="/people/merge" data-merge-form>
       <section class="panel merge-toolbar">
         <p>从首页当前可见人物中勾选两个对象后提交合并。winner 由系统根据命名状态、样本数和 person_id 自动决定。</p>

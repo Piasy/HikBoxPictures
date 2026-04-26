@@ -378,7 +378,8 @@ def _read_person_merge_operations(library_db: Path) -> list[dict[str, object]]:
           loser_display_name_before,
           loser_is_named_before,
           loser_status_before,
-          merged_at
+          merged_at,
+          undone_at
         FROM person_merge_operations
         ORDER BY id ASC
         """,
@@ -397,6 +398,7 @@ def _read_person_merge_operations(library_db: Path) -> list[dict[str, object]]:
             "loser_is_named_before": bool(loser_is_named_before),
             "loser_status_before": str(loser_status_before),
             "merged_at": str(merged_at),
+            "undone_at": None if undone_at is None else str(undone_at),
         }
         for (
             merge_id,
@@ -409,6 +411,7 @@ def _read_person_merge_operations(library_db: Path) -> list[dict[str, object]]:
             loser_is_named_before,
             loser_status_before,
             merged_at,
+            undone_at,
         ) in rows
     ]
 
@@ -464,6 +467,17 @@ def _read_name_slice_db_snapshot(library_db: Path) -> dict[str, object]:
             """,
         ),
     }
+
+
+def _read_assignment_owner_snapshot(library_db: Path) -> list[tuple[object, ...]]:
+    return _fetch_all(
+        library_db,
+        """
+        SELECT id, person_id, face_observation_id, active
+        FROM person_face_assignments
+        ORDER BY id ASC
+        """,
+    )
 
 
 def _fetch_image_bytes(base_url: str, src: str) -> bytes:
@@ -607,6 +621,36 @@ def _assert_merge_prg_flow(
     base_url: str,
 ) -> None:
     post_url = f"{base_url}/people/merge"
+    people_url = f"{base_url}/people"
+    assert any(
+        response["method"] == "POST"
+        and response["url"] == post_url
+        and int(response["status"]) == 303
+        for response in responses
+    ), responses
+    assert any(
+        response["method"] == "GET"
+        and response["url"] == people_url
+        and int(response["status"]) == 200
+        for response in responses
+    ), responses
+
+
+def _submit_undo_from_home(page: Page, *, base_url: str) -> None:
+    page.goto(f"{base_url}/people", wait_until="networkidle")
+    undo_button = page.locator("[data-undo-submit]")
+    expect(undo_button).to_be_visible()
+    undo_button.click()
+    page.wait_for_url(re.compile(rf"{re.escape(base_url)}/people(?:\\?.*)?$"))
+    page.wait_for_load_state("networkidle")
+
+
+def _assert_undo_prg_flow(
+    *,
+    responses: list[dict[str, object]],
+    base_url: str,
+) -> None:
+    post_url = f"{base_url}/people/merge/undo"
     people_url = f"{base_url}/people"
     assert any(
         response["method"] == "POST"
@@ -1695,5 +1739,555 @@ def test_people_gallery_merge_rejects_two_named_people_via_real_home(tmp_path: P
             assert _count_person_name_events(library_db) == 2
             assert _read_person_merge_operations(library_db) == []
             browser.close()
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_undo_restores_latest_merge_via_real_home_and_db(tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    winner_person_id = min(alex_person_id, casey_person_id)
+    loser_person_id = casey_person_id if winner_person_id == alex_person_id else alex_person_id
+    people_before_merge = _read_active_people(library_db)
+    winner_record_before_merge = _read_person_record(library_db, winner_person_id)
+    loser_record_before_merge = _read_person_record(library_db, loser_person_id)
+    winner_detail_before_merge = _read_active_assignment_details(library_db, winner_person_id)
+    loser_detail_before_merge = _read_active_assignment_details(library_db, loser_person_id)
+    assignment_owner_snapshot_before_merge = _read_assignment_owner_snapshot(library_db)
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            expect(page.locator("[data-undo-submit]")).to_be_disabled()
+
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+            expect(page.locator("[data-undo-submit]")).to_be_enabled()
+
+            response_start = len(response_log)
+            _submit_undo_from_home(page, base_url=base_url)
+            _assert_undo_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+            )
+            expect(page.get_by_role("status")).to_contain_text("最近一次合并已撤销")
+            expect(page.locator("[data-undo-submit]")).to_be_disabled()
+
+            assert _page_card_snapshot(page).keys() == people_before_merge.keys()
+            winner_record_after_undo = _read_person_record(library_db, winner_person_id)
+            loser_record_after_undo = _read_person_record(library_db, loser_person_id)
+            assert winner_record_after_undo["id"] == winner_record_before_merge["id"]
+            assert winner_record_after_undo["display_name"] == winner_record_before_merge["display_name"]
+            assert winner_record_after_undo["is_named"] == winner_record_before_merge["is_named"]
+            assert winner_record_after_undo["status"] == winner_record_before_merge["status"]
+            assert loser_record_after_undo["id"] == loser_record_before_merge["id"]
+            assert loser_record_after_undo["display_name"] == loser_record_before_merge["display_name"]
+            assert loser_record_after_undo["is_named"] == loser_record_before_merge["is_named"]
+            assert loser_record_after_undo["status"] == loser_record_before_merge["status"]
+            assert _read_active_assignment_details(library_db, winner_person_id) == winner_detail_before_merge
+            assert _read_active_assignment_details(library_db, loser_person_id) == loser_detail_before_merge
+            assert _read_assignment_owner_snapshot(library_db) == assignment_owner_snapshot_before_merge
+            merge_operations = _read_person_merge_operations(library_db)
+            assert len(merge_operations) == 1
+            assert merge_operations[0]["undone_at"] is not None
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_undo_is_disabled_without_merge_and_after_already_undone_merge(tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        page_snapshot_before_merge = _read_name_slice_db_snapshot(library_db)
+        no_merge_response = httpx.post(
+            f"{base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert no_merge_response.status_code == 400
+        assert "当前没有可撤销的最近一次合并" in no_merge_response.text
+        assert _read_name_slice_db_snapshot(library_db) == page_snapshot_before_merge
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            expect(page.locator("[data-undo-submit]")).to_be_disabled()
+
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+            _submit_undo_from_home(page, base_url=base_url)
+            expect(page.locator("[data-undo-submit]")).to_be_disabled()
+            browser.close()
+
+        snapshot_after_undo = _read_name_slice_db_snapshot(library_db)
+        already_undone_response = httpx.post(
+            f"{base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert already_undone_response.status_code == 400
+        assert "最近一次成功合并已经撤销" in already_undone_response.text
+        assert _read_name_slice_db_snapshot(library_db) == snapshot_after_undo
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_undo_remains_available_after_third_person_rename(tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    people_by_label = {str(person["label"]): person for person in manifest["people"]}
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    blair_person_id = target_person_ids["target_blair"]
+    winner_person_id = min(alex_person_id, casey_person_id)
+    loser_person_id = casey_person_id if winner_person_id == alex_person_id else alex_person_id
+    winner_record_before_merge = _read_person_record(library_db, winner_person_id)
+    loser_record_before_merge = _read_person_record(library_db, loser_person_id)
+    renamed_blair = f"{people_by_label['target_blair']['display_name']} Undo 保留"
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+
+            blair_detail_pattern = re.compile(
+                rf"{re.escape(base_url)}/people/{re.escape(blair_person_id)}(?:\\?.*)?$"
+            )
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+            _submit_name_form(
+                page,
+                detail_url_pattern=blair_detail_pattern,
+                display_name=renamed_blair,
+            )
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            expect(page.locator("[data-undo-submit]")).to_be_enabled()
+            response_start = len(response_log)
+            _submit_undo_from_home(page, base_url=base_url)
+            _assert_undo_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+            )
+
+            winner_record_after_undo = _read_person_record(library_db, winner_person_id)
+            loser_record_after_undo = _read_person_record(library_db, loser_person_id)
+            assert winner_record_after_undo["id"] == winner_record_before_merge["id"]
+            assert winner_record_after_undo["display_name"] == winner_record_before_merge["display_name"]
+            assert winner_record_after_undo["is_named"] == winner_record_before_merge["is_named"]
+            assert winner_record_after_undo["status"] == winner_record_before_merge["status"]
+            assert loser_record_after_undo["id"] == loser_record_before_merge["id"]
+            assert loser_record_after_undo["display_name"] == loser_record_before_merge["display_name"]
+            assert loser_record_after_undo["is_named"] == loser_record_before_merge["is_named"]
+            assert loser_record_after_undo["status"] == loser_record_before_merge["status"]
+            assert _read_person_record(library_db, blair_person_id)["display_name"] == renamed_blair
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_undo_rejects_after_incremental_assignment_write(tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    winner_person_id = min(alex_person_id, casey_person_id)
+    merged_snapshot = _read_name_slice_db_snapshot(library_db)
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+            browser.close()
+
+        add_result = _add_source(workspace, FIXTURE_DIR_2)
+        assert add_result.returncode == 0
+        scan_result = _run_hikbox(
+            "scan",
+            "start",
+            "--workspace",
+            str(workspace),
+            "--batch-size",
+            "10",
+        )
+        assert scan_result.returncode == 0, scan_result.stderr
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+            expect(page.locator("[data-undo-submit]")).to_be_disabled()
+            browser.close()
+
+        response = httpx.post(
+            f"{base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert response.status_code == 400
+        assert "合并之后已发生新的人物相关写入" in response.text
+        assert _read_person_record(library_db, winner_person_id)["status"] == "active"
+        assert _read_person_merge_operations(library_db)[0]["undone_at"] is None
+        assert _read_name_slice_db_snapshot(library_db) != merged_snapshot
+    finally:
+        _terminate_process(process)
+
+
+def test_people_gallery_undo_rejects_real_winner_name_writes_but_keeps_noop_eligible(tmp_path: Path) -> None:
+    def _run_anonymous_winner_named_then_rejected(case_tmp_path: Path) -> None:
+        workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(case_tmp_path)
+        alex_person_id = target_person_ids["target_alex"]
+        casey_person_id = target_person_ids["target_casey"]
+        winner_person_id = min(alex_person_id, casey_person_id)
+        port = _find_free_port()
+        process = _spawn_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            str(port),
+            "--person-detail-page-size",
+            "100",
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            _wait_for_http_ready(f"{base_url}/")
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                _submit_merge_from_home(
+                    page,
+                    base_url=base_url,
+                    person_ids=[casey_person_id, alex_person_id],
+                )
+                winner_detail_pattern = re.compile(
+                    rf"{re.escape(base_url)}/people/{re.escape(winner_person_id)}(?:\\?.*)?$"
+                )
+                _open_person_detail_from_home(
+                    page,
+                    base_url=base_url,
+                    entry_path="/people",
+                    person_id=winner_person_id,
+                )
+                _submit_name_form(
+                    page,
+                    detail_url_pattern=winner_detail_pattern,
+                    display_name="Undo 首次命名",
+                )
+                page.goto(f"{base_url}/people", wait_until="networkidle")
+                expect(page.locator("[data-undo-submit]")).to_be_disabled()
+                browser.close()
+
+            response = httpx.post(
+                f"{base_url}/people/merge/undo",
+                follow_redirects=False,
+                timeout=5.0,
+            )
+            assert response.status_code == 400
+            assert "合并之后已发生新的人物相关写入" in response.text
+        finally:
+            _terminate_process(process)
+
+    def _run_named_winner_renamed_then_rejected(case_tmp_path: Path) -> None:
+        workspace, _, _, manifest, target_person_ids = _create_scanned_workspace(case_tmp_path)
+        people_by_label = {str(person["label"]): person for person in manifest["people"]}
+        alex_person_id = target_person_ids["target_alex"]
+        casey_person_id = target_person_ids["target_casey"]
+        blair_person_id = target_person_ids["target_blair"]
+        merged_anonymous_winner_person_id = min(alex_person_id, casey_person_id)
+        port = _find_free_port()
+        process = _spawn_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            str(port),
+            "--person-detail-page-size",
+            "100",
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            _wait_for_http_ready(f"{base_url}/")
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                _submit_merge_from_home(
+                    page,
+                    base_url=base_url,
+                    person_ids=[casey_person_id, alex_person_id],
+                )
+                blair_detail_pattern = re.compile(
+                    rf"{re.escape(base_url)}/people/{re.escape(blair_person_id)}(?:\\?.*)?$"
+                )
+                _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+                _submit_name_form(
+                    page,
+                    detail_url_pattern=blair_detail_pattern,
+                    display_name=str(people_by_label["target_blair"]["display_name"]),
+                )
+                _submit_merge_from_home(
+                    page,
+                    base_url=base_url,
+                    person_ids=[merged_anonymous_winner_person_id, blair_person_id],
+                )
+                _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+                _submit_name_form(
+                    page,
+                    detail_url_pattern=blair_detail_pattern,
+                    display_name="Undo 再次改名",
+                )
+                page.goto(f"{base_url}/people", wait_until="networkidle")
+                expect(page.locator("[data-undo-submit]")).to_be_disabled()
+                browser.close()
+
+            response = httpx.post(
+                f"{base_url}/people/merge/undo",
+                follow_redirects=False,
+                timeout=5.0,
+            )
+            assert response.status_code == 400
+            assert "合并之后已发生新的人物相关写入" in response.text
+        finally:
+            _terminate_process(process)
+
+    def _run_named_winner_noop_stays_eligible(case_tmp_path: Path) -> None:
+        workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(case_tmp_path)
+        people_by_label = {str(person["label"]): person for person in manifest["people"]}
+        alex_person_id = target_person_ids["target_alex"]
+        casey_person_id = target_person_ids["target_casey"]
+        blair_person_id = target_person_ids["target_blair"]
+        merged_anonymous_winner_person_id = min(alex_person_id, casey_person_id)
+        expected_blair_name = str(people_by_label["target_blair"]["display_name"])
+        port = _find_free_port()
+        process = _spawn_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            str(port),
+            "--person-detail-page-size",
+            "100",
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            _wait_for_http_ready(f"{base_url}/")
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                response_log: list[dict[str, object]] = []
+
+                def _record_response(response: object) -> None:
+                    request = response.request
+                    response_log.append(
+                        {
+                            "method": str(request.method),
+                            "url": str(response.url),
+                            "status": int(response.status),
+                        }
+                    )
+
+                page.on("response", _record_response)
+                _submit_merge_from_home(
+                    page,
+                    base_url=base_url,
+                    person_ids=[casey_person_id, alex_person_id],
+                )
+                blair_detail_pattern = re.compile(
+                    rf"{re.escape(base_url)}/people/{re.escape(blair_person_id)}(?:\\?.*)?$"
+                )
+                _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+                _submit_name_form(
+                    page,
+                    detail_url_pattern=blair_detail_pattern,
+                    display_name=expected_blair_name,
+                )
+                _submit_merge_from_home(
+                    page,
+                    base_url=base_url,
+                    person_ids=[merged_anonymous_winner_person_id, blair_person_id],
+                )
+                name_event_count_before_noop = _count_person_name_events(library_db)
+                _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=blair_person_id)
+                _submit_name_form(
+                    page,
+                    detail_url_pattern=blair_detail_pattern,
+                    display_name=expected_blair_name,
+                )
+                assert _count_person_name_events(library_db) == name_event_count_before_noop
+                page.goto(f"{base_url}/people", wait_until="networkidle")
+                expect(page.locator("[data-undo-submit]")).to_be_enabled()
+                response_start = len(response_log)
+                _submit_undo_from_home(page, base_url=base_url)
+                _assert_undo_prg_flow(
+                    responses=response_log[response_start:],
+                    base_url=base_url,
+                )
+                assert _read_person_merge_operations(library_db)[-1]["undone_at"] is not None
+                browser.close()
+        finally:
+            _terminate_process(process)
+
+    _run_anonymous_winner_named_then_rejected(tmp_path / "anonymous-winner-named")
+    _run_named_winner_renamed_then_rejected(tmp_path / "named-winner-renamed")
+    _run_named_winner_noop_stays_eligible(tmp_path / "named-winner-noop")
+
+
+def test_people_gallery_undo_only_rolls_back_latest_merge(tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+    alex_person_id = target_person_ids["target_alex"]
+    casey_person_id = target_person_ids["target_casey"]
+    blair_person_id = target_person_ids["target_blair"]
+    first_merge_winner_person_id = min(alex_person_id, casey_person_id)
+    first_merge_loser_person_id = casey_person_id if first_merge_winner_person_id == alex_person_id else alex_person_id
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[casey_person_id, alex_person_id],
+            )
+            first_merge_assignment_ids = _read_active_assignment_ids(library_db, first_merge_winner_person_id)
+            blair_assignment_ids_before_second_merge = _read_active_assignment_ids(library_db, blair_person_id)
+            expected_first_merge_assignment_ids = set(first_merge_assignment_ids)
+            expected_second_merge_union = expected_first_merge_assignment_ids | set(blair_assignment_ids_before_second_merge)
+
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[blair_person_id, first_merge_winner_person_id],
+            )
+            _submit_undo_from_home(page, base_url=base_url)
+            expect(page.locator("[data-undo-submit]")).to_be_disabled()
+
+            assert set(_read_active_assignment_ids(library_db, first_merge_winner_person_id)) == expected_first_merge_assignment_ids
+            assert set(_read_active_assignment_ids(library_db, blair_person_id)) == set(blair_assignment_ids_before_second_merge)
+            assert _read_active_assignment_ids(library_db, first_merge_loser_person_id) == []
+            assert set(_read_active_assignment_ids(library_db, first_merge_winner_person_id)) != expected_second_merge_union
+            merge_operations = _read_person_merge_operations(library_db)
+            assert len(merge_operations) == 2
+            assert merge_operations[0]["undone_at"] is None
+            assert merge_operations[1]["undone_at"] is not None
+            browser.close()
+
+        snapshot_after_latest_undo = _read_name_slice_db_snapshot(library_db)
+        response = httpx.post(
+            f"{base_url}/people/merge/undo",
+            follow_redirects=False,
+            timeout=5.0,
+        )
+        assert response.status_code == 400
+        assert "最近一次成功合并已经撤销" in response.text
+        assert _read_name_slice_db_snapshot(library_db) == snapshot_after_latest_undo
     finally:
         _terminate_process(process)
