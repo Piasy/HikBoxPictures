@@ -15,7 +15,7 @@
 
 ## Split Specs
 
-当前已写入并进入 review gate 的子 spec 包括 Slice 0、Slice A、Slice B 和 Slice C。Slice D-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
+当前已写入并进入 review gate 的子 spec 包括 Slice 0、Slice A、Slice B、Slice C 和 Slice D。Slice E-G 属于后续候选拆分；每次只补写一个子 spec，并在该子 spec 通过单份 reviewer 后再继续下一个。
 
 ### Slice 0：真实验收小图库生成
 
@@ -40,20 +40,21 @@
 
 ### Slice C：v6 在线人物归属
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-online-assignment-spec.md`
 - Scope: 在扫描入库后按 Immich v6 在线语义创建匿名人物和 active assignment；公共入口仍是 `hikbox scan start --workspace <path> [--batch-size <n>]`。
 - Acceptance summary: manifest 期望成组的人物形成匿名 person；低于阈值的 face 不进入人物库；重复扫描保持 person/assignment 幂等，并记录 `immich_v6_online_v1` 参数快照和归属摘要。
 
+### Slice D：人物库 WebUI 浏览与命名
+
+- [ ] Implementation status: Not done
+- Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-webui-naming-spec.md`
+- Scope: 通过 `hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供本机 WebUI，展示已命名/匿名人物和人物详情，并支持命名、重命名和 rename 审计。
+- Acceptance summary: Playwright 通过真实页面验证首页分区与空状态、详情分页 `7 + 7 + 4`、桌面一行 6 个 context 样本、Live 标记、命名/重命名、rename 审计落库，以及扫描运行中 `serve` 失败。
+
 ## Candidate Future Split Specs
 
 以下候选拆分只记录产品化路线，不代表已批准或可实现的 spec。每一项都必须单独补写 `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-<slice>-spec.md`，包含完整行为、验收标准和自动化验证，并通过 reviewer 后，才能移动到 `Split Specs`。候选项不使用 implementation checkbox。
-
-### Candidate D：人物库 WebUI 浏览与命名
-
-- Planned spec path: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-webui-naming-spec.md`
-- Scope: 通过 `hikbox serve --workspace <path>` 提供 localhost WebUI，展示已命名/匿名人物，并支持人物命名和重命名。
-- Acceptance summary: Playwright 可通过真实页面观察人物首页、详情页、命名表单、DB 姓名变化和审计记录。
 
 ### Candidate E：人物合并与最近一次撤销
 
@@ -78,10 +79,11 @@
 - CLI 只负责 `init`、`source`、`scan start`、`serve`；人物维护和导出只通过 WebUI/API 操作。
 - 所有 CLI 命令都必须显式传入 `--workspace <path>`。
 - WebUI 仅面向本机单用户、`localhost` 使用；首版不做账号系统、多用户协作、远程访问和多标签页一致性保障。
+- `hikbox serve` 固定监听 `localhost/127.0.0.1`；首版不提供 `--host` 配置。
 - WebUI 使用 FastAPI + Jinja2 服务端渲染，可用少量原生 JS 增强表单提交、局部刷新和确认弹窗；首版不引入 React/Vue 等前端框架。
-- 扫描运行期间禁止启动 WebUI；存在 `running|aborting` 扫描会话时，`hikbox serve --workspace <path>` 必须失败退出且不监听端口。
+- 扫描运行期间禁止启动 WebUI；存在 `running` 扫描会话时，`hikbox serve --workspace <path>` 必须失败退出且不监听端口。
 - 导出运行中禁止命名、合并、撤销合并、排除等人物归属写操作。
-- 页面视觉验收使用仓库现有 Playwright 入口；截图、JSON 报告和服务日志保存到 `.tmp/<task-name>/`。
+- 页面自动化验收以 Python Playwright + pytest 为主，截图不作为默认必留产物；只有在视觉或布局不确定、需要人工复核、用户明确要求，或正在排查视觉回归时才保存到 `.tmp/<task-name>/`。JSON 报告和服务日志按调试需要保存到 `.tmp/<task-name>/`。
 
 ## 验收集 Manifest Contract
 
