@@ -2,7 +2,7 @@
 
 ## Goal
 
-在已初始化并登记源目录的工作区中，通过 `hikbox scan start --workspace <path>` 扫描真实照片，生成可恢复的 asset、metadata、face observation、main embedding、crop/context 产物和扫描日志，为后续 v6 在线人物归属提供可信输入。
+在已初始化并登记源目录的工作区中，通过 `hikbox-pictures scan start --workspace <path>` 扫描真实照片，生成可恢复的 asset、metadata、face observation、main embedding、crop/context 产物和扫描日志，为后续 v6 在线人物归属提供可信输入。
 
 ## Global Constraints
 
@@ -12,7 +12,7 @@
 - 产品语义以 `hikbox_pictures/immich_face_single_file.py` 和 `docs/group_pics_algo.md` 的 v6 章节为准；本 slice 只产出 v6 归属所需输入，不执行人物归属。
 - 核心验收必须使用真实小图库、真实 InsightFace 模型、真实 SQLite、真实 crop/context 文件和真实日志；mock/stub/no-op 路径不得满足验收。
 - InsightFace 框架支持指定模型根目录：`FaceAnalysis(name='buffalo_l', root=<model_root>)` 会把模型目录解析为 `<model_root>/models/buffalo_l`；`model_zoo.get_model(..., root=<model_root>)` 也支持同一 root 约定。本 slice 必须把 `<model_root>` 固定为 `workspace/.hikbox/models/insightface`，权重文件位于 `workspace/.hikbox/models/insightface/models/buffalo_l/det_10g.onnx` 和 `workspace/.hikbox/models/insightface/models/buffalo_l/w600k_r50.onnx`。
-- `hikbox scan start` 必须显式把 workspace 模型根目录传给 InsightFace 框架；不得使用框架默认 root `~/.insightface` 或当前工作目录隐式加载权重。模型下载、缓存填充和缓存缺失处理假定由 InsightFace 框架自身语义负责，不作为本 slice 的产品需求或失败验收范围。
+- `hikbox-pictures scan start` 必须显式把 workspace 模型根目录传给 InsightFace 框架；不得使用框架默认 root `~/.insightface` 或当前工作目录隐式加载权重。模型下载、缓存填充和缓存缺失处理假定由 InsightFace 框架自身语义负责，不作为本 slice 的产品需求或失败验收范围。
 - Slice B 验收只关心扫描命令是否真实调用 InsightFace 框架并传入 workspace 模型根目录；不得 skip、xfail 或自动切换 fake detector。
 - CI 环境必须安装 HEIC/HEIF 解码依赖；如果运行环境不支持 HEIC/HEIF，相关集成测试必须失败并提示缺少依赖，而不是降级为只测 JPG/PNG。
 - 失败恢复验收不得依赖环境变量、测试后门或直接改库；必须通过正式 CLI 启动真实扫描进程，并由测试用例向 CLI 进程发送标准信号或直接 kill 进程来制造异常退出。
@@ -24,7 +24,7 @@
 
 ### Behavior
 
-- `hikbox scan start --workspace <path> [--batch-size <n>]` 读取已初始化工作区的 `config.json`、`library.db`、`embedding.db`、workspace 本地模型缓存和已登记 active source，不隐式初始化工作区或 source。
+- `hikbox-pictures scan start --workspace <path> [--batch-size <n>]` 读取已初始化工作区的 `config.json`、`library.db`、`embedding.db`、workspace 本地模型缓存和已登记 active source，不隐式初始化工作区或 source。
 - `--batch-size` 是正式 CLI 可选参数，默认值为 200；自动化测试可以传 `--batch-size 10`。`n` 必须是正整数；缺失、非整数或小于 1 时返回非 0 退出码和可读参数错误。
 - 扫描支持照片后缀 `jpg`、`jpeg`、`png`、`heic`、`heif`，后缀大小写不敏感；非支持后缀文件不入库为 asset。
 - discover 阶段必须按稳定顺序遍历支持照片，排序规则需能在不同平台和重复运行中保持一致；同一 source 中相同文件集合应产生相同批次边界。
@@ -43,7 +43,7 @@
 
 ### Public Interface
 
-- CLI：`hikbox scan start --workspace <path> [--batch-size <n>]`。
+- CLI：`hikbox-pictures scan start --workspace <path> [--batch-size <n>]`。
 - 文件：workspace 本地模型缓存 `workspace/.hikbox/models/insightface/models/buffalo_l/det_10g.onnx` 和 `workspace/.hikbox/models/insightface/models/buffalo_l/w600k_r50.onnx`。
 - DB：`library.db` 中的 asset、asset metadata、Live MOV 元数据、face observation、scan session、scan batch、scan batch item、crop/context 路径和扫描摘要。
 - DB：`embedding.db` 中每个成功 face 的 512 维 main embedding；本 slice 不写入 flip embedding。
@@ -85,20 +85,20 @@
 
 ### Acceptance Criteria
 
-- AC-1：使用 Slice 0 定义的同一份固定入库测试图库执行 `hikbox scan start --workspace <ws> --batch-size 10` 后，`library.db` 中存在该图库支持扫描照片对应的 asset 记录、scan session、scan batch、scan batch item、face observation、crop/context 路径和扫描摘要；不得为本 slice 另建一套缩水图库。
+- AC-1：使用 Slice 0 定义的同一份固定入库测试图库执行 `hikbox-pictures scan start --workspace <ws> --batch-size 10` 后，`library.db` 中存在该图库支持扫描照片对应的 asset 记录、scan session、scan batch、scan batch item、face observation、crop/context 路径和扫描摘要；不得为本 slice 另建一套缩水图库。
 - AC-2：扫描必须真实调用 InsightFace 框架，并显式指定 `workspace/.hikbox/models/insightface` 作为 InsightFace 模型根目录；验收通过调用观测、日志或可测 spy 证明产品代码没有使用框架默认 root `~/.insightface`，且没有切换到 fake detector。
 - AC-3：`embedding.db` 中每个成功检测到的人脸恰好存在 main embedding；向量为 512 维并已归一化，且与 `library.db` 中的 face observation 可通过稳定键关联；不得写入 flip embedding。
 - AC-4：每个成功检测到 face 的 crop/context 文件真实存在、可被图片库打开；context 最长边不超过 480，且是整图加人脸框，不是局部裁剪。
 - AC-5：测试图库中的 HEIC/HEIF 大小写变体能匹配同目录隐藏 MOV 并写入 Live 配对元数据；JPG/JPEG/PNG 即使存在相似 MOV 也不会写入 Live 配对关系。
 - AC-6：测试图库中的非支持后缀文件不会创建 asset；损坏照片记录 asset 级失败并进入扫描摘要，不阻断其它照片完成。
 - AC-7：以 `--batch-size 10` 扫描 Slice 0 固定入库测试图库时，批次数必须与 Slice 0 定义的支持扫描照片数量一致；测试用例分别覆盖 `SIGTERM`、`SIGINT` 和 `SIGKILL`，在第 2 批真实处理期间向 CLI 进程发送对应信号后，再次执行同一命令时，第 1 批不重复检测、不重复写入，第 2 批整批重跑并完成。
-- AC-8：重复执行已完成扫描的 `hikbox scan start --workspace <ws> --batch-size 10` 后，asset、face observation、main embedding、crop/context 和 Live MOV 配对数量保持不变，日志记录跳过 completed 批次或无新增待处理批次。
+- AC-8：重复执行已完成扫描的 `hikbox-pictures scan start --workspace <ws> --batch-size 10` 后，asset、face observation、main embedding、crop/context 和 Live MOV 配对数量保持不变，日志记录跳过 completed 批次或无新增待处理批次。
 - AC-9：无 source、workspace 未初始化、source 不可读、`--batch-size` 非法等失败场景返回非 0 退出码和可读 stderr，且不会创建 completed 批次。
 - AC-10：成功和失败扫描都会在 `external_root/logs` 中留下可追踪日志；测试杀进程场景必须能通过中断前已有扫描/批次日志与 DB 状态判断已完成批次和未完成批次；成功摘要包含批次数、完成批次数、失败 asset 数、成功 face 数和产物数量。
 
 ### Automated Verification
 
-- CLI 集成测试在真实临时目录中执行 Slice A 的 `init -> source add`，准备 workspace 本地模型缓存，再通过 subprocess 执行 `hikbox scan start --workspace <ws> --batch-size 10`，并读取真实 SQLite、产物目录和日志断言 AC-1、AC-3、AC-4、AC-6、AC-8、AC-10。
+- CLI 集成测试在真实临时目录中执行 Slice A 的 `init -> source add`，准备 workspace 本地模型缓存，再通过 subprocess 执行 `hikbox-pictures scan start --workspace <ws> --batch-size 10`，并读取真实 SQLite、产物目录和日志断言 AC-1、AC-3、AC-4、AC-6、AC-8、AC-10。
 - 真实小图库验收必须使用 Slice 0 定义的同一份固定入库测试图库。文件命名和 discover 排序必须稳定；不得为 Slice B 另建少量图片的专用缩水 fixture。
 - AC-2 通过对 InsightFace 框架入口做可观测验证覆盖：测试必须证明产品扫描路径调用真实 InsightFace 框架，并向 `FaceAnalysis(..., root=<model_root>)` 或 `model_zoo.get_model(..., root=<model_root>)` 传入 `workspace/.hikbox/models/insightface`；该验证不得替换真实检测结果，也不得让 fake detector 满足 AC-1、AC-3 或 AC-4。
 - HEIC/HEIF 解码能力必须纳入 CI 前置检查；缺少依赖时相关测试失败并提示依赖名称，不允许把 HEIC/HEIF 验收降级为仅断言文件名匹配。

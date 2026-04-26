@@ -28,28 +28,28 @@
 
 - [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-workspace-source-spec.md`
-- Scope: 提供从零建库的本地 workspace/external_root 基础设施；公共入口是 `hikbox init`、`hikbox source add`、`hikbox source list`。
+- Scope: 提供从零建库的本地 workspace/external_root 基础设施；公共入口是 `hikbox-pictures init`、`hikbox-pictures source add`、`hikbox-pictures source list`。
 - Acceptance summary: 用户能通过 CLI 初始化真实工作区、创建 `config.json`/`library.db`/`embedding.db`/artifact/log 目录，登记一个或多个真实 source，并通过 JSON 输出稳定列出 source。
 
 ### Slice B：可恢复扫描与人脸产物
 
 - [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-scan-artifacts-spec.md`
-- Scope: 在 Slice A 基础上扫描源目录照片，生成 asset、metadata、face observation、main embedding、crop/context，并支持批次级恢复；公共入口是 `hikbox scan start --workspace <path> [--batch-size <n>]`。
+- Scope: 在 Slice A 基础上扫描源目录照片，生成 asset、metadata、face observation、main embedding、crop/context，并支持批次级恢复；公共入口是 `hikbox-pictures scan start --workspace <path> [--batch-size <n>]`。
 - Acceptance summary: 使用 Slice 0 定义的固定入库测试图库以 `--batch-size 10` 扫描后，可在 DB、embedding 库、产物目录和日志中观察完整结果；信号中断后重跑不重复处理已提交批次。
 
 ### Slice C：v6 在线人物归属
 
 - [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-online-assignment-spec.md`
-- Scope: 在扫描入库后按 Immich v6 在线语义创建匿名人物和 active assignment；公共入口仍是 `hikbox scan start --workspace <path> [--batch-size <n>]`。
+- Scope: 在扫描入库后按 Immich v6 在线语义创建匿名人物和 active assignment；公共入口仍是 `hikbox-pictures scan start --workspace <path> [--batch-size <n>]`。
 - Acceptance summary: manifest 期望成组的人物形成匿名 person；低于阈值的 face 不进入人物库；重复扫描保持 person/assignment 幂等，并记录 `immich_v6_online_v1` 参数快照和归属摘要。
 
 ### Slice D：人物库 WebUI 浏览与命名
 
 - [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-webui-naming-spec.md`
-- Scope: 通过 `hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供本机 WebUI，展示已命名/匿名人物和人物详情，并支持命名、重命名和 rename 审计。
+- Scope: 通过 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供本机 WebUI，展示已命名/匿名人物和人物详情，并支持命名、重命名和 rename 审计。
 - Acceptance summary: Playwright 通过真实页面验证首页分区与空状态、详情分页 `7 + 7 + 4`、桌面一行 6 个 context 样本、Live 标记、命名/重命名、rename 审计落库，以及扫描运行中 `serve` 失败。
 - Accepted concern (2026-04-26, code-quality review, Feature Slice 2 / AC-16): `idx_person_unique_active_display_name` 当前只约束原始 `display_name`，没有在数据库层直接表达“trim 后唯一”。Controller 接受该风险，因为本 slice 唯一公共写入口 `POST /people/{person_id}/name` 已先执行 trim 并做应用层重名校验；若后续新增其它命名写路径或批量修复脚本，应补充归一化唯一约束或等价迁移。
 - Accepted concern (2026-04-26, code-quality review, Feature Slice 2 / AC-16): PRG 成功反馈当前通过全局 cookie 传递 outcome，未绑定 `person_id`。Controller 接受该风险，因为当前 Cross-Slice Contract 已明确首版不保证多标签页一致性，当前单用户主路径行为符合 spec；若后续扩展多标签页或更复杂导航，应把反馈状态收敛到 `person_id` 或请求作用域。
@@ -81,9 +81,9 @@
 - CLI 只负责 `init`、`source`、`scan start`、`serve`；人物维护和导出只通过 WebUI/API 操作。
 - 所有 CLI 命令都必须显式传入 `--workspace <path>`。
 - WebUI 仅面向本机单用户、`localhost` 使用；首版不做账号系统、多用户协作、远程访问和多标签页一致性保障。
-- `hikbox serve` 固定监听 `localhost/127.0.0.1`；首版不提供 `--host` 配置。
+- `hikbox-pictures serve` 固定监听 `localhost/127.0.0.1`；首版不提供 `--host` 配置。
 - WebUI 使用 FastAPI + Jinja2 服务端渲染，可用少量原生 JS 增强表单提交、局部刷新和确认弹窗；首版不引入 React/Vue 等前端框架。
-- 扫描运行期间禁止启动 WebUI；存在 `running` 扫描会话时，`hikbox serve --workspace <path>` 必须失败退出且不监听端口。
+- 扫描运行期间禁止启动 WebUI；存在 `running` 扫描会话时，`hikbox-pictures serve --workspace <path>` 必须失败退出且不监听端口。
 - 导出运行中禁止命名、合并、撤销合并、排除等人物归属写操作。
 - 页面自动化验收以 Python Playwright + pytest 为主，截图不作为默认必留产物；只有在视觉或布局不确定、需要人工复核、用户明确要求，或正在排查视觉回归时才保存到 `.tmp/<task-name>/`。JSON 报告和服务日志按调试需要保存到 `.tmp/<task-name>/`。
 

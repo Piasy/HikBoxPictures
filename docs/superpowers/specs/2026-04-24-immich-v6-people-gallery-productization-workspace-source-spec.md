@@ -49,7 +49,7 @@ CREATE TABLE library_sources (
 
 `library_sources.path` 保存绝对路径；`library_sources.active` 使用 `1` 表示 active，`0` 表示 inactive；`created_at` 使用带 `Z` 后缀的 ISO-8601 UTC 字符串，例如 `2026-04-24T00:00:00Z`。
 
-`hikbox source list --workspace <path>` 默认按 `library_sources.id ASC` 输出 JSON 到 stdout，格式如下：
+`hikbox-pictures source list --workspace <path>` 默认按 `library_sources.id ASC` 输出 JSON 到 stdout，格式如下：
 
 ```json
 {
@@ -73,7 +73,7 @@ CREATE TABLE library_sources (
 
 ### Behavior
 
-- `hikbox init --workspace <path> --external-root <path>` 创建新的 `workspace/.hikbox/`。
+- `hikbox-pictures init --workspace <path> --external-root <path>` 创建新的 `workspace/.hikbox/`。
 - 初始化创建 `workspace/.hikbox/config.json`、`workspace/.hikbox/library.db`、`workspace/.hikbox/embedding.db`。
 - `config.json` 按“持久化契约”保存 `config_version=1` 和绝对路径形式的 `external_root`。
 - `library.db` 与 `embedding.db` 按“持久化契约”写入 `schema_meta('schema_version', '1')`。
@@ -83,7 +83,7 @@ CREATE TABLE library_sources (
 
 ### Public Interface
 
-- CLI：`hikbox init --workspace <path> --external-root <path>`。
+- CLI：`hikbox-pictures init --workspace <path> --external-root <path>`。
 - 文件：`workspace/.hikbox/config.json`。
 - DB：`workspace/.hikbox/library.db`、`workspace/.hikbox/embedding.db`。
 - 目录：`external_root/artifacts/crops`、`external_root/artifacts/context`、`external_root/logs`。
@@ -105,7 +105,7 @@ CREATE TABLE library_sources (
 
 ### Acceptance Criteria
 
-- AC-1：在真实临时目录执行 `hikbox init --workspace <ws> --external-root <ext>` 后，`.hikbox/config.json`、`library.db`、`embedding.db`、`artifacts/crops`、`artifacts/context`、`logs` 都存在。
+- AC-1：在真实临时目录执行 `hikbox-pictures init --workspace <ws> --external-root <ext>` 后，`.hikbox/config.json`、`library.db`、`embedding.db`、`artifacts/crops`、`artifacts/context`、`logs` 都存在。
 - AC-2：使用相对路径形式传入 `--workspace` 和 `--external-root` 执行 init 后，读取 `config.json` 可见 `config_version` 为数字 `1`，`external_root` 是解析后的绝对路径，且指向本次命令指定的目录。
 - AC-3：读取 `library.db` 和 `embedding.db` 可见 `schema_meta('schema_version', '1')`；读取 `library.db` 可见 `library_sources` 表、`path` 唯一约束和 `active` 取值约束。
 - AC-4：重复执行同一 `init` 返回非 0 退出码，已有 `config.json`、两个 DB 和日志内容不被覆盖或删除。
@@ -114,7 +114,7 @@ CREATE TABLE library_sources (
 
 ### Automated Verification
 
-- 新增 CLI 集成测试，在 pytest 临时目录中通过 subprocess 执行 `hikbox init`，断言退出码、stdout/stderr、文件系统、JSON 内容和 SQLite 元数据。
+- 新增 CLI 集成测试，在 pytest 临时目录中通过 subprocess 执行 `hikbox-pictures init`，断言退出码、stdout/stderr、文件系统、JSON 内容和 SQLite 元数据。
 - AC-1、AC-2、AC-3 由成功初始化测试覆盖；AC-2 的测试必须从临时工作目录用相对 `--workspace` 和相对 `--external-root` 调用 CLI，并断言持久化路径为绝对路径；AC-3 直接查询 `schema_meta` 和 `library_sources` 的公开 schema 契约。
 - AC-4 由重复初始化测试覆盖，测试先记录文件内容或 mtime，再断言重复 init 后未被覆盖。
 - AC-5 由参数缺失和不可写目录测试覆盖；不可写目录可在非 Windows 环境用权限位构造，若 CI 环境不支持权限失败，则使用已存在普通文件作为 `external_root` 父级冲突来触发真实文件系统错误，并断言失败后不存在 `.hikbox`、DB、config、`external_root/artifacts`、`external_root/artifacts/crops`、`external_root/artifacts/context` 或 `external_root/logs` 半成品。
@@ -133,17 +133,17 @@ CREATE TABLE library_sources (
 
 ### Behavior
 
-- `hikbox source add --workspace <path> <source-path> --label <label>` 将一个照片源目录登记到 `library.db`。
+- `hikbox-pictures source add --workspace <path> <source-path> --label <label>` 将一个照片源目录登记到 `library.db`。
 - source 持久化到 `library_sources`，保存绝对路径、用户给定 label、带 `Z` 后缀的 ISO-8601 UTC 创建时间和 active 状态。
-- `hikbox source list --workspace <path>` 按“持久化契约”输出 JSON，包含 label、绝对路径、active 布尔值和创建时间，并按 `id ASC` 排序。
+- `hikbox-pictures source list --workspace <path>` 按“持久化契约”输出 JSON，包含 label、绝对路径、active 布尔值和创建时间，并按 `id ASC` 排序。
 - 重复登记同一个源目录绝对路径必须失败，不产生第二条 source 记录。
 - source add/list 必须读取现有 `workspace/.hikbox/config.json` 和 `library.db`；未初始化工作区不能隐式 init。
 - source add 成功后必须落盘日志；source add/list 失败必须在 stderr 输出可读错误；source list 成功至少可通过 stdout JSON 追踪结果。
 
 ### Public Interface
 
-- CLI：`hikbox source add --workspace <path> <source-path> --label <label>`。
-- CLI：`hikbox source list --workspace <path>`。
+- CLI：`hikbox-pictures source add --workspace <path> <source-path> --label <label>`。
+- CLI：`hikbox-pictures source list --workspace <path>`。
 - DB：`library.db` 中的 `library_sources` 表。
 - 日志：`external_root/logs` 下的 source 操作日志文件或等价追加日志。
 
@@ -164,9 +164,9 @@ CREATE TABLE library_sources (
 
 ### Acceptance Criteria
 
-- AC-1：在已初始化工作区执行 `hikbox source add --workspace <ws> <source> --label family` 后，`library_sources` 中存在一条记录：`path` 为 source 绝对路径，`label='family'`，`active=1`，`created_at` 是带 `Z` 后缀的 ISO-8601 UTC 字符串。
-- AC-2：执行 `hikbox source list --workspace <ws>` 后，stdout 是合法 JSON，`sources[0]` 包含 `label='family'`、source 绝对路径、`active=true` 和同一条 `created_at`。
-- AC-3：初始化后尚未登记 source 时执行 `hikbox source list --workspace <ws>`，stdout 是合法 JSON 且精确等于 `{"sources": []}`，退出码为 0。
+- AC-1：在已初始化工作区执行 `hikbox-pictures source add --workspace <ws> <source> --label family` 后，`library_sources` 中存在一条记录：`path` 为 source 绝对路径，`label='family'`，`active=1`，`created_at` 是带 `Z` 后缀的 ISO-8601 UTC 字符串。
+- AC-2：执行 `hikbox-pictures source list --workspace <ws>` 后，stdout 是合法 JSON，`sources[0]` 包含 `label='family'`、source 绝对路径、`active=true` 和同一条 `created_at`。
+- AC-3：初始化后尚未登记 source 时执行 `hikbox-pictures source list --workspace <ws>`，stdout 是合法 JSON 且精确等于 `{"sources": []}`，退出码为 0。
 - AC-4：连续登记两个不同 source 后，`library_sources` 中存在两条 active 记录；`source list` 返回两条记录，并按 `id ASC` 排序。
 - AC-5：未初始化工作区执行 source add/list 都返回非 0 退出码和可读错误，且不会创建 `.hikbox`。
 - AC-6：不存在路径、普通文件路径、不可读目录、空白 label 都返回非 0 退出码，不新增 source 记录。

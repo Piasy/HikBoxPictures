@@ -187,7 +187,7 @@ def _append_success_log(
 ) -> None:
     payload = {
         "timestamp": _utc_now_text(),
-        "command": " ".join(["hikbox", *command_args]),
+        "command": " ".join(["hikbox-pictures", *command_args]),
         "workspace": str(workspace_path),
         "external_root": str(external_root_path),
         "result": "success",

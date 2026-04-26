@@ -647,7 +647,7 @@ CLI 目标：
 
 - 覆盖 WebUI 的核心能力，支持纯命令行完成初始化、扫描、人物维护、导出与诊断。
 - 默认人类可读输出；`--json` 输出结构化结果，便于脚本集成。
-- 统一入口命令名：`hikbox`（具体安装名可在实现阶段映射为 `hikbox-pictures`）。
+- 统一入口命令名：`hikbox-pictures`。
 
 全局选项：
 
@@ -658,7 +658,7 @@ CLI 目标：
 命令树：
 
 ```text
-hikbox
+hikbox-pictures
   init
   config
     show
@@ -704,22 +704,22 @@ hikbox
 
 关键行为约束：
 
-- `hikbox init`：
+- `hikbox-pictures init`：
   - 初始化 `workspace/.hikbox/library.db`、`workspace/.hikbox/embedding.db` 与 `config.json`。
   - 若已存在库文件，仅做结构校验与 schema 版本检查。
-- `hikbox scan start-or-resume`：对齐 `POST /api/scan/start_or_resume` 语义。
-- `hikbox scan start-new`：对齐 `POST /api/scan/start_new` 语义；存在 active scan 返回冲突错误。
-- `hikbox serve start`：
+- `hikbox-pictures scan start-or-resume`：对齐 `POST /api/scan/start_or_resume` 语义。
+- `hikbox-pictures scan start-new`：对齐 `POST /api/scan/start_new` 语义；存在 active scan 返回冲突错误。
+- `hikbox-pictures serve start`：
   - 启动前必须检查 `scan_session`。
   - 若存在 `running|aborting` 会话，直接报错退出，不启动 Web 服务。
-- `hikbox people merge`：
+- `hikbox-pictures people merge`：
   - 合并保留规则：样本数多者胜；样本数相同取 `--selected-person-ids` 第 1 个。
   - loser 人物 active exclusion 迁移到 winner；撤销时按快照回滚 exclusion 变更。
-- `hikbox export run`：
+- `hikbox-pictures export run`：
   - 导出期间禁止人物归属/合并写操作。
   - `live_mov_path` 缺失或文件不可读时，静默跳过 `MOV`。
   - 同名目标文件按 `skipped_exists` 处理。
-- 首版不提供 `hikbox export template delete`。
+- 首版不提供 `hikbox-pictures export template delete`。
 
 退出码（首版建议）：
 
@@ -736,25 +736,25 @@ hikbox
 
 ```bash
 # 1) 初始化工作区
-hikbox init --workspace /data/hikbox_ws
-hikbox config set-external-root /data/hikbox_external --workspace /data/hikbox_ws
+hikbox-pictures init --workspace /data/hikbox_ws
+hikbox-pictures config set-external-root /data/hikbox_external --workspace /data/hikbox_ws
 
 # 2) 注册源目录并启动扫描
-hikbox source add /photos/family --label family --workspace /data/hikbox_ws
-hikbox scan start-or-resume --workspace /data/hikbox_ws
-hikbox scan status --latest --workspace /data/hikbox_ws
+hikbox-pictures source add /photos/family --label family --workspace /data/hikbox_ws
+hikbox-pictures scan start-or-resume --workspace /data/hikbox_ws
+hikbox-pictures scan status --latest --workspace /data/hikbox_ws
 
 # 3) 启动 WebUI（若扫描仍在 running/aborting 会直接失败退出）
-hikbox serve start --workspace /data/hikbox_ws --host 127.0.0.1 --port 8000
+hikbox-pictures serve start --workspace /data/hikbox_ws --host 127.0.0.1 --port 8000
 
 # 4) 人物维护
-hikbox people merge --selected-person-ids 11,22,33 --workspace /data/hikbox_ws
-hikbox people undo-last-merge --workspace /data/hikbox_ws
+hikbox-pictures people merge --selected-person-ids 11,22,33 --workspace /data/hikbox_ws
+hikbox-pictures people undo-last-merge --workspace /data/hikbox_ws
 
 # 5) 导出
-hikbox export template create --name "家庭合照" --output-root /exports/family --workspace /data/hikbox_ws
-hikbox export template update 1 --person-ids 11,22 --workspace /data/hikbox_ws
-hikbox export run 1 --workspace /data/hikbox_ws
+hikbox-pictures export template create --name "家庭合照" --output-root /exports/family --workspace /data/hikbox_ws
+hikbox-pictures export template update 1 --person-ids 11,22 --workspace /data/hikbox_ws
+hikbox-pictures export run 1 --workspace /data/hikbox_ws
 ```
 
 ## 16. 失败处理与可恢复性

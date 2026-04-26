@@ -126,7 +126,7 @@ def ensure_webui_schema_ready(workspace_context: WorkspaceContext) -> None:
         raise PeopleGalleryError(
             "当前工作区缺少 WebUI 依赖的 schema："
             f"{', '.join(missing_tables)}。"
-            "该工作区不支持自动升级，请使用当前版本重新执行 hikbox init。"
+            "该工作区不支持自动升级，请使用当前版本重新执行 hikbox-pictures init。"
         )
     missing_columns = _find_missing_columns(
         db_path=workspace_context.library_db_path,
@@ -136,7 +136,7 @@ def ensure_webui_schema_ready(workspace_context: WorkspaceContext) -> None:
         raise PeopleGalleryError(
             "当前工作区缺少 WebUI 依赖的 schema 列："
             f"{', '.join(missing_columns)}。"
-            "该工作区不支持自动升级，请使用当前版本重新执行 hikbox init。"
+            "该工作区不支持自动升级，请使用当前版本重新执行 hikbox-pictures init。"
         )
 
 

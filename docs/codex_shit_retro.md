@@ -14,6 +14,14 @@
 
 期间我也初步尝试了 trae + gpt 5.4 和 trae solo app，trae 和 superpowers 这套 skills 不太适配，发起 sub agent 老是跑偏（比如修改/review 没在 worktree），solo 则很容易触发模型死循环。（但 trae 和 solo 直接 vibe 体感还不错）
 
+不过后来我发现这个过程中，我也有问题，spec 所谓“原型冻结“其实压根没写清楚具体怎么做，也没写要去照抄原型代码，那 agent 可不就随意发挥了。。。
+
+后来我深度改进成了 LittlePower，实践过程中也有几点小发现：
+
+1. codex 发生 context compact 后，subagent 信息好像会丢失，导致 subagent 会泄露。
+2. gpt 5.4 写 spec（包括 review 和修订）感觉比 5.5 慢很多。
+
+---
 
 • 结论：没有。当前实现和 hikbox_pictures/face_review_pipeline.py 的核心检测/聚类/归属链路不一致，也还没有把这三段真正“冻结”到产品扫描主链路里。
 

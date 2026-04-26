@@ -50,7 +50,7 @@
 
 ### Non-goals
 
-- 不实现 `hikbox scan start`、人物聚类、WebUI、合并、排除或导出。
+- 不实现 `hikbox-pictures scan start`、人物聚类、WebUI、合并、排除或导出。
 - 不提供下载脚本、生成脚本、远程素材同步或运行时 fixture 生成流程。
 - 不要求图库覆盖所有真实相册格式；首版只覆盖本 spec 指定的固定验收矩阵。
 - 不把 manifest 暴露为产品配置、产品 API 或运行时业务输入。

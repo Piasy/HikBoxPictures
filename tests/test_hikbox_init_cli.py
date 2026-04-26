@@ -22,7 +22,7 @@ def _run_hikbox(
         pythonpath_parts.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     return subprocess.run(
-        [sys.executable, "-m", "hikbox", *args],
+        [sys.executable, "-m", "hikbox_pictures", *args],
         cwd=cwd or REPO_ROOT,
         env=env,
         text=True,
@@ -133,7 +133,7 @@ def test_init_creates_workspace_schema_artifacts_and_success_log(tmp_path: Path)
     log_files = _log_files(logs_dir)
     assert len(log_files) == 1
     log_text = log_files[0].read_text(encoding="utf-8")
-    assert "hikbox init" in log_text
+    assert "hikbox-pictures init" in log_text
     assert str(workspace.resolve()) in log_text
     assert str(external_root.resolve()) in log_text
     assert "success" in log_text
@@ -311,14 +311,14 @@ def failing_connect(database, *args, **kwargs):
 
 sqlite3.connect = failing_connect
 sys.argv = [
-    "hikbox",
+    "hikbox-pictures",
     "init",
     "--workspace",
     {str(workspace)!r},
     "--external-root",
     {str(external_root)!r},
 ]
-runpy.run_module("hikbox", run_name="__main__")
+runpy.run_module("hikbox_pictures", run_name="__main__")
 """
 
     result = _run_hikbox_with_inline_python(python_source)
@@ -386,14 +386,14 @@ def failing_connect(database, *args, **kwargs):
 
 sqlite3.connect = failing_connect
 sys.argv = [
-    "hikbox",
+    "hikbox-pictures",
     "init",
     "--workspace",
     {str(workspace)!r},
     "--external-root",
     {str(external_root)!r},
 ]
-runpy.run_module("hikbox", run_name="__main__")
+runpy.run_module("hikbox_pictures", run_name="__main__")
 """
 
     result = _run_hikbox_with_inline_python(python_source)

@@ -27,7 +27,7 @@ def _run_hikbox(*args: str, cwd: Path | None = None) -> subprocess.CompletedProc
         pythonpath_parts.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     return subprocess.run(
-        [sys.executable, "-m", "hikbox", *args],
+        [sys.executable, "-m", "hikbox_pictures", *args],
         cwd=cwd or REPO_ROOT,
         env=env,
         text=True,

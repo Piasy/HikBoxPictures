@@ -52,7 +52,7 @@ def start_scan(
 ) -> None:
     workspace_context: WorkspaceContext | None = None
     session_id: int | None = None
-    command = " ".join(["hikbox", *command_args])
+    command = " ".join(["hikbox-pictures", *command_args])
     try:
         workspace_context = load_workspace_context(workspace)
         _ensure_scan_schema_ready(workspace_context)
@@ -193,7 +193,7 @@ def _ensure_scan_schema_ready(workspace_context: WorkspaceContext) -> None:
         raise ScanStartError(
             "当前工作区缺少扫描表："
             f"{table_names}。该工作区只具备 Slice A schema，当前版本不支持自动升级；"
-            "请使用当前版本重新执行 hikbox init 创建新 workspace，再执行 hikbox source add 和 hikbox scan start。"
+            "请使用当前版本重新执行 hikbox-pictures init 创建新 workspace，再执行 hikbox-pictures source add 和 hikbox-pictures scan start。"
         )
 
 

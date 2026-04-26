@@ -57,7 +57,7 @@ def add_source(
                 workspace_context=workspace_context,
                 payload={
                     "timestamp": _utc_now_text(),
-                    "command": " ".join(["hikbox", *command_args]),
+                    "command": " ".join(["hikbox-pictures", *command_args]),
                     "workspace": str(workspace_context.workspace_path),
                     "source_path": str(source_dir_path),
                     "label": label,

@@ -2,13 +2,13 @@
 
 ## Goal
 
-在完成扫描、人脸检测和 main embedding 入库后，通过同一个 `hikbox scan start --workspace <path>` 按 Immich v6 在线语义创建匿名人物、写入 active assignment，并保证重复扫描、低证据样本和损坏 embedding 都有可观察且可恢复的结果。
+在完成扫描、人脸检测和 main embedding 入库后，通过同一个 `hikbox-pictures scan start --workspace <path>` 按 Immich v6 在线语义创建匿名人物、写入 active assignment，并保证重复扫描、低证据样本和损坏 embedding 都有可观察且可恢复的结果。
 
 ## Global Constraints
 
 - 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice C，只负责 v6 在线人物归属、匿名 person 创建、active assignment、assignment run 与归属日志。
 - 本 slice 依赖 Slice 0 的固定真实小图库、Slice A 的 workspace/source 契约，以及 Slice B 已写入的 active asset、active face observation、main embedding、crop/context 和扫描批次状态；不重新定义初始化、source 管理、人脸检测或 artifact 生成行为。
-- 公共入口仍是 `hikbox scan start --workspace <path> [--batch-size <n>]`；首版不新增独立 `assign`、`recognize`、`cluster`、`force-redetect` 或 `rebuild` CLI。
+- 公共入口仍是 `hikbox-pictures scan start --workspace <path> [--batch-size <n>]`；首版不新增独立 `assign`、`recognize`、`cluster`、`force-redetect` 或 `rebuild` CLI。
 - assignment 输入只能来自 `library.db` 中 active face observation 和 `embedding.db` 中对应的 main embedding；不得重新读取照片、不得重新调用 InsightFace 检测或识别模型、不得依赖 manifest 作为产品逻辑输入。
 - 产品语义以 `hikbox_pictures/immich_face_single_file.py` 和 `docs/group_pics_algo.md` 的 v6 章节为准：全量历史 active face 进入 HNSW cosine 索引，新 face 已在索引内后再做近邻检索，按两轮在线归属处理 pending face。
 - 默认归属参数固定为 `max_distance=0.5`、`min_faces=3`、`num_results=max(min_faces, 1)`、`embedding_variant='main'`、`distance_metric='cosine_distance'`、`self_match_included=true`、`two_pass_deferred=true`。
@@ -23,7 +23,7 @@
 
 ### Behavior
 
-- `hikbox scan start --workspace <path> [--batch-size <n>]` 在 Slice B 的扫描检测阶段成功提交后，继续在同一 scan session 中执行 assignment 阶段；扫描失败、批次未完成或模型/embedding 写入失败时不得进入成功的 assignment 阶段。
+- `hikbox-pictures scan start --workspace <path> [--batch-size <n>]` 在 Slice B 的扫描检测阶段成功提交后，继续在同一 scan session 中执行 assignment 阶段；扫描失败、批次未完成或模型/embedding 写入失败时不得进入成功的 assignment 阶段。
 - assignment 阶段读取所有 `asset_status='active'` 的 active face observation，并从 `embedding.db` 读取对应 main embedding，构建内存 HNSW cosine 索引；索引中必须包含本次待归属 face 自己。
 - 待归属候选先由 `library.db` 选出：active、所属 asset active、无 active assignment、未因当前重检失效的 face observation 都属于候选；随后必须逐一校验其 `embedding.db` main embedding。任一候选缺少 main embedding、embedding 不可解码或维度不是 512，都属于数据损坏并导致 assignment 失败，不得被静默过滤为非候选。
 - embedding 库一致性也必须校验：`embedding.db` 中 main embedding 若无法关联到 `library.db` 中任意已知 face observation，则视为孤儿 embedding。孤儿 embedding 不参与本次索引或候选，不得阻塞 assignment 成功；assignment run 摘要和日志必须记录 warning、孤儿数量和可定位的 embedding 稳定键。实现可以保留能关联到 inactive/missing/deleted 历史 face 的旧 embedding，但这些旧 face 同样不得参与本次索引或候选。
@@ -36,13 +36,13 @@
 - 创建匿名 person 时，`display_name` 为空、`is_named=0`、`status='active'`，并生成稳定 UUID；匿名 person 是否显示、如何命名由后续 WebUI 子 spec 定义。
 - 写入 active assignment 时，必须保证同一 face 同时最多只有一个 active assignment；assignment 记录 `assignment_run_id`、`assignment_source='online_v6'`、可观察置信信息或距离摘要，以及创建/更新时间。
 - 已经有 active assignment 的 face 再次进入 assignment 阶段时必须幂等跳过或保持原 active assignment；不得重复写入 assignment，也不得创建重复 person。
-- 重复执行已完成的 `hikbox scan start --workspace <path> [--batch-size <n>]` 时，不得重复创建 person，不得重复 active assignment；允许记录一个候选数为 0 或全部 skipped 的 assignment run/log，但人物与 active assignment 结果必须稳定。
+- 重复执行已完成的 `hikbox-pictures scan start --workspace <path> [--batch-size <n>]` 时，不得重复创建 person，不得重复 active assignment；允许记录一个候选数为 0 或全部 skipped 的 assignment run/log，但人物与 active assignment 结果必须稳定。
 - assignment run 必须记录参数快照、候选数量、assigned 数、new person 数、deferred 数、skipped 数、失败数量、开始/结束时间和状态；对应日志必须能定位本次扫描归属是否执行、跳过或失败。
 - 同一 asset 重检的 IoU 复用语义必须与原型一致：归一化 bbox IoU `> 0.5` 的新检测框复用旧 face 记录，不刷新旧 embedding 或既有 person；未被新检测框匹配的旧 face 失效并从索引候选中移除；新增 face 入 pending recognition。首版没有公开 force 重检入口，但该语义必须通过算法单元测试覆盖。
 
 ### Public Interface
 
-- CLI：`hikbox scan start --workspace <path> [--batch-size <n>]`。
+- CLI：`hikbox-pictures scan start --workspace <path> [--batch-size <n>]`。
 - DB：`library.db` 中的 `person`、active `person_face_assignment` 或等价 assignment 真相表、`assignment_run`、归属摘要和可观测事件。
 - DB：`embedding.db` 中 active face 对应的 main embedding 是唯一向量输入。
 - 日志：`external_root/logs` 下的 assignment 开始、完成、跳过、失败和摘要记录。
@@ -84,19 +84,19 @@
 
 ### Acceptance Criteria
 
-- AC-1：使用 Slice 0 固定真实小图库执行 `hikbox init -> hikbox source add -> hikbox scan start --workspace <ws> --batch-size 10` 后，manifest 中 `expected_person_groups` 对应的目标人物都形成 active 匿名 person，组内 face 都存在 active `online_v6` assignment；每个目标组内部必须映射到唯一 person，且不同目标组必须映射到不同 person。
+- AC-1：使用 Slice 0 固定真实小图库执行 `hikbox-pictures init -> hikbox-pictures source add -> hikbox-pictures scan start --workspace <ws> --batch-size 10` 后，manifest 中 `expected_person_groups` 对应的目标人物都形成 active 匿名 person，组内 face 都存在 active `online_v6` assignment；每个目标组内部必须映射到唯一 person，且不同目标组必须映射到不同 person。
 - AC-2：manifest 的 `expected_person_groups` 是确定的正向成组集合；不在 `expected_person_groups` 中的非目标有脸样本、无脸样本、损坏文件、非支持后缀文件或 tolerance-only 样本不会创建目标匿名 person；无脸、损坏和非支持后缀样本没有 active assignment。
-- AC-3：重复执行同一个 `hikbox scan start --workspace <ws> --batch-size 10` 后，active person 数、active assignment 数、每个 expected group 到 person 的映射都保持不变；不得出现重复 person、重复 assignment 或 face 归属迁移。
+- AC-3：重复执行同一个 `hikbox-pictures scan start --workspace <ws> --batch-size 10` 后，active person 数、active assignment 数、每个 expected group 到 person 的映射都保持不变；不得出现重复 person、重复 assignment 或 face 归属迁移。
 - AC-4：成功 assignment run 在 `library.db` 中记录 `status='completed'`、开始/结束时间、`algorithm_version='immich_v6_online_v1'`，参数快照包含 `max_distance=0.5`、`min_faces=3`、`num_results=3`、`embedding_variant='main'`、`distance_metric='cosine_distance'`、`self_match_included=true`、`two_pass_deferred=true`，并记录候选数、assigned 数、new person 数、deferred 数、skipped 数和 failed 数。
 - AC-5：`external_root/logs` 中存在 assignment 开始、完成和摘要日志；重复扫描或无候选扫描时日志能区分 skipped/zero-candidate 与失败。
-- AC-6：候选 active face 的 embedding 缺失、维度不是 512 或向量不可解码时，`hikbox scan start` 返回非 0 退出码和可读 stderr，`assignment_run.status='failed'` 并记录失败原因，不会留下部分 person 或部分 active assignment，scan session 不得标记为 completed；修复损坏 embedding 后重跑同一命令能继续完成 assignment，且已提交检测批次、face observation 和 main embedding 不重复。
-- AC-7：`embedding.db` 存在无法关联到任意已知 face observation 的孤儿 main embedding 时，`hikbox scan start` 仍可完成 assignment；孤儿 embedding 不参与索引、候选或 active assignment，不能让原本低于 `min_faces` 的低证据 face 被推过归属阈值；assignment run 摘要和日志记录 warning、孤儿数量和可定位的 embedding 稳定键。
+- AC-6：候选 active face 的 embedding 缺失、维度不是 512 或向量不可解码时，`hikbox-pictures scan start` 返回非 0 退出码和可读 stderr，`assignment_run.status='failed'` 并记录失败原因，不会留下部分 person 或部分 active assignment，scan session 不得标记为 completed；修复损坏 embedding 后重跑同一命令能继续完成 assignment，且已提交检测批次、face observation 和 main embedding 不重复。
+- AC-7：`embedding.db` 存在无法关联到任意已知 face observation 的孤儿 main embedding 时，`hikbox-pictures scan start` 仍可完成 assignment；孤儿 embedding 不参与索引、候选或 active assignment，不能让原本低于 `min_faces` 的低证据 face 被推过归属阈值；assignment run 摘要和日志记录 warning、孤儿数量和可定位的 embedding 稳定键。
 - AC-8：合成 embedding 算法测试覆盖 v6 两轮在线语义：`min_faces=3` 时“自己 + 1 个近邻”第一轮 deferred、第二轮只能挂已有 person 不能新建 person；“自己 + 2 个近邻”可创建匿名 person；近邻中已有 person 时按最近可复用 person 归属而不是投票。
 - AC-9：同一 asset 重检算法测试覆盖归一化 bbox IoU `> 0.5` 时复用旧 face、不刷新旧 embedding/person；未匹配旧 face 失效；新增 face 进入 pending recognition。
 
 ### Automated Verification
 
-- 新增 CLI 集成测试，例如 `tests/people_gallery/test_people_gallery_online_assignment.py`，在真实临时目录中通过 subprocess 执行 Slice A 的 `init -> source add`，复用 Slice 0 固定真实小图库，再执行 `hikbox scan start --workspace <ws> --batch-size 10`，读取真实 `library.db`、`embedding.db`、manifest 和日志断言 AC-1 到 AC-5。
+- 新增 CLI 集成测试，例如 `tests/people_gallery/test_people_gallery_online_assignment.py`，在真实临时目录中通过 subprocess 执行 Slice A 的 `init -> source add`，复用 Slice 0 固定真实小图库，再执行 `hikbox-pictures scan start --workspace <ws> --batch-size 10`，读取真实 `library.db`、`embedding.db`、manifest 和日志断言 AC-1 到 AC-5。
 - AC-1 的测试必须根据 manifest 的 `expected_person_groups` 在扫描结果中定位目标 face，再断言每个目标组内部归属到唯一 active person，且不同目标组映射到不同 active person；测试不得直接写 person、assignment 或用 manifest 驱动产品代码。
 - AC-2 的测试必须覆盖非目标有脸样本、无脸样本、损坏文件、非支持后缀文件和 tolerance-only 样本；不得只检查 happy path，也不得把 manifest 当成产品运行输入。
 - AC-3 的测试必须在同一 workspace 连续执行两次公开 `scan start`，比较两次后的 active person、active assignment、expected group 映射和 assignment run 摘要。

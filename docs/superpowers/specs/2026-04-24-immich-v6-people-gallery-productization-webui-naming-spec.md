@@ -2,24 +2,24 @@
 
 ## Goal
 
-在已有匿名人物和 active assignment 的 workspace 上，通过 `hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供本机 WebUI，让用户浏览已命名/匿名人物、查看人物详情样本，并通过详情页完成命名或重命名；分页、Live 标记、错误反馈和 rename 审计都可通过真实页面和真实 DB 验收。
+在已有匿名人物和 active assignment 的 workspace 上，通过 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供本机 WebUI，让用户浏览已命名/匿名人物、查看人物详情样本，并通过详情页完成命名或重命名；分页、Live 标记、错误反馈和 rename 审计都可通过真实页面和真实 DB 验收。
 
 ## Global Constraints
 
 - 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice D，只覆盖 `serve`、人物首页/详情页浏览、命名/重命名和 rename 审计。
 - 本 slice 依赖 Slice 0 的固定真实小图库和 manifest、Slice A 的 workspace/source 契约、Slice B 的 asset/face/artifact 契约，以及 Slice C 已创建的匿名 person、active assignment 和 assignment run；不重新定义初始化、扫描、人脸检测或在线归属语义。
-- 公共入口是 `hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`；首版不新增独立 `rename-person` CLI，也不要求公开 JSON API。
-- `hikbox serve` 固定监听本机 `localhost/127.0.0.1`；本 slice 不提供 `--host` 参数，也不定义 host 相关配置或校验分支。
+- 公共入口是 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`；首版不新增独立 `rename-person` CLI，也不要求公开 JSON API。
+- `hikbox-pictures serve` 固定监听本机 `localhost/127.0.0.1`；本 slice 不提供 `--host` 参数，也不定义 host 相关配置或校验分支。
 - `--port` 是可选参数；省略时固定监听 `8000`。自动化验收为了避免并发冲突，必须显式传入 `--port <free-port>`，不得依赖默认端口抢占成功。
 - `--person-detail-page-size` 是 `serve` 的可选参数，只影响人物详情页样本分页；默认值固定为 `200`，传入值必须是正整数。
 - 本 slice 的分页验收只验证显式传入 `--person-detail-page-size 7` 时的公开页面行为；不为默认值 `200` 单独增加服务级注入或分页验收逻辑。
 - WebUI 只面向本机单用户、`localhost` 使用；首版不做账号系统、多用户协作、远程访问和多标签页一致性保障。
 - WebUI 根路径必须可直接进入人物首页；实现可以直接渲染人物首页，也可以把 `/` 重定向到 `/people`，但用户不需要手工猜测入口。
-- 存在 `running` 扫描会话时，`hikbox serve` 必须失败退出且不监听端口；不得提供“边扫描边命名”的并发写路径。
+- 存在 `running` 扫描会话时，`hikbox-pictures serve` 必须失败退出且不监听端口；不得提供“边扫描边命名”的并发写路径。
 - 本 slice 只定义人物首页、人物详情页和命名表单的产品语义；不定义合并、撤销合并、排除、导出模板、导出历史、运行日志页或源目录管理页的可操作语义。
 - manifest 只允许作为自动化断言输入；产品运行、页面渲染、命名和 Live 标记逻辑不得读取 manifest。
 - 页面自动化验收统一使用 Chromium；这是当前用户明确确认后的浏览器基线，也与 `python3 -m playwright install chromium` 和 CI 安装路径保持一致；仍需遵循仓库现有 Playwright 入口约定。
-- 核心行为必须通过真实 `hikbox serve` 进程、真实 HTML 页面、真实表单提交、真实 SQLite 和真实日志验证；mock/stub/no-op、直接改库、硬编码页面结果、跳过 HTTP 服务或让测试直接调用内部模板函数不得满足验收。
+- 核心行为必须通过真实 `hikbox-pictures serve` 进程、真实 HTML 页面、真实表单提交、真实 SQLite 和真实日志验证；mock/stub/no-op、直接改库、硬编码页面结果、跳过 HTTP 服务或让测试直接调用内部模板函数不得满足验收。
 - 如果实现引入或调整 `person.display_name`、`person.is_named`、rename 审计真相表或相关 schema，必须同步更新 `docs/db_schema.md`。
 
 ## Feature Slice 1: 人物库浏览
@@ -28,7 +28,7 @@
 
 ### Behavior
 
-- `hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 启动本机 WebUI；服务固定监听 `localhost/127.0.0.1`，默认 `--port=8000`、`--person-detail-page-size=200`。
+- `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 启动本机 WebUI；服务固定监听 `localhost/127.0.0.1`，默认 `--port=8000`、`--person-detail-page-size=200`。
 - 人物首页必须展示两个视觉区块：`已命名人物` 和 `匿名人物`。
 - 首页只展示 `status='active'` 且仍有 active assignment 的 person。匿名区只展示已创建但尚未命名的 person；未归属 face 不出现在首页。
 - 每张人物卡至少展示：代表 context 图、当前显示名或稳定匿名标识、active assignment 样本数、进入详情页的可点击入口。已命名人物卡的可见名称必须等于该 person 的 `display_name`；匿名人物卡必须展示非空、跨刷新稳定的匿名标识，并且同一 person 在 `/`、`/people` 和重复刷新之间保持一致。
@@ -42,7 +42,7 @@
 
 ### Public Interface
 
-- CLI：`hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`
+- CLI：`hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`
 - 页面：`GET /`、`GET /people`、`GET /people/{person_id}`
 - 详情页分页：通过页面上的分页入口在多页之间切换；实现可以使用查询参数或等价 URL 形式，但对用户必须是可直接刷新和可回放的稳定 URL。
 - 页面中的代表图和详情页样本图都必须通过浏览器可访问的真实图片资源 URL 提供；自动化可以直接请求这些 URL，并与底层 artifact 文件对齐。
@@ -50,8 +50,8 @@
 
 ### Error and Boundary Cases
 
-- workspace 未初始化、缺少 WebUI 依赖的 schema、`--person-detail-page-size < 1` 或端口被占用时，`hikbox serve` 返回非 0 和可读错误。
-- 存在 `running` 扫描会话时，`hikbox serve` 返回非 0，且目标端口不被监听。
+- workspace 未初始化、缺少 WebUI 依赖的 schema、`--person-detail-page-size < 1` 或端口被占用时，`hikbox-pictures serve` 返回非 0 和可读错误。
+- 存在 `running` 扫描会话时，`hikbox-pictures serve` 返回非 0，且目标端口不被监听。
 - `person_id` 不存在时，详情页返回 404 或等价可读错误页，而不是 500。
 - 首页没有任何可展示人物时，显示 empty state，不返回 500。
 
@@ -69,14 +69,14 @@
 - AC-3：在 AC-2 的同一验收中，任一目标人物详情页第一页在 `1440x900` 视口下的样本网格第一行必须正好展示 6 个样本，第 7 个样本必须换到下一行。
 - AC-4：人物详情页样本卡只显示对应样本的 context 图，且页面中展示出来的样本图必须与该样本对应 `face_observations.context_path` 的真实 artifact 内容一致。切到第 2 页后，当前分页状态必须体现在稳定 URL 中；直接刷新该 URL 后，仍展示第 2 页对应的 7 个样本，而不是退回第一页。
 - AC-5：人物详情页中每个样本卡的 `Live` 标记必须与该样本对应 `assets.live_photo_mov_path` 的真实持久化值一一对应：`live_photo_mov_path IS NOT NULL` 的样本显示 `Live`，`live_photo_mov_path IS NULL` 的样本不得显示 `Live`。在当前 Slice 0 固定图库中，这意味着 `target_alex` 关联的 `asset_047` 和 `target_casey` 关联的 `asset_048` 显示 `Live`；`asset_049`、`asset_050` 不显示 `Live`；除 `asset_047`、`asset_048` 外，其他样本也都不得显示 `Live`。
-- AC-6：`hikbox serve --workspace <missing> --port <free-port>`、`hikbox serve --workspace <valid-workspace> --port <free-port> --person-detail-page-size 0`、“目标端口已被占用”和“workspace 缺少 WebUI 依赖的 schema”这四类场景都必须返回非 0 和可读错误，且不得留下监听中的服务端口。
-- AC-7：存在 `running` 扫描会话时，`hikbox serve` 返回非 0，且目标端口未被监听。
+- AC-6：`hikbox-pictures serve --workspace <missing> --port <free-port>`、`hikbox-pictures serve --workspace <valid-workspace> --port <free-port> --person-detail-page-size 0`、“目标端口已被占用”和“workspace 缺少 WebUI 依赖的 schema”这四类场景都必须返回非 0 和可读错误，且不得留下监听中的服务端口。
+- AC-7：存在 `running` 扫描会话时，`hikbox-pictures serve` 返回非 0，且目标端口未被监听。
 - AC-8：在一个已完成初始化、已添加 Slice 0 固定图库 source、但尚未执行 `scan start` 的真实 workspace 中访问 `GET /`，首页显示 empty state，而不是 500 或空白页。
 - AC-9：`person_id` 不存在时，详情页返回 404 或等价可读错误页，而不是 500。
 
 ### Automated Verification
 
-- 新增 Playwright 端到端测试，例如 `tests/people_gallery/test_webui_people_gallery_playwright.py`，通过真实 CLI 流程 `hikbox init --workspace <workspace> -> hikbox source add --workspace <workspace> -> hikbox scan start --workspace <workspace> -> hikbox serve --workspace <workspace> --port <free-port> --person-detail-page-size 7` 启动服务，再使用 Chromium 打开真实页面。
+- 新增 Playwright 端到端测试，例如 `tests/people_gallery/test_webui_people_gallery_playwright.py`，通过真实 CLI 流程 `hikbox-pictures init --workspace <workspace> -> hikbox-pictures source add --workspace <workspace> -> hikbox-pictures scan start --workspace <workspace> -> hikbox-pictures serve --workspace <workspace> --port <free-port> --person-detail-page-size 7` 启动服务，再使用 Chromium 打开真实页面。
 - Playwright 必须分别通过 `GET /` 和 `GET /people` 进入首页，再从首页卡片的真实点击入口进入详情页；不得只通过手工拼接 `person_id` URL 完成主路径验收。
 - Playwright 必须根据 manifest 的 `expected_person_groups` 和真实 DB 结果定位 `target_alex`、`target_blair`、`target_casey` 对应 person，再断言三个人物详情页样本数都为 18、分页精确为三页，且三页样本数分别为 7、7、4。
 - AC-1 的测试必须从真实 `library.db` 读取首页应展示的 active person 集合和样本数，再逐一对齐首页 DOM：每张人物卡都必须有代表 context 图、样本数文本、非空可见名称或匿名标识，以及对应 `data-person-id`，且首页不得多出任何不在该集合中的卡片。对于每张首页卡片，测试还必须抓取其代表图 URL，并验证图片内容与该 person 某个 active assignment 的真实 `context_path` 文件一致。匿名人物卡的可见匿名标识还必须在 `/`、`/people` 和页面刷新后保持一致。
@@ -86,7 +86,7 @@
 - AC-5 的测试必须分别进入 `target_alex`、`target_blair`、`target_casey` 的详情页，遍历该人物的全部分页，汇总所有已渲染样本卡的 `data-asset-id`，再与真实 `library.db.assets.live_photo_mov_path` 逐条对齐，断言跨所有分页出现的每张样本卡 `Live` 标记都与 DB 真相一致。当前固定图库里，还必须额外点名验证 `asset_047`、`asset_048` 显示 `Live`，`asset_049`、`asset_050` 不显示 `Live`，以及 `target_blair` 详情页中的所有样本都不得显示 `Live`。
 - 主线 Playwright 测试必须始终显式传入 `--port <free-port>` 和 `--person-detail-page-size 7`。
 - AC-6 和 AC-7 必须通过 CLI/服务级集成测试覆盖未初始化 workspace、非法 `--person-detail-page-size`、端口占用、缺少 WebUI 依赖 schema 和扫描运行中 `serve` 失败；这些测试必须验证非 0 退出码、可读 stderr 和“目标端口未监听”。
-- AC-8 必须复用 Slice 0 固定图库作为 source，但不执行 `scan start`：测试执行真实 `hikbox init --workspace <workspace> -> hikbox source add --workspace <workspace> -> hikbox serve --workspace <workspace> --port <free-port>`，再断言首页 empty state。
+- AC-8 必须复用 Slice 0 固定图库作为 source，但不执行 `scan start`：测试执行真实 `hikbox-pictures init --workspace <workspace> -> hikbox-pictures source add --workspace <workspace> -> hikbox-pictures serve --workspace <workspace> --port <free-port>`，再断言首页 empty state。
 - AC-9 必须通过真实页面或真实 HTTP 请求访问一个不存在的 `person_id` 详情页，断言返回 404 或等价可读错误页，而不是 500。
 - Playwright 验收默认以 DOM/HTTP/DB/artifact 断言为准；服务日志和必要 JSON 指标报告按调试需要保留到 `.tmp/people-gallery-webui-naming/`。页面截图只在视觉或布局不确定、需要人工复核、用户明确要求，或正在排查视觉回归时保留。
 - 测试不得通过直接插入 person、assignment、Live 标记或分页元数据来制造页面状态；必须让页面从真实 DB 和真实 HTTP 响应中产生这些状态。
@@ -143,7 +143,7 @@
 
 ### Automated Verification
 
-- Playwright 在真实页面执行 `hikbox init --workspace <workspace> -> hikbox source add --workspace <workspace> -> hikbox scan start --workspace <workspace> -> hikbox serve --workspace <workspace> --port <free-port>`，根据 manifest 和真实 DB 定位匿名目标人物后完成首次命名、重命名、重名失败、空名失败和同名 no-op。
+- Playwright 在真实页面执行 `hikbox-pictures init --workspace <workspace> -> hikbox-pictures source add --workspace <workspace> -> hikbox-pictures scan start --workspace <workspace> -> hikbox-pictures serve --workspace <workspace> --port <free-port>`，根据 manifest 和真实 DB 定位匿名目标人物后完成首次命名、重命名、重名失败、空名失败和同名 no-op。
 - 自动化必须同时读取真实 `library.db`，验证 `person.display_name`、`person.is_named`、person 身份稳定性、active assignment 未迁移，以及 rename 审计记录的数量、`person_id`、事件类型、旧名称、新名称和事件时间。
 - AC-11 的测试必须断言 DB 中最终写入的是裁剪后的名称，而不是带前后空白的原始输入。
 - AC-11 和 AC-12 的测试必须证明同一个 `person_id` 在两次提交后保持不变，而不是通过新建 person 或迁移 assignment 伪装出“重命名成功”；并且两次提交都必须在网络层观察到 `POST -> 302/303 -> GET /people/{person_id}`，随后回到首页断言人物卡在正确区块、显示正确名称、且详情页与首页同步。

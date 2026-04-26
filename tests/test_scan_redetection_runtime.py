@@ -57,7 +57,7 @@ def _insert_session_batch_item(
                   total_batches,
                   started_at
                 )
-                VALUES (?, 1, 'running', 'hikbox scan start --workspace test', 1, '2026-04-25T00:00:00Z')
+                VALUES (?, 1, 'running', 'hikbox-pictures scan start --workspace test', 1, '2026-04-25T00:00:00Z')
                 """,
                 (f"plan-{batch_index}",),
             )

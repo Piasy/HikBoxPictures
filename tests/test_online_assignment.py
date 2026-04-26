@@ -60,7 +60,7 @@ def _initialize_assignment_workspace(tmp_path: Path) -> tuple[object, int, int]:
                   total_batches,
                   started_at
                 )
-                VALUES ('assignment-test-plan', 1, 'running', 'hikbox scan start --workspace test', 1, '2026-04-25T00:00:00Z')
+                VALUES ('assignment-test-plan', 1, 'running', 'hikbox-pictures scan start --workspace test', 1, '2026-04-25T00:00:00Z')
                 """
             )
             scan_session_id = int(cursor.lastrowid)

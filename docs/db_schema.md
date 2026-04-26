@@ -26,8 +26,8 @@
 
 约定：
 
-- `hikbox init --workspace <path> --external-root <path>` 创建 `config.json`、`library.db`、`embedding.db` 和外部目录骨架。
-- `hikbox scan start --workspace <path> [--batch-size <n>]` 只读取已初始化工作区，不会隐式补建工作区或 source。
+- `hikbox-pictures init --workspace <path> --external-root <path>` 创建 `config.json`、`library.db`、`embedding.db` 和外部目录骨架。
+- `hikbox-pictures scan start --workspace <path> [--batch-size <n>]` 只读取已初始化工作区，不会隐式补建工作区或 source。
 - 扫描运行时显式把 `workspace/.hikbox/models/insightface` 作为 InsightFace 模型根目录传入；不依赖 `~/.insightface` 默认目录。
 - `external_root/artifacts/crops/` 存放 face crop，`external_root/artifacts/context/` 存放整图缩放加框 context 图。
 
@@ -157,7 +157,7 @@ CREATE TABLE scan_sessions (
   - `running`：存在未完成批次
   - `completed`：全部批次已完成，且同一 `scan start` 触发的 assignment 阶段已成功完成
   - `failed`：worker 异常退出、批次提交失败，或后续 assignment 阶段失败
-- `command`：完整命令文本，例如 `hikbox scan start --workspace ... --batch-size 10`。
+- `command`：完整命令文本，例如 `hikbox-pictures scan start --workspace ... --batch-size 10`。
 - `total_batches`：该 session 的总批次数。
 - `completed_batches`：当前已完成批次数。
 - `failed_assets`：当前 session 内失败 asset 数。
@@ -328,7 +328,7 @@ CREATE UNIQUE INDEX idx_person_unique_active_display_name
 
 运行时语义：
 
-- `hikbox scan start` 的 assignment 阶段只会在“自己 + 至少 2 个近邻”达到 `min_faces=3` 且无法复用已有人物时创建匿名 `person`。
+- `hikbox-pictures scan start` 的 assignment 阶段只会在“自己 + 至少 2 个近邻”达到 `min_faces=3` 且无法复用已有人物时创建匿名 `person`。
 - 重复执行同一 `scan start` 时不会重复创建已存在的匿名人物。
 - WebUI 命名写入前会先做首尾空白裁剪；裁剪后为空会拒绝写入。
 - active 且 `is_named=1` 的人物之间，`display_name` 必须按裁剪后的完整字符串精确唯一；当前不做大小写折叠或别名归并。
@@ -407,7 +407,7 @@ CREATE INDEX idx_assignment_runs_session_id ON assignment_runs(scan_session_id, 
 
 运行时语义：
 
-- 每次执行公开入口 `hikbox scan start` 都会在进入 assignment 阶段时创建一条 `assignment_runs`。
+- 每次执行公开入口 `hikbox-pictures scan start` 都会在进入 assignment 阶段时创建一条 `assignment_runs`。
 - 候选 active face 缺少 `main` embedding、embedding 维度不是 `512` 或 `vector_blob` 不可解码时，当前 run 记为 `failed`，对应 `scan_sessions.status` 也会记为 `failed`。
 - 无新增归属或所有候选都保持未归属时，run 仍可 `completed`，但日志会记 `assignment_skipped`。
 
@@ -508,8 +508,8 @@ CREATE INDEX idx_face_embeddings_face_id ON face_embeddings(face_observation_id,
 
 当前实现会在 `external_root/logs/` 下写 JSON Lines 日志：
 
-- `init.log.jsonl`：`hikbox init` 成功日志。
-- `source.log.jsonl`：`hikbox source add` 成功日志。
+- `init.log.jsonl`：`hikbox-pictures init` 成功日志。
+- `source.log.jsonl`：`hikbox-pictures source add` 成功日志。
 - `scan.log.jsonl`：扫描相关日志，当前至少包括：
   - `scan_started`
   - `batch_started`
@@ -535,7 +535,7 @@ CREATE INDEX idx_face_embeddings_face_id ON face_embeddings(face_observation_id,
 - 每批调用一个独立 worker 子进程处理真实 InsightFace 检测、embedding 与产物生成。
 - 主进程只在整批 worker 成功返回后，才统一提交 `assets`、`face_observations`、`face_embeddings` 和批次 `completed` 状态。
 - 单图失败不会阻断同批其它图片提交，但该图不会产生 `face_observations`、`face_embeddings` 或产物。
-- 当 discover/批次阶段收敛后，同一个 `hikbox scan start` 会继续执行在线 assignment 阶段。
+- 当 discover/批次阶段收敛后，同一个 `hikbox-pictures scan start` 会继续执行在线 assignment 阶段。
 - assignment 只读取 `library.db` 中已存在的 active `face_observations` 和 `embedding.db` 中的 `main` embedding；不会重新读照片，也不会重新调用 InsightFace 做归属。
 - assignment 使用 HNSW 余弦索引执行两轮在线归属，算法版本固定为 `immich_v6_online_v1`，assignment 来源固定为 `online_v6`。
 - orphan `main` embedding 只记录 warning，不进入索引或候选；损坏候选 embedding 会使 assignment 与 `scan_sessions` 一起失败。

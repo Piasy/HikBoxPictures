@@ -24,7 +24,7 @@ def _run_hikbox(
         pythonpath_parts.append(existing_pythonpath)
     env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
     return subprocess.run(
-        [sys.executable, "-m", "hikbox", *args],
+        [sys.executable, "-m", "hikbox_pictures", *args],
         cwd=cwd or REPO_ROOT,
         env=env,
         text=True,
@@ -147,7 +147,7 @@ def test_source_add_persists_record_and_source_list_returns_json_and_success_log
     }
 
     log_texts = _read_log_texts(external_root / "logs")
-    assert any("hikbox source add" in log_text for log_text in log_texts)
+    assert any("hikbox-pictures source add" in log_text for log_text in log_texts)
     assert any(str(source_dir.resolve()) in log_text for log_text in log_texts)
     assert any('"label": "family"' in log_text for log_text in log_texts)
     assert any('"result": "success"' in log_text for log_text in log_texts)
@@ -330,13 +330,13 @@ def failing_connect(database, *args, **kwargs):
 
 sqlite3.connect = failing_connect
 sys.argv = [
-    "hikbox",
+    "hikbox-pictures",
     "source",
     "list",
     "--workspace",
     {str(workspace)!r},
 ]
-runpy.run_module("hikbox", run_name="__main__")
+runpy.run_module("hikbox_pictures", run_name="__main__")
 """
     list_result = _run_hikbox_with_inline_python(python_source)
 
@@ -445,7 +445,7 @@ def failing_connect(database, *args, **kwargs):
 
 sqlite3.connect = failing_connect
 sys.argv = [
-    "hikbox",
+    "hikbox-pictures",
     "source",
     "add",
     "--workspace",
@@ -454,7 +454,7 @@ sys.argv = [
     "--label",
     "family",
 ]
-runpy.run_module("hikbox", run_name="__main__")
+runpy.run_module("hikbox_pictures", run_name="__main__")
 """
     add_result = _run_hikbox_with_inline_python(python_source)
 

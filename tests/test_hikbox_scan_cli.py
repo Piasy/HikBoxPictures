@@ -62,7 +62,7 @@ def _run_hikbox(
     if env_updates:
         env.update(env_updates)
     return subprocess.run(
-        [sys.executable, "-m", "hikbox", *args],
+        [sys.executable, "-m", "hikbox_pictures", *args],
         cwd=cwd or REPO_ROOT,
         env=env,
         text=True,
@@ -87,7 +87,7 @@ def _spawn_hikbox(
     if env_updates:
         env.update(env_updates)
     return subprocess.Popen(
-        [sys.executable, "-m", "hikbox", *args],
+        [sys.executable, "-m", "hikbox_pictures", *args],
         cwd=cwd or REPO_ROOT,
         env=env,
         text=True,
@@ -213,7 +213,7 @@ def test_scan_start_fails_cleanly_for_slice_a_only_workspace(tmp_path: Path) -> 
     assert normalized_stderr.startswith("scan start 失败:")
     assert "缺少扫描表" in normalized_stderr
     assert "不支持自动升级" in normalized_stderr
-    assert "hikbox init" in normalized_stderr
+    assert "hikbox-pictures init" in normalized_stderr
     assert "source add" in normalized_stderr
     assert "scan start" in normalized_stderr
     assert "no such table" not in normalized_stderr

@@ -19,6 +19,7 @@
 
 ## 自动化验收约定
 
+- 完成测试用例执行起来耗时较久（10 分钟左右），如果需要执行全量用例，需要耐心等待；所以运行测试时，可以按需执行修改涉及到的用例。
 - 前端和 WebUI 的真正验收以 `tests/people_gallery/test_webui_*_playwright.py` 这类 Python Playwright + pytest 测试为主；测试应进入 CI 或至少能被 `./scripts/run_tests.sh` 直接执行。
 - WebUI 主路径验收必须尽量走真实公共入口：真实 `hikbox` CLI、真实 HTTP 服务、真实页面交互、真实 SQLite、真实图片 artifact；不要用 mock/stub/no-op、直接改库或模板函数调用替代核心行为。
 - CLI 启动失败、端口占用、schema 缺失、扫描运行中拒绝服务等边界，不必强行用浏览器覆盖；优先用服务级集成测试验证退出码、stderr 和端口状态。

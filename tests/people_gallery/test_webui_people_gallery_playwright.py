@@ -42,7 +42,7 @@ def _run_hikbox(
     if env_updates:
         env.update(env_updates)
     return subprocess.run(
-        [sys.executable, "-m", "hikbox", *args],
+        [sys.executable, "-m", "hikbox_pictures", *args],
         cwd=cwd or REPO_ROOT,
         env=env,
         text=True,
@@ -67,7 +67,7 @@ def _spawn_hikbox(
     if env_updates:
         env.update(env_updates)
     return subprocess.Popen(
-        [sys.executable, "-m", "hikbox", *args],
+        [sys.executable, "-m", "hikbox_pictures", *args],
         cwd=cwd or REPO_ROOT,
         env=env,
         text=True,
