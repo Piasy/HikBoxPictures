@@ -1,6 +1,6 @@
 # 数据库 Schema 说明（当前已实现）
 
-本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」和 Slice B「可恢复扫描与人脸产物」。本文不承诺 Slice C 及之后的人物库、归属、导出等 schema。
+本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」以及 Slice D / Feature Slice 2「人物命名与重命名」。本文不承诺后续 merge / exclusion / export 等 future slice 的 schema。
 
 ## 1. 存储布局
 
@@ -313,6 +313,9 @@ CREATE TABLE person (
 
 ```sql
 CREATE INDEX idx_person_status ON person(status, is_named, created_at);
+CREATE UNIQUE INDEX idx_person_unique_active_display_name
+  ON person(display_name)
+  WHERE status = 'active' AND is_named = 1;
 ```
 
 字段语义：
@@ -321,13 +324,49 @@ CREATE INDEX idx_person_status ON person(status, is_named, created_at);
 - `display_name`：首版匿名人物为空，后续 WebUI 命名后才会有值。
 - `is_named`：`0` 表示匿名人物，`1` 表示已命名人物。
 - `status`：当前 Slice C 只写 `active`；后续 merge/撤销等功能再引入失效语义。
+- `updated_at`：人物记录最近一次真正发生状态变化的时间；命名/重命名会更新，no-op 不会更新。
 
 运行时语义：
 
 - `hikbox scan start` 的 assignment 阶段只会在“自己 + 至少 2 个近邻”达到 `min_faces=3` 且无法复用已有人物时创建匿名 `person`。
 - 重复执行同一 `scan start` 时不会重复创建已存在的匿名人物。
+- WebUI 命名写入前会先做首尾空白裁剪；裁剪后为空会拒绝写入。
+- active 且 `is_named=1` 的人物之间，`display_name` 必须按裁剪后的完整字符串精确唯一；当前不做大小写折叠或别名归并。
 
-### 3.9 `assignment_runs`
+### 3.9 `person_name_events`
+
+```sql
+CREATE TABLE person_name_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id TEXT NOT NULL REFERENCES person(id),
+  event_type TEXT NOT NULL CHECK (event_type IN ('person_named', 'person_renamed')),
+  old_display_name TEXT,
+  new_display_name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_person_name_events_person_id
+  ON person_name_events(person_id, id);
+```
+
+字段语义：
+
+- `person_id`：被命名或重命名的人物。
+- `event_type`：`person_named` 表示首次命名，`person_renamed` 表示已命名人物改名。
+- `old_display_name`：首次命名时为 `NULL`；重命名时保存旧名称。
+- `new_display_name`：本次提交后生效的裁剪后名称。
+- `created_at`：事件写入时间，带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
+
+运行时语义：
+
+- 每次真正成功的首次命名或重命名都会新增一条事件。
+- 重复提交相同名称，或只在前后空白不同但裁剪后相同的名称，会走 no-op 成功路径，不会新增事件。
+
+### 3.10 `assignment_runs`
 
 ```sql
 CREATE TABLE assignment_runs (
@@ -372,7 +411,7 @@ CREATE INDEX idx_assignment_runs_session_id ON assignment_runs(scan_session_id, 
 - 候选 active face 缺少 `main` embedding、embedding 维度不是 `512` 或 `vector_blob` 不可解码时，当前 run 记为 `failed`，对应 `scan_sessions.status` 也会记为 `failed`。
 - 无新增归属或所有候选都保持未归属时，run 仍可 `completed`，但日志会记 `assignment_skipped`。
 
-### 3.10 `person_face_assignments`
+### 3.11 `person_face_assignments`
 
 ```sql
 CREATE TABLE person_face_assignments (

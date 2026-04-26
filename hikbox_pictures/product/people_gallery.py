@@ -5,6 +5,7 @@ from math import ceil
 from pathlib import Path
 import sqlite3
 
+from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
 
 
@@ -18,6 +19,7 @@ REQUIRED_WEBUI_TABLES = (
     "face_observations",
     "person",
     "person_face_assignments",
+    "person_name_events",
 )
 REQUIRED_WEBUI_COLUMNS = {
     "assets": {
@@ -39,12 +41,21 @@ REQUIRED_WEBUI_COLUMNS = {
         "is_named",
         "status",
         "created_at",
+        "updated_at",
     },
     "person_face_assignments": {
         "id",
         "person_id",
         "face_observation_id",
         "active",
+    },
+    "person_name_events": {
+        "id",
+        "person_id",
+        "event_type",
+        "old_display_name",
+        "new_display_name",
+        "created_at",
     },
 }
 
@@ -80,6 +91,7 @@ class PersonSample:
 class PersonDetailPage:
     person_id: str
     display_label: str
+    current_display_name: str | None
     is_named: bool
     sample_count: int
     current_page: int
@@ -90,6 +102,19 @@ class PersonDetailPage:
     @property
     def page_numbers(self) -> list[int]:
         return list(range(1, self.total_pages + 1))
+
+
+@dataclass(frozen=True)
+class PersonNameChangeResult:
+    outcome: str
+
+
+class PersonNameValidationError(PeopleGalleryError):
+    """人物命名校验失败。"""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def ensure_webui_schema_ready(workspace_context: WorkspaceContext) -> None:
@@ -262,6 +287,11 @@ def load_person_detail_page(
             if bool(header_row["is_named"]) and header_row["display_name"] is not None
             else build_anonymous_label(person_id)
         ),
+        current_display_name=(
+            str(header_row["display_name"])
+            if bool(header_row["is_named"]) and header_row["display_name"] is not None
+            else None
+        ),
         is_named=bool(header_row["is_named"]),
         sample_count=sample_count,
         current_page=page,
@@ -308,6 +338,115 @@ def load_assignment_context_path(
     if row is None:
         return None
     return Path(str(row[0]))
+
+
+def submit_person_name(
+    workspace_context: WorkspaceContext,
+    *,
+    person_id: str,
+    display_name: str,
+) -> PersonNameChangeResult:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        person_row = connection.execute(
+            """
+            SELECT
+              person.id,
+              person.display_name,
+              person.is_named,
+              person.status,
+              COUNT(person_face_assignments.id) AS sample_count
+            FROM person
+            LEFT JOIN person_face_assignments
+              ON person_face_assignments.person_id = person.id
+             AND person_face_assignments.active = 1
+            WHERE person.id = ?
+            GROUP BY person.id, person.display_name, person.is_named, person.status
+            """,
+            (person_id,),
+        ).fetchone()
+        if person_row is None or str(person_row["status"]) != "active" or int(person_row["sample_count"]) < 1:
+            raise PersonNameValidationError(
+                f"未找到 person_id={person_id} 对应的人物。",
+                code="person_not_found",
+            )
+
+        normalized_name = display_name.strip()
+        if not normalized_name:
+            raise PersonNameValidationError("名称不能为空。", code="blank_name")
+
+        current_name = (
+            str(person_row["display_name"])
+            if bool(person_row["is_named"]) and person_row["display_name"] is not None
+            else None
+        )
+        if current_name == normalized_name:
+            connection.commit()
+            return PersonNameChangeResult(outcome="noop")
+
+        duplicate_row = connection.execute(
+            """
+            SELECT id
+            FROM person
+            WHERE id != ?
+              AND status = 'active'
+              AND is_named = 1
+              AND display_name = ?
+            LIMIT 1
+            """,
+            (person_id, normalized_name),
+        ).fetchone()
+        if duplicate_row is not None:
+            raise PersonNameValidationError("名称已存在，请使用其他名称。", code="duplicate_name")
+
+        now = utc_now_text()
+        connection.execute(
+            """
+            UPDATE person
+            SET display_name = ?,
+                is_named = 1,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (normalized_name, now, person_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO person_name_events (
+              person_id,
+              event_type,
+              old_display_name,
+              new_display_name,
+              created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                person_id,
+                "person_renamed" if current_name is not None else "person_named",
+                current_name,
+                normalized_name,
+                now,
+            ),
+        )
+        connection.commit()
+    except PersonNameValidationError:
+        connection.rollback()
+        raise
+    except sqlite3.IntegrityError as exc:
+        connection.rollback()
+        raise PersonNameValidationError("名称已存在，请使用其他名称。", code="duplicate_name") from exc
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise PeopleGalleryError(f"人物命名写入失败：{person_id}") from exc
+    finally:
+        connection.close()
+
+    if current_name is None:
+        return PersonNameChangeResult(outcome="named")
+    return PersonNameChangeResult(outcome="renamed")
 
 
 def build_anonymous_label(person_id: str) -> str:

@@ -99,7 +99,7 @@
 
 ## Feature Slice 2: 人物命名与重命名
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

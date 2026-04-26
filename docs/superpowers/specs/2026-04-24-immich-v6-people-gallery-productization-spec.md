@@ -47,10 +47,12 @@
 
 ### Slice D：人物库 WebUI 浏览与命名
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-webui-naming-spec.md`
 - Scope: 通过 `hikbox serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供本机 WebUI，展示已命名/匿名人物和人物详情，并支持命名、重命名和 rename 审计。
 - Acceptance summary: Playwright 通过真实页面验证首页分区与空状态、详情分页 `7 + 7 + 4`、桌面一行 6 个 context 样本、Live 标记、命名/重命名、rename 审计落库，以及扫描运行中 `serve` 失败。
+- Accepted concern (2026-04-26, code-quality review, Feature Slice 2 / AC-16): `idx_person_unique_active_display_name` 当前只约束原始 `display_name`，没有在数据库层直接表达“trim 后唯一”。Controller 接受该风险，因为本 slice 唯一公共写入口 `POST /people/{person_id}/name` 已先执行 trim 并做应用层重名校验；若后续新增其它命名写路径或批量修复脚本，应补充归一化唯一约束或等价迁移。
+- Accepted concern (2026-04-26, code-quality review, Feature Slice 2 / AC-16): PRG 成功反馈当前通过全局 cookie 传递 outcome，未绑定 `person_id`。Controller 接受该风险，因为当前 Cross-Slice Contract 已明确首版不保证多标签页一致性，当前单用户主路径行为符合 spec；若后续扩展多标签页或更复杂导航，应把反馈状态收敛到 `person_id` 或请求作用域。
 
 ## Candidate Future Split Specs
 

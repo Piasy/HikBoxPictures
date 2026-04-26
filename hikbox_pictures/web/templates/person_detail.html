@@ -13,6 +13,34 @@
     <span class="sr-only" data-current-page="{{ detail_page.current_page }}"></span>
     <span class="sr-only" data-total-pages="{{ detail_page.total_pages }}"></span>
 
+    <form class="name-form" method="post" action="/people/{{ detail_page.person_id }}/name" data-name-form>
+      <label class="name-form-label" for="display_name">人物名称</label>
+      <div class="name-form-row">
+        <input
+          id="display_name"
+          name="display_name"
+          type="text"
+          value="{{ name_form_value }}"
+          maxlength="120"
+          autocomplete="off"
+        >
+        <button type="submit">保存名称</button>
+      </div>
+    </form>
+
+    {% if name_feedback %}
+      <p
+        class="name-feedback{% if name_feedback.level == 'error' %} is-error{% endif %}"
+        {% if name_feedback.level == 'error' %}
+          role="alert"
+        {% else %}
+          role="status"
+        {% endif %}
+      >
+        {{ name_feedback.message }}
+      </p>
+    {% endif %}
+
     <div class="sample-grid">
       {% for sample in detail_page.samples %}
         <article class="sample-card" data-assignment-id="{{ sample.assignment_id }}" data-asset-id="{{ sample.asset_id }}">

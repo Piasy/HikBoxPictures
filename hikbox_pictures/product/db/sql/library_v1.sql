@@ -106,6 +106,21 @@ CREATE TABLE person (
 );
 
 CREATE INDEX idx_person_status ON person(status, is_named, created_at);
+CREATE UNIQUE INDEX idx_person_unique_active_display_name
+  ON person(display_name)
+  WHERE status = 'active' AND is_named = 1;
+
+CREATE TABLE person_name_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id TEXT NOT NULL REFERENCES person(id),
+  event_type TEXT NOT NULL CHECK (event_type IN ('person_named', 'person_renamed')),
+  old_display_name TEXT,
+  new_display_name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX idx_person_name_events_person_id
+  ON person_name_events(person_id, id);
 
 CREATE TABLE assignment_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI
 from fastapi import HTTPException
@@ -9,17 +10,26 @@ from fastapi import Request
 from fastapi.responses import FileResponse
 from fastapi.responses import HTMLResponse
 from fastapi.responses import RedirectResponse
+from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
 from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import load_assignment_context_path
 from hikbox_pictures.product.people_gallery import load_people_home_page
 from hikbox_pictures.product.people_gallery import load_person_detail_page
+from hikbox_pictures.product.people_gallery import PersonNameValidationError
+from hikbox_pictures.product.people_gallery import submit_person_name
 from hikbox_pictures.product.sources import WorkspaceContext
 
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+NAME_FEEDBACK_COOKIE = "people_name_feedback"
+NAME_FEEDBACK_MESSAGES = {
+    "named": {"level": "info", "message": "名称已保存。"},
+    "renamed": {"level": "info", "message": "名称已更新。"},
+    "noop": {"level": "info", "message": "名称未变化。"},
+}
 
 
 def create_people_gallery_app(
@@ -73,14 +83,85 @@ def create_people_gallery_app(
                 },
                 status_code=404,
             )
-        return templates.TemplateResponse(
+        feedback = _get_name_feedback(request)
+        response = templates.TemplateResponse(
             request=request,
             name="person_detail.html",
             context={
                 "page_title": detail_page.display_label,
                 "detail_page": detail_page,
+                "name_feedback": feedback,
+                "name_form_value": detail_page.current_display_name or "",
             },
         )
+        if feedback is not None:
+            response.delete_cookie(NAME_FEEDBACK_COOKIE, path="/")
+        return response
+
+    @app.post("/people/{person_id}/name", response_class=HTMLResponse)
+    async def person_name_submit(
+        request: Request,
+        person_id: str,
+    ) -> Response:
+        body = await request.body()
+        form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        display_name = form_data.get("display_name", [""])[0]
+        try:
+            result = submit_person_name(
+                workspace_context,
+                person_id=person_id,
+                display_name=display_name,
+            )
+        except PersonNameValidationError as exc:
+            if exc.code == "person_not_found":
+                return templates.TemplateResponse(
+                    request=request,
+                    name="not_found.html",
+                    context={
+                        "page_title": "人物不存在",
+                        "person_id": person_id,
+                    },
+                    status_code=404,
+                )
+            detail_page = load_person_detail_page(
+                workspace_context,
+                person_id=person_id,
+                page=1,
+                page_size=person_detail_page_size,
+            )
+            if detail_page is None:
+                return templates.TemplateResponse(
+                    request=request,
+                    name="not_found.html",
+                    context={
+                        "page_title": "人物不存在",
+                        "person_id": person_id,
+                    },
+                    status_code=404,
+                )
+            return templates.TemplateResponse(
+                request=request,
+                name="person_detail.html",
+                context={
+                    "page_title": detail_page.display_label,
+                    "detail_page": detail_page,
+                    "name_feedback": {"level": "error", "message": str(exc)},
+                    "name_form_value": display_name,
+                },
+                status_code=400,
+            )
+        except PeopleGalleryError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        response = RedirectResponse(url=f"/people/{person_id}", status_code=303)
+        response.set_cookie(
+            NAME_FEEDBACK_COOKIE,
+            result.outcome,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
 
     @app.get("/images/assignments/{assignment_id}/context")
     def assignment_context_image(assignment_id: int) -> FileResponse:
@@ -96,3 +177,10 @@ def create_people_gallery_app(
         return FileResponse(context_path)
 
     return app
+
+
+def _get_name_feedback(request: Request) -> dict[str, str] | None:
+    feedback_code = request.cookies.get(NAME_FEEDBACK_COOKIE)
+    if feedback_code is None:
+        return None
+    return NAME_FEEDBACK_MESSAGES.get(feedback_code)

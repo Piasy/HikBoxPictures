@@ -109,6 +109,14 @@ CREATE TABLE person (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE person_name_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id TEXT NOT NULL REFERENCES person(id),
+  event_type TEXT NOT NULL,
+  new_display_name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE person_face_assignments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id TEXT NOT NULL REFERENCES person(id),
