@@ -41,21 +41,54 @@
       </p>
     {% endif %}
 
-    <div class="sample-grid">
-      {% for sample in detail_page.samples %}
-        <article class="sample-card" data-assignment-id="{{ sample.assignment_id }}" data-asset-id="{{ sample.asset_id }}">
-          <img src="/images/assignments/{{ sample.assignment_id }}/context" alt="{{ detail_page.display_label }} 样本 {{ loop.index }}">
-          <div class="sample-card-body">
-            <div class="sample-card-meta">
-              <span>assignment #{{ sample.assignment_id }}</span>
-              {% if sample.is_live %}
-                <span class="live-badge" data-live-badge>Live</span>
-              {% endif %}
+    <form class="exclude-form" method="post" action="/people/{{ detail_page.person_id }}/exclude" data-exclude-form>
+      <div class="name-form-row">
+        <button type="submit">批量排除所选样本</button>
+      </div>
+
+      {% if exclusion_feedback %}
+        <p
+          class="name-feedback{% if exclusion_feedback.level == 'error' %} is-error{% endif %}"
+          {% if exclusion_feedback.level == 'error' %}
+            role="alert"
+          {% else %}
+            role="status"
+          {% endif %}
+        >
+          {{ exclusion_feedback.message }}
+        </p>
+      {% endif %}
+
+      <div class="sample-grid">
+        {% for sample in detail_page.samples %}
+          <article
+            class="sample-card"
+            data-assignment-id="{{ sample.assignment_id }}"
+            data-face-observation-id="{{ sample.face_observation_id }}"
+            data-asset-id="{{ sample.asset_id }}"
+          >
+            <label>
+              <input
+                type="checkbox"
+                name="assignment_id"
+                value="{{ sample.assignment_id }}"
+                data-exclude-checkbox
+              >
+              选择排除
+            </label>
+            <img src="/images/assignments/{{ sample.assignment_id }}/context" alt="{{ detail_page.display_label }} 样本 {{ loop.index }}">
+            <div class="sample-card-body">
+              <div class="sample-card-meta">
+                <span>assignment #{{ sample.assignment_id }}</span>
+                {% if sample.is_live %}
+                  <span class="live-badge" data-live-badge>Live</span>
+                {% endif %}
+              </div>
             </div>
-          </div>
-        </article>
-      {% endfor %}
-    </div>
+          </article>
+        {% endfor %}
+      </div>
+    </form>
 
     {% if detail_page.total_pages > 1 %}
       <nav class="pagination" aria-label="详情分页">

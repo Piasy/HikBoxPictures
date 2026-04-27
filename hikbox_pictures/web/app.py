@@ -17,11 +17,13 @@ from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import load_assignment_context_path
 from hikbox_pictures.product.people_gallery import load_people_home_page
 from hikbox_pictures.product.people_gallery import load_person_detail_page
+from hikbox_pictures.product.people_gallery import PersonExclusionValidationError
 from hikbox_pictures.product.people_gallery import PersonMergeValidationError
 from hikbox_pictures.product.people_gallery import PersonMergeUndoValidationError
 from hikbox_pictures.product.people_gallery import PersonNameValidationError
 from hikbox_pictures.product.people_gallery import submit_people_merge
 from hikbox_pictures.product.people_gallery import submit_people_merge_undo
+from hikbox_pictures.product.people_gallery import submit_person_exclusions
 from hikbox_pictures.product.people_gallery import submit_person_name
 from hikbox_pictures.product.sources import WorkspaceContext
 
@@ -30,6 +32,7 @@ TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 NAME_FEEDBACK_COOKIE = "people_name_feedback"
 HOME_FEEDBACK_COOKIE = "people_home_feedback"
+EXCLUSION_FEEDBACK_COOKIE = "people_exclusion_feedback"
 NAME_FEEDBACK_MESSAGES = {
     "named": {"level": "info", "message": "名称已保存。"},
     "renamed": {"level": "info", "message": "名称已更新。"},
@@ -38,6 +41,10 @@ NAME_FEEDBACK_MESSAGES = {
 HOME_FEEDBACK_MESSAGES = {
     "merge_succeeded": {"level": "info", "message": "人物已合并。"},
     "merge_undo_succeeded": {"level": "info", "message": "最近一次合并已撤销。"},
+    "exclude_succeeded_person_removed": {"level": "info", "message": "已排除所选样本，当前人物已清空。"},
+}
+EXCLUSION_FEEDBACK_MESSAGES = {
+    "exclude_succeeded": {"level": "info", "message": "已排除所选样本。"},
 }
 
 
@@ -67,6 +74,49 @@ def create_people_gallery_app(
         )
         if request.cookies.get(HOME_FEEDBACK_COOKIE) is not None and home_feedback is not None:
             response.delete_cookie(HOME_FEEDBACK_COOKIE, path="/")
+        return response
+
+    def _render_person_detail(
+        request: Request,
+        *,
+        person_id: str,
+        status_code: int = 200,
+        name_feedback: dict[str, str] | None = None,
+        exclusion_feedback: dict[str, str] | None = None,
+        name_form_value: str | None = None,
+    ) -> HTMLResponse:
+        detail_page = load_person_detail_page(
+            workspace_context,
+            person_id=person_id,
+            page=1,
+            page_size=person_detail_page_size,
+        )
+        if detail_page is None:
+            return templates.TemplateResponse(
+                request=request,
+                name="not_found.html",
+                context={
+                    "page_title": "人物不存在",
+                    "person_id": person_id,
+                },
+                status_code=404,
+            )
+        response = templates.TemplateResponse(
+            request=request,
+            name="person_detail.html",
+            context={
+                "page_title": detail_page.display_label,
+                "detail_page": detail_page,
+                "name_feedback": name_feedback,
+                "exclusion_feedback": exclusion_feedback,
+                "name_form_value": detail_page.current_display_name if name_form_value is None else name_form_value,
+            },
+            status_code=status_code,
+        )
+        if request.cookies.get(NAME_FEEDBACK_COOKIE) is not None and name_feedback is not None:
+            response.delete_cookie(NAME_FEEDBACK_COOKIE, path="/")
+        if request.cookies.get(EXCLUSION_FEEDBACK_COOKIE) is not None and exclusion_feedback is not None:
+            response.delete_cookie(EXCLUSION_FEEDBACK_COOKIE, path="/")
         return response
 
     @app.get("/", include_in_schema=False)
@@ -162,12 +212,7 @@ def create_people_gallery_app(
         page: int = Query(default=1, ge=1),
     ) -> HTMLResponse:
         try:
-            detail_page = load_person_detail_page(
-                workspace_context,
-                person_id=person_id,
-                page=page,
-                page_size=person_detail_page_size,
-            )
+            detail_page = load_person_detail_page(workspace_context, person_id=person_id, page=page, page_size=person_detail_page_size)
         except PeopleGalleryError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if detail_page is None:
@@ -188,11 +233,14 @@ def create_people_gallery_app(
                 "page_title": detail_page.display_label,
                 "detail_page": detail_page,
                 "name_feedback": feedback,
+                "exclusion_feedback": _get_exclusion_feedback(request),
                 "name_form_value": detail_page.current_display_name or "",
             },
         )
         if feedback is not None:
             response.delete_cookie(NAME_FEEDBACK_COOKIE, path="/")
+        if request.cookies.get(EXCLUSION_FEEDBACK_COOKIE) is not None:
+            response.delete_cookie(EXCLUSION_FEEDBACK_COOKIE, path="/")
         return response
 
     @app.post("/people/{person_id}/name", response_class=HTMLResponse)
@@ -211,41 +259,13 @@ def create_people_gallery_app(
             )
         except PersonNameValidationError as exc:
             if exc.code == "person_not_found":
-                return templates.TemplateResponse(
-                    request=request,
-                    name="not_found.html",
-                    context={
-                        "page_title": "人物不存在",
-                        "person_id": person_id,
-                    },
-                    status_code=404,
-                )
-            detail_page = load_person_detail_page(
-                workspace_context,
+                return _render_person_detail(request, person_id=person_id, status_code=404)
+            return _render_person_detail(
+                request,
                 person_id=person_id,
-                page=1,
-                page_size=person_detail_page_size,
-            )
-            if detail_page is None:
-                return templates.TemplateResponse(
-                    request=request,
-                    name="not_found.html",
-                    context={
-                        "page_title": "人物不存在",
-                        "person_id": person_id,
-                    },
-                    status_code=404,
-                )
-            return templates.TemplateResponse(
-                request=request,
-                name="person_detail.html",
-                context={
-                    "page_title": detail_page.display_label,
-                    "detail_page": detail_page,
-                    "name_feedback": {"level": "error", "message": str(exc)},
-                    "name_form_value": display_name,
-                },
                 status_code=400,
+                name_feedback={"level": "error", "message": str(exc)},
+                name_form_value=display_name,
             )
         except PeopleGalleryError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -254,6 +274,63 @@ def create_people_gallery_app(
         response.set_cookie(
             NAME_FEEDBACK_COOKIE,
             result.outcome,
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.post("/people/{person_id}/exclude", response_class=HTMLResponse)
+    async def person_exclusion_submit(
+        request: Request,
+        person_id: str,
+    ) -> Response:
+        body = await request.body()
+        form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        assignment_ids = form_data.get("assignment_id", [])
+        try:
+            result = submit_person_exclusions(
+                workspace_context,
+                person_id=person_id,
+                assignment_ids=[str(assignment_id) for assignment_id in assignment_ids],
+            )
+        except PersonExclusionValidationError as exc:
+            if exc.code == "person_not_found":
+                return _render_person_detail(
+                    request,
+                    person_id=person_id,
+                    status_code=404,
+                    exclusion_feedback={"level": "error", "message": str(exc)},
+                )
+            return _render_person_detail(
+                request,
+                person_id=person_id,
+                status_code=400,
+                exclusion_feedback={"level": "error", "message": str(exc)},
+            )
+        except PeopleGalleryError:
+            return _render_person_detail(
+                request,
+                person_id=person_id,
+                status_code=500,
+                exclusion_feedback={"level": "error", "message": "批量排除失败，请稍后重试。"},
+            )
+
+        if result.remaining_sample_count > 0:
+            response = RedirectResponse(url=f"/people/{person_id}", status_code=303)
+            response.set_cookie(
+                EXCLUSION_FEEDBACK_COOKIE,
+                "exclude_succeeded",
+                httponly=True,
+                samesite="lax",
+                path="/",
+            )
+            return response
+
+        response = RedirectResponse(url="/people", status_code=303)
+        response.set_cookie(
+            HOME_FEEDBACK_COOKIE,
+            "exclude_succeeded_person_removed",
             httponly=True,
             samesite="lax",
             path="/",
@@ -288,3 +365,10 @@ def _get_home_feedback(request: Request) -> dict[str, str] | None:
     if feedback_code is None:
         return None
     return HOME_FEEDBACK_MESSAGES.get(feedback_code)
+
+
+def _get_exclusion_feedback(request: Request) -> dict[str, str] | None:
+    feedback_code = request.cookies.get(EXCLUSION_FEEDBACK_COOKIE)
+    if feedback_code is None:
+        return None
+    return EXCLUSION_FEEDBACK_MESSAGES.get(feedback_code)

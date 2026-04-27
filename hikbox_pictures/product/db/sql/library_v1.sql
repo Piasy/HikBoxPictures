@@ -165,6 +165,20 @@ CREATE UNIQUE INDEX idx_person_face_assignments_unique_active_face
   ON person_face_assignments(face_observation_id)
   WHERE active = 1;
 
+CREATE TABLE person_face_exclusions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  face_observation_id INTEGER NOT NULL REFERENCES face_observations(id),
+  excluded_person_id TEXT NOT NULL REFERENCES person(id),
+  source_assignment_id INTEGER REFERENCES person_face_assignments(id),
+  created_at TEXT NOT NULL,
+  UNIQUE(face_observation_id, excluded_person_id)
+);
+
+CREATE INDEX idx_person_face_exclusions_face_id
+  ON person_face_exclusions(face_observation_id, excluded_person_id, id);
+CREATE INDEX idx_person_face_exclusions_person_id
+  ON person_face_exclusions(excluded_person_id, face_observation_id, id);
+
 CREATE TABLE person_merge_operations (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   winner_person_id TEXT NOT NULL REFERENCES person(id),

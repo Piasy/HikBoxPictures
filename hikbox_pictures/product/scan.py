@@ -41,6 +41,7 @@ REQUIRED_LIBRARY_SCAN_TABLES = (
     "person",
     "assignment_runs",
     "person_face_assignments",
+    "person_face_exclusions",
 )
 REQUIRED_EMBEDDING_SCAN_TABLES = ("face_embeddings",)
 _SCAN_PROGRESS_INTERVAL_SECONDS = 10.0

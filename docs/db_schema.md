@@ -1,6 +1,6 @@
 # 数据库 Schema 说明（当前已实现）
 
-本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」、Slice D / Feature Slice 2「人物命名与重命名」，以及 Slice E / Feature Slice 1「人物合并」与 Feature Slice 2「最近一次撤销」。本文不承诺 exclusion / export 等尚未落地 slice 的 schema。
+本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」、Slice D / Feature Slice 2「人物命名与重命名」、Slice E / Feature Slice 1「人物合并」与 Feature Slice 2「最近一次撤销」，以及 Slice F / Feature Slice 1「人物详情页批量排除」。本文不承诺 export 等尚未落地 slice 的 schema。
 
 ## 1. 存储布局
 
@@ -325,8 +325,8 @@ CREATE UNIQUE INDEX idx_person_unique_active_display_name
 - `id`：匿名人物 UUID。
 - `display_name`：首版匿名人物为空，后续 WebUI 命名后才会有值。
 - `is_named`：`0` 表示匿名人物，`1` 表示已命名人物。
-- `status`：`active` 表示仍可见且可继续接收 active assignment 的人物；`inactive` 表示该人物已在真实 merge 中作为 loser 失效，不再出现在首页、详情页或后续可操作人物集合中。
-- `write_revision`：人物相关真实写入版本号。只有会改变该人物真相的持久化写入才会递增，例如命名/重命名、merge 导致的 winner/loser 状态变化、以及新增 active assignment 写入；no-op 名称提交不会递增。
+- `status`：`active` 表示仍可见且可继续接收 active assignment 的人物；`inactive` 表示该人物已经退出 active 生命周期，不再出现在首页、详情页或后续可操作人物集合中。当前会进入 `inactive` 的路径包括：真实 merge 中作为 loser 失效，以及人物详情页批量排除把该人物全部样本排空。
+- `write_revision`：人物相关真实写入版本号。只有会改变该人物真相的持久化写入才会递增，例如命名/重命名、merge 导致的 winner/loser 状态变化、新增 active assignment 写入，以及人物详情页批量排除导致的 active assignment 失效与 exclusion 真相写入；no-op 名称提交不会递增。
 - `updated_at`：人物记录最近一次真正发生状态变化的时间；命名/重命名会更新，no-op 不会更新。
 
 运行时语义：
@@ -458,9 +458,49 @@ CREATE UNIQUE INDEX idx_person_face_assignments_unique_active_face
 - 在线归属新增的 active assignment 仍然只写一条 active 记录；当前 Slice E 的 merge 不会新建第二条 assignment，而是直接把 loser 现有 active assignment 的 `person_id` 迁移到 winner，并更新 `updated_at`。
 - 已有 active assignment 的 face 不会再次作为待归属候选，重复 `scan start` 也不会重复写入 assignment。
 - 因为在线归属读取“已有 active assignment 的 face 当前所属 `person_id`”作为历史锚点，merge 后 loser 旧样本上的 active assignment 已经改指向 winner，所以后续新增的 loser-like 样本会继续归到 winner，而不会 resurrect loser。
+- 人物详情页批量排除不会删除 assignment 历史行，而是把被选中的行改成 `active = 0`，同时保留原 `id` / `face_observation_id` 供 exclusion 真相和后续审计引用。
+- 如果一次批量排除让某个人物不再拥有任何 active assignment，该人物会被置为 `inactive`；若它之前是已命名人物，其 `display_name` 会保留作历史记录，但不会再参与 active 名称唯一性约束，因此该名称可被其它 active 人物复用。
 - 当同一路径图片在后续真实 `scan start` 中发生重检测失配、处理失败或等价 invalidation，系统会先删除旧的 active assignment / face rows，再按新结果重建；这类删除或失效同样属于真实人物相关写入，会把受影响 `person.write_revision` 递增。
 
-### 3.12 `person_merge_operations`
+### 3.12 `person_face_exclusions`
+
+```sql
+CREATE TABLE person_face_exclusions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  face_observation_id INTEGER NOT NULL REFERENCES face_observations(id),
+  excluded_person_id TEXT NOT NULL REFERENCES person(id),
+  source_assignment_id INTEGER REFERENCES person_face_assignments(id),
+  created_at TEXT NOT NULL,
+  UNIQUE(face_observation_id, excluded_person_id)
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_person_face_exclusions_face_id
+  ON person_face_exclusions(face_observation_id, excluded_person_id, id);
+CREATE INDEX idx_person_face_exclusions_person_id
+  ON person_face_exclusions(excluded_person_id, face_observation_id, id);
+```
+
+字段语义：
+
+- `face_observation_id`：被禁止“自动归回某个人物”的那张 face。
+- `excluded_person_id`：这张 face 不能再自动归回的 `person.id`。
+- `source_assignment_id`：触发这次排除时失效的 `person_face_assignments.id`；当前实现用于把详情页选择动作追溯回当时的 active assignment。
+- `created_at`：排除真相写入时间，带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
+
+运行时语义：
+
+- 这张表表达的稳定真相是“`face_observation_id` 不能再自动归到 `excluded_person_id`”，而不是“某次按钮点击发生过”。
+- 同一对 `face_observation_id + excluded_person_id` 最多只能存在一条记录；重复排除同一人物会被真实 HTTP 入口拒绝并保持 DB 不变。
+- 同一个 `face_observation_id` 可以随着时间累积多条 exclusion，只要它们的 `excluded_person_id` 不同。
+- 当某张 face 没有 active assignment 但存在一条或多条 exclusion 时，后续 `scan start` 仍会把它当作候选；区别是在线归属选择已有 active person 时，必须排除本表中的全部 `excluded_person_id`。
+- 仅使用同一套固定图库重扫时，被排除的旧 face 不能仅凭彼此之间的相似度自发重组成新的匿名人物；如果没有其它未被排除的人物可挂靠，它们会继续保持未归属。
+- 当后续新增 source 带来新的同类 face 且这些新 face 本身没有对应 exclusion 时，它们仍然可以先形成新的匿名人物；之前被排除的旧 face 会在同一次或后续 assignment 中挂到这个新人物，而不会回到旧的 `excluded_person_id`。
+
+### 3.13 `person_merge_operations`
 
 ```sql
 CREATE TABLE person_merge_operations (
@@ -506,7 +546,7 @@ CREATE INDEX idx_person_merge_operations_merged_at
 - 除版本快照外，undo 还会验证当前 winner 的 active assignment 集合必须精确等于本次 merge 快照里的 `winner + loser` 并集，且当前 loser 不能残留 active assignment；如果不一致，则视为最近一次 merge 的 snapshot/关联账本不完整，undo 必须失败且 DB 保持不变。
 - undo 成功时会恢复 winner/loser 的 `display_name`、`is_named`、`status` 与 assignment owner，并把本行 `undone_at` 置为撤销完成时间；同一行不能被第二次撤销。
 
-### 3.13 `person_merge_operation_assignments`
+### 3.14 `person_merge_operation_assignments`
 
 ```sql
 CREATE TABLE person_merge_operation_assignments (

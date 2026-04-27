@@ -23,7 +23,7 @@
 
 ## Feature Slice 1: 人物详情页批量排除
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

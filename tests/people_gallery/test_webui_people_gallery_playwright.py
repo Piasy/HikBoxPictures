@@ -269,6 +269,7 @@ def _read_active_assignment_details(library_db: Path, person_id: str) -> list[di
         """
         SELECT
           person_face_assignments.id,
+          person_face_assignments.face_observation_id,
           face_observations.context_path,
           assets.id,
           assets.file_name,
@@ -287,12 +288,13 @@ def _read_active_assignment_details(library_db: Path, person_id: str) -> list[di
     return [
         {
             "assignment_id": int(assignment_id),
+            "face_observation_id": int(face_observation_id),
             "context_path": Path(str(context_path)),
             "asset_id": str(asset_id),
             "file_name": str(file_name),
             "is_live": bool(live_photo_mov_path),
         }
-        for assignment_id, context_path, asset_id, file_name, live_photo_mov_path in rows
+        for assignment_id, face_observation_id, context_path, asset_id, file_name, live_photo_mov_path in rows
     ]
 
 
@@ -330,6 +332,77 @@ def _read_active_assignment_ids(library_db: Path, person_id: str) -> list[int]:
             (person_id,),
         )
     ]
+
+
+def _read_face_assignment_rows(library_db: Path, face_observation_id: int) -> list[dict[str, object]]:
+    rows = _fetch_all(
+        library_db,
+        """
+        SELECT id, person_id, active
+        FROM person_face_assignments
+        WHERE face_observation_id = ?
+        ORDER BY id ASC
+        """,
+        (face_observation_id,),
+    )
+    return [
+        {
+            "assignment_id": int(assignment_id),
+            "person_id": str(person_id),
+            "active": bool(active),
+        }
+        for assignment_id, person_id, active in rows
+    ]
+
+
+def _read_person_face_exclusions(
+    library_db: Path,
+    *,
+    face_observation_id: int | None = None,
+    excluded_person_id: str | None = None,
+) -> list[dict[str, object]]:
+    sql = """
+        SELECT
+          id,
+          face_observation_id,
+          excluded_person_id,
+          source_assignment_id,
+          created_at
+        FROM person_face_exclusions
+    """
+    params: list[object] = []
+    clauses: list[str] = []
+    if face_observation_id is not None:
+        clauses.append("face_observation_id = ?")
+        params.append(face_observation_id)
+    if excluded_person_id is not None:
+        clauses.append("excluded_person_id = ?")
+        params.append(excluded_person_id)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY id ASC"
+    rows = _fetch_all(library_db, sql, tuple(params))
+    return [
+        {
+            "id": int(exclusion_id),
+            "face_observation_id": int(face_id),
+            "excluded_person_id": str(person_id),
+            "source_assignment_id": None if assignment_id is None else int(assignment_id),
+            "created_at": str(created_at),
+        }
+        for exclusion_id, face_id, person_id, assignment_id, created_at in rows
+    ]
+
+
+def _active_assignment_details_by_file_name(
+    library_db: Path,
+    *,
+    person_id: str,
+) -> dict[str, dict[str, object]]:
+    return {
+        str(item["file_name"]): item
+        for item in _read_active_assignment_details(library_db, person_id)
+    }
 
 
 def _read_person_name_events(library_db: Path, person_id: str) -> list[dict[str, object]]:
@@ -661,6 +734,49 @@ def _assert_undo_prg_flow(
     assert any(
         response["method"] == "GET"
         and response["url"] == people_url
+        and int(response["status"]) == 200
+        for response in responses
+    ), responses
+
+
+def _submit_exclusion_from_detail(
+    page: Page,
+    *,
+    base_url: str,
+    person_id: str,
+    assignment_ids: list[int],
+) -> None:
+    detail_url_pattern = re.compile(rf"{re.escape(base_url)}/people(?:/{re.escape(person_id)})?(?:\\?.*)?$")
+    page.goto(f"{base_url}/people/{person_id}", wait_until="networkidle")
+    for assignment_id in assignment_ids:
+        checkbox = page.locator(
+            f"[data-assignment-id='{assignment_id}'] [data-exclude-checkbox]"
+        )
+        expect(checkbox).to_be_visible()
+        checkbox.check()
+    page.get_by_role("button", name="批量排除所选样本").click()
+    page.wait_for_url(detail_url_pattern)
+    page.wait_for_load_state("networkidle")
+
+
+def _assert_exclusion_prg_flow(
+    *,
+    responses: list[dict[str, object]],
+    base_url: str,
+    person_id: str,
+    redirected_to_home: bool,
+) -> None:
+    post_url = f"{base_url}/people/{person_id}/exclude"
+    target_url = f"{base_url}/people" if redirected_to_home else f"{base_url}/people/{person_id}"
+    assert any(
+        response["method"] == "POST"
+        and response["url"] == post_url
+        and int(response["status"]) == 303
+        for response in responses
+    ), responses
+    assert any(
+        response["method"] == "GET"
+        and response["url"] == target_url
         and int(response["status"]) == 200
         for response in responses
     ), responses
@@ -2291,3 +2407,556 @@ def test_people_gallery_undo_only_rolls_back_latest_merge(tmp_path: Path) -> Non
         assert _read_name_slice_db_snapshot(library_db) == snapshot_after_latest_undo
     finally:
         _terminate_process(process)
+
+
+def test_people_gallery_exclude_single_sample_prg_rescan_and_db_truth(tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    alex_person_id = target_person_ids["target_alex"]
+    alex_assignments_before = _read_active_assignment_details(library_db, alex_person_id)
+    excluded_assignment = alex_assignments_before[0]
+    exclusions_before = _read_person_face_exclusions(library_db)
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "50",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+
+            response_start = len(response_log)
+            _submit_exclusion_from_detail(
+                page,
+                base_url=base_url,
+                person_id=alex_person_id,
+                assignment_ids=[int(excluded_assignment["assignment_id"])],
+            )
+            _assert_exclusion_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+                person_id=alex_person_id,
+                redirected_to_home=False,
+            )
+            expect(page.get_by_role("status")).to_contain_text("已排除")
+            expect(
+                page.locator(f"[data-assignment-id='{excluded_assignment['assignment_id']}']")
+            ).to_have_count(0)
+            expect(page.locator("[data-assignment-id]")).to_have_count(len(alex_assignments_before) - 1)
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+    alex_assignment_ids_after = _read_active_assignment_ids(library_db, alex_person_id)
+    assert alex_assignment_ids_after == [
+        int(item["assignment_id"])
+        for item in alex_assignments_before
+        if int(item["assignment_id"]) != int(excluded_assignment["assignment_id"])
+    ]
+    excluded_face_rows = _read_face_assignment_rows(library_db, int(excluded_assignment["face_observation_id"]))
+    assert any(
+        row["assignment_id"] == int(excluded_assignment["assignment_id"]) and row["active"] is False
+        for row in excluded_face_rows
+    )
+    exclusion_rows = _read_person_face_exclusions(
+        library_db,
+        face_observation_id=int(excluded_assignment["face_observation_id"]),
+        excluded_person_id=alex_person_id,
+    )
+    assert len(exclusion_rows) == 1
+    assert exclusion_rows[0]["source_assignment_id"] == int(excluded_assignment["assignment_id"])
+    assert exclusion_rows[0]["created_at"]
+
+    rescan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert rescan_result.returncode == 0, rescan_result.stderr
+    exclusion_rows_after_rescan = _read_person_face_exclusions(
+        library_db,
+        face_observation_id=int(excluded_assignment["face_observation_id"]),
+        excluded_person_id=alex_person_id,
+    )
+    assert exclusion_rows_after_rescan == exclusion_rows
+    assert _read_person_face_exclusions(library_db) == exclusions_before + exclusion_rows
+    assert not any(
+        row["active"] is True
+        for row in _read_face_assignment_rows(library_db, int(excluded_assignment["face_observation_id"]))
+    )
+    assert len(_read_active_assignment_ids(library_db, alex_person_id)) == len(alex_assignments_before) - 1
+
+
+def test_people_gallery_exclude_two_samples_updates_exact_active_set(tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+    blair_person_id = target_person_ids["target_blair"]
+    blair_assignments_before = _read_active_assignment_details(library_db, blair_person_id)
+    selected_assignments = blair_assignments_before[:2]
+    selected_assignment_ids = {int(item["assignment_id"]) for item in selected_assignments}
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "50",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+
+            response_start = len(response_log)
+            _submit_exclusion_from_detail(
+                page,
+                base_url=base_url,
+                person_id=blair_person_id,
+                assignment_ids=sorted(selected_assignment_ids),
+            )
+            _assert_exclusion_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+                person_id=blair_person_id,
+                redirected_to_home=False,
+            )
+            rendered_assignment_ids = {
+                assignment_id for assignment_id, _, _ in _iter_rendered_assignment_cards(page)
+            }
+            expected_assignment_ids = {
+                int(item["assignment_id"])
+                for item in blair_assignments_before
+                if int(item["assignment_id"]) not in selected_assignment_ids
+            }
+            assert rendered_assignment_ids == expected_assignment_ids
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+    assert set(_read_active_assignment_ids(library_db, blair_person_id)) == {
+        int(item["assignment_id"])
+        for item in blair_assignments_before
+        if int(item["assignment_id"]) not in selected_assignment_ids
+    }
+    for selected in selected_assignments:
+        exclusion_rows = _read_person_face_exclusions(
+            library_db,
+            face_observation_id=int(selected["face_observation_id"]),
+            excluded_person_id=blair_person_id,
+        )
+        assert len(exclusion_rows) == 1
+        assert exclusion_rows[0]["source_assignment_id"] == int(selected["assignment_id"])
+
+
+def test_people_gallery_exclude_all_samples_redirects_home_and_person_detail_404(tmp_path: Path) -> None:
+    workspace, _, library_db, _, _ = _create_scanned_workspace(tmp_path)
+    active_people_before = _read_active_people(library_db)
+    target_person_id = next(
+        person_id
+        for person_id, person in active_people_before.items()
+        if int(person["sample_count"]) == 18
+    )
+    target_assignments = _read_active_assignment_details(library_db, target_person_id)
+    assert len(target_assignments) == 18
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "50",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+
+            response_start = len(response_log)
+            _submit_exclusion_from_detail(
+                page,
+                base_url=base_url,
+                person_id=target_person_id,
+                assignment_ids=[int(item["assignment_id"]) for item in target_assignments],
+            )
+            _assert_exclusion_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+                person_id=target_person_id,
+                redirected_to_home=True,
+            )
+            expect(page.locator(f"[data-person-id='{target_person_id}']")).to_have_count(0)
+            browser.close()
+
+        missing_detail = httpx.get(f"{base_url}/people/{target_person_id}", timeout=5.0)
+        assert missing_detail.status_code == 404
+        assert "人物不存在" in missing_detail.text or target_person_id in missing_detail.text
+    finally:
+        _terminate_process(process)
+
+    assert _read_active_assignment_ids(library_db, target_person_id) == []
+    assert _read_person_record(library_db, target_person_id)["status"] == "inactive"
+    assert len(
+        _read_person_face_exclusions(library_db, excluded_person_id=target_person_id)
+    ) == len(target_assignments)
+    assert all(Path(item["context_path"]).exists() for item in target_assignments)
+    remaining_face_rows = _fetch_all(
+        library_db,
+        """
+        SELECT COUNT(*)
+        FROM face_observations
+        WHERE id IN ({placeholders})
+        """.format(
+            placeholders=", ".join("?" for _ in target_assignments)
+        ),
+        tuple(int(item["face_observation_id"]) for item in target_assignments),
+    )
+    assert int(remaining_face_rows[0][0]) == len(target_assignments)
+
+
+def test_people_gallery_full_exclusion_rescan_same_gallery_keeps_faces_unassigned(tmp_path: Path) -> None:
+    workspace, _, library_db, _, _ = _create_scanned_workspace(tmp_path)
+    active_people_before = _read_active_people(library_db)
+    target_person_id = next(
+        person_id
+        for person_id, person in active_people_before.items()
+        if int(person["sample_count"]) == 18
+    )
+    target_assignments = _read_active_assignment_details(library_db, target_person_id)
+    excluded_face_ids = [int(item["face_observation_id"]) for item in target_assignments]
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "50",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            _submit_exclusion_from_detail(
+                page,
+                base_url=base_url,
+                person_id=target_person_id,
+                assignment_ids=[int(item["assignment_id"]) for item in target_assignments],
+            )
+            expect(page.locator(f"[data-person-id='{target_person_id}']")).to_have_count(0)
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+    assert _read_person_record(library_db, target_person_id)["status"] == "inactive"
+
+    rescan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert rescan_result.returncode == 0, rescan_result.stderr
+
+    for face_observation_id in excluded_face_ids:
+        assert not any(
+            row["active"] is True for row in _read_face_assignment_rows(library_db, face_observation_id)
+        )
+
+
+def test_people_gallery_full_exclusion_releases_name_for_reuse_via_real_page(tmp_path: Path) -> None:
+    workspace, _, library_db, _, _ = _create_scanned_workspace(tmp_path)
+    active_people_before = _read_active_people(library_db)
+    target_person_id = next(
+        person_id
+        for person_id, person in active_people_before.items()
+        if int(person["sample_count"]) == 18
+    )
+    other_person_id = next(person_id for person_id in active_people_before if person_id != target_person_id)
+    target_assignments = _read_active_assignment_details(library_db, target_person_id)
+    recycled_name = "可复用名称"
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "50",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            response_log: list[dict[str, object]] = []
+
+            def _record_response(response: object) -> None:
+                request = response.request
+                response_log.append(
+                    {
+                        "method": str(request.method),
+                        "url": str(response.url),
+                        "status": int(response.status),
+                    }
+                )
+
+            page.on("response", _record_response)
+
+            detail_pattern = re.compile(rf"{re.escape(base_url)}/people/{re.escape(target_person_id)}(?:\\?.*)?$")
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=target_person_id)
+            _submit_name_form(page, detail_url_pattern=detail_pattern, display_name=recycled_name)
+            expect(page.get_by_role("status")).to_contain_text("名称已保存")
+
+            _submit_exclusion_from_detail(
+                page,
+                base_url=base_url,
+                person_id=target_person_id,
+                assignment_ids=[int(item["assignment_id"]) for item in target_assignments],
+            )
+            expect(page.locator(f"[data-person-id='{target_person_id}']")).to_have_count(0)
+
+            other_detail_pattern = re.compile(rf"{re.escape(base_url)}/people/{re.escape(other_person_id)}(?:\\?.*)?$")
+            response_start = len(response_log)
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=other_person_id)
+            _submit_name_form(page, detail_url_pattern=other_detail_pattern, display_name=recycled_name)
+            _assert_name_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
+                person_id=other_person_id,
+            )
+            expect(page.get_by_role("status")).to_contain_text("名称已保存")
+            expect(page.get_by_role("heading", name=recycled_name)).to_be_visible()
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+    target_record = _read_person_record(library_db, target_person_id)
+    other_record = _read_person_record(library_db, other_person_id)
+    assert target_record["display_name"] == recycled_name
+    assert target_record["status"] == "inactive"
+    assert other_record["display_name"] == recycled_name
+    assert other_record["is_named"] is True
+
+
+def test_people_gallery_exclusion_respects_incremental_source_and_accumulates_person_truth(tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    people_by_label = {str(person["label"]): person for person in manifest["people"]}
+    incremental_manifest = _load_incremental_manifest()
+    alex_person_id = target_person_ids["target_alex"]
+    blair_person_id = target_person_ids["target_blair"]
+    alex_display_name = str(people_by_label["target_alex"]["display_name"])
+    old_blair_files = set(_manifest_files_for_target(manifest, "target_blair"))
+    new_blair_files = set(_manifest_files_for_target(incremental_manifest, "target_blair"))
+    old_blair_details = _read_active_assignment_details(library_db, blair_person_id)
+    old_blair_assignment_ids = [int(item["assignment_id"]) for item in old_blair_details]
+    old_blair_face_ids = {int(item["face_observation_id"]) for item in old_blair_details}
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "50",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            alex_detail_pattern = re.compile(rf"{re.escape(base_url)}/people/{re.escape(alex_person_id)}(?:\\?.*)?$")
+
+            _open_person_detail_from_home(page, base_url=base_url, entry_path="/people", person_id=alex_person_id)
+            _submit_name_form(
+                page,
+                detail_url_pattern=alex_detail_pattern,
+                display_name=alex_display_name,
+            )
+            _submit_merge_from_home(
+                page,
+                base_url=base_url,
+                person_ids=[blair_person_id, alex_person_id],
+            )
+            _submit_exclusion_from_detail(
+                page,
+                base_url=base_url,
+                person_id=alex_person_id,
+                assignment_ids=old_blair_assignment_ids,
+            )
+            browser.close()
+    finally:
+        _terminate_process(process)
+
+    for face_observation_id in old_blair_face_ids:
+        assert not any(
+            row["active"] is True
+            for row in _read_face_assignment_rows(library_db, face_observation_id)
+        )
+        exclusion_rows = _read_person_face_exclusions(
+            library_db,
+            face_observation_id=face_observation_id,
+            excluded_person_id=alex_person_id,
+        )
+        assert len(exclusion_rows) == 1
+
+    add_result = _add_source(workspace, FIXTURE_DIR_2)
+    assert add_result.returncode == 0
+    rescan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert rescan_result.returncode == 0, rescan_result.stderr
+
+    active_people_after_rescan = _read_active_people(library_db)
+    new_blair_person_candidates: list[str] = []
+    for person_id, person in active_people_after_rescan.items():
+        assignment_files = set(_active_assignment_details_by_file_name(library_db, person_id=person_id))
+        if old_blair_files | new_blair_files <= assignment_files:
+            new_blair_person_candidates.append(person_id)
+            assert person["display_name"] is None
+    assert new_blair_person_candidates == [person_id for person_id in new_blair_person_candidates if person_id != alex_person_id]
+    assert len(new_blair_person_candidates) == 1
+    new_blair_person_id = new_blair_person_candidates[0]
+    assert new_blair_person_id != alex_person_id
+
+    alex_assignment_files_after_rescan = set(
+        _active_assignment_details_by_file_name(library_db, person_id=alex_person_id)
+    )
+    assert not (old_blair_files & alex_assignment_files_after_rescan)
+    assert not (new_blair_files & alex_assignment_files_after_rescan)
+
+    new_blair_assignment_by_file = _active_assignment_details_by_file_name(
+        library_db,
+        person_id=new_blair_person_id,
+    )
+    assert old_blair_files | new_blair_files <= set(new_blair_assignment_by_file)
+    recycled_old_blair_detail = next(
+        item
+        for item in new_blair_assignment_by_file.values()
+        if str(item["file_name"]) in old_blair_files
+    )
+    initial_exclusion_rows = _read_person_face_exclusions(
+        library_db,
+        face_observation_id=int(recycled_old_blair_detail["face_observation_id"]),
+    )
+    assert {str(item["excluded_person_id"]) for item in initial_exclusion_rows} == {alex_person_id}
+
+    second_port = _find_free_port()
+    second_process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(second_port),
+        "--person-detail-page-size",
+        "50",
+    )
+    second_base_url = f"http://127.0.0.1:{second_port}"
+    try:
+        _wait_for_http_ready(f"{second_base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+            _submit_exclusion_from_detail(
+                page,
+                base_url=second_base_url,
+                person_id=new_blair_person_id,
+                assignment_ids=[int(recycled_old_blair_detail["assignment_id"])],
+            )
+            expect(
+                page.locator(f"[data-assignment-id='{recycled_old_blair_detail['assignment_id']}']")
+            ).to_have_count(0)
+            browser.close()
+    finally:
+        _terminate_process(second_process)
+
+    accumulated_exclusion_rows = _read_person_face_exclusions(
+        library_db,
+        face_observation_id=int(recycled_old_blair_detail["face_observation_id"]),
+    )
+    assert len(accumulated_exclusion_rows) == 2
+    assert {str(item["excluded_person_id"]) for item in accumulated_exclusion_rows} == {
+        alex_person_id,
+        new_blair_person_id,
+    }
+    assert all(str(item["created_at"]) for item in accumulated_exclusion_rows)

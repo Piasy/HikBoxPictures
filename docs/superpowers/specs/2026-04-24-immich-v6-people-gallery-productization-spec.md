@@ -65,7 +65,7 @@
 
 ### Slice F：误归属排除
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-exclusion-spec.md`
 - Scope: 在人物详情页批量排除当前 person 下的误归属样本，持久化 exclusion 真相，并在后续 `scan start` 中阻止这些 face 回到被排除的 person；公共入口是 WebUI/API 和真实 `scan start`。
 - Acceptance summary: 批量排除后 active assignment 失效、exclusion 记录落库、详情页样本移除；仅重扫 `tests/fixtures/people_gallery_scan/` 时被排除 face 保持未归属；在“命名 alex -> merge alex/blair -> 排除所有旧 blair -> 加入 `tests/fixtures/people_gallery_scan_2/`”这条路径里，旧 blair face 与新增 blair face 会重新形成 active 匿名 blair person，而不会回到 alex winner。

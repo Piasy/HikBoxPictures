@@ -54,6 +54,7 @@ class AssignmentFace:
     embedding: np.ndarray
     person_id: str | None
     candidate: bool
+    excluded_person_ids: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -283,6 +284,9 @@ class OnlineAssignmentEngine:
             face.embedding,
             num_results=max(self._params.num_results, 1),
             max_distance=self._params.max_distance,
+            predicate=lambda candidate_face_id: (
+                by_face_id[candidate_face_id].person_id not in face.excluded_person_ids
+            ),
         )
         matched_face_ids = [item.face_id for item in matches]
         matched_distances = [item.distance for item in matches]
@@ -315,10 +319,35 @@ class OnlineAssignmentEngine:
                 face.embedding,
                 num_results=1,
                 max_distance=self._params.max_distance,
-                predicate=lambda candidate_face_id: by_face_id[candidate_face_id].person_id is not None,
+                predicate=lambda candidate_face_id: (
+                    by_face_id[candidate_face_id].person_id is not None
+                    and by_face_id[candidate_face_id].person_id not in face.excluded_person_ids
+                ),
             )
             if assigned_matches:
                 person_id = by_face_id[assigned_matches[0].face_id].person_id
+        if person_id is None and face.excluded_person_ids:
+            if not deferred:
+                return (
+                    AssignmentDecision(
+                        face_id=face.face_id,
+                        status="deferred",
+                        person_id=None,
+                        matched_face_ids=matched_face_ids,
+                        matched_distances=matched_distances,
+                    ),
+                    None,
+                )
+            return (
+                AssignmentDecision(
+                    face_id=face.face_id,
+                    status="skipped",
+                    person_id=None,
+                    matched_face_ids=matched_face_ids,
+                    matched_distances=matched_distances,
+                ),
+                None,
+            )
         created_person_id: str | None = None
         if is_core and person_id is None:
             created_person_id = str(uuid.uuid4())
@@ -575,10 +604,23 @@ def _load_assignment_faces(
             """,
             (params.embedding_variant,),
         ).fetchall()
+        exclusion_rows = connection.execute(
+            """
+            SELECT face_observation_id, excluded_person_id
+            FROM person_face_exclusions
+            ORDER BY face_observation_id ASC, excluded_person_id ASC
+            """
+        ).fetchall()
     except sqlite3.Error as exc:
         raise OnlineAssignmentError("assignment 输入读取失败。") from exc
     finally:
         connection.close()
+
+    excluded_person_ids_by_face_id: dict[int, set[str]] = {}
+    for exclusion_row in exclusion_rows:
+        excluded_person_ids_by_face_id.setdefault(int(exclusion_row["face_observation_id"]), set()).add(
+            str(exclusion_row["excluded_person_id"])
+        )
 
     faces: list[AssignmentFace] = []
     for row in rows:
@@ -607,6 +649,7 @@ def _load_assignment_faces(
                 embedding=vector.copy(),
                 person_id=str(row["active_person_id"]) if row["active_person_id"] is not None else None,
                 candidate=row["active_person_id"] is None,
+                excluded_person_ids=excluded_person_ids_by_face_id.get(face_observation_id, set()).copy(),
             )
         )
 

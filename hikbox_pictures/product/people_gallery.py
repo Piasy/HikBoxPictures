@@ -22,6 +22,7 @@ REQUIRED_WEBUI_TABLES = (
     "face_observations",
     "person",
     "person_face_assignments",
+    "person_face_exclusions",
     "person_name_events",
     "person_merge_operations",
     "person_merge_operation_assignments",
@@ -55,6 +56,13 @@ REQUIRED_WEBUI_COLUMNS = {
         "face_observation_id",
         "active",
         "updated_at",
+    },
+    "person_face_exclusions": {
+        "id",
+        "face_observation_id",
+        "excluded_person_id",
+        "source_assignment_id",
+        "created_at",
     },
     "person_name_events": {
         "id",
@@ -111,6 +119,7 @@ class PeopleHomePage:
 @dataclass(frozen=True)
 class PersonSample:
     assignment_id: int
+    face_observation_id: int
     asset_id: int
     context_path: Path
     is_live: bool
@@ -151,6 +160,12 @@ class PersonMergeUndoResult:
     loser_person_id: str
 
 
+@dataclass(frozen=True)
+class PersonExclusionResult:
+    person_id: str
+    remaining_sample_count: int
+
+
 class PersonNameValidationError(PeopleGalleryError):
     """人物命名校验失败。"""
 
@@ -169,6 +184,14 @@ class PersonMergeValidationError(PeopleGalleryError):
 
 class PersonMergeUndoValidationError(PeopleGalleryError):
     """最近一次合并撤销校验失败。"""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class PersonExclusionValidationError(PeopleGalleryError):
+    """人物详情页批量排除校验失败。"""
 
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
@@ -351,6 +374,7 @@ def load_person_detail_page(
             """
             SELECT
               person_face_assignments.id,
+              face_observations.id AS face_observation_id,
               assets.id AS asset_id,
               face_observations.context_path,
               assets.live_photo_mov_path
@@ -391,6 +415,7 @@ def load_person_detail_page(
         samples=[
             PersonSample(
                 assignment_id=int(row["id"]),
+                face_observation_id=int(row["face_observation_id"]),
                 asset_id=int(row["asset_id"]),
                 context_path=Path(str(row["context_path"])),
                 is_live=bool(row["live_photo_mov_path"]),
@@ -712,6 +737,204 @@ def submit_people_merge(
     return PersonMergeResult(
         winner_person_id=winner.person_id,
         loser_person_id=loser.person_id,
+    )
+
+
+def submit_person_exclusions(
+    workspace_context: WorkspaceContext,
+    *,
+    person_id: str,
+    assignment_ids: list[str],
+) -> PersonExclusionResult:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        person_row = connection.execute(
+            """
+            SELECT
+              person.id,
+              person.status,
+              person.write_revision,
+              COUNT(person_face_assignments.id) AS sample_count
+            FROM person
+            LEFT JOIN person_face_assignments
+              ON person_face_assignments.person_id = person.id
+             AND person_face_assignments.active = 1
+            WHERE person.id = ?
+            GROUP BY person.id, person.status, person.write_revision
+            """,
+            (person_id,),
+        ).fetchone()
+        if person_row is None or str(person_row["status"]) != "active" or int(person_row["sample_count"]) < 1:
+            raise PersonExclusionValidationError(
+                f"未找到 person_id={person_id} 对应的人物。",
+                code="person_not_found",
+            )
+
+        normalized_assignment_ids: list[int] = []
+        for raw_assignment_id in assignment_ids:
+            normalized = raw_assignment_id.strip()
+            if not normalized:
+                continue
+            try:
+                normalized_assignment_ids.append(int(normalized))
+            except ValueError as exc:
+                raise PersonExclusionValidationError(
+                    "选择的样本无效，请刷新页面后重试。",
+                    code="invalid_assignment_id",
+                ) from exc
+        if not normalized_assignment_ids:
+            raise PersonExclusionValidationError(
+                "至少选择 1 条样本后才能批量排除。",
+                code="empty_selection",
+            )
+        if len(set(normalized_assignment_ids)) != len(normalized_assignment_ids):
+            raise PersonExclusionValidationError(
+                "同一次请求中不能重复选择同一个样本。",
+                code="duplicate_assignment",
+            )
+
+        placeholders = ", ".join("?" for _ in normalized_assignment_ids)
+        assignment_rows = connection.execute(
+            f"""
+            SELECT
+              id,
+              person_id,
+              face_observation_id,
+              active
+            FROM person_face_assignments
+            WHERE id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            tuple(normalized_assignment_ids),
+        ).fetchall()
+        if len(assignment_rows) != len(normalized_assignment_ids):
+            raise PersonExclusionValidationError(
+                "未找到所选样本，无法批量排除。",
+                code="assignment_not_found",
+            )
+
+        selected_face_ids: list[int] = []
+        for row in assignment_rows:
+            if str(row["person_id"]) != person_id:
+                raise PersonExclusionValidationError(
+                    "选择的样本不属于当前人物，无法批量排除。",
+                    code="assignment_wrong_person",
+                )
+            if not bool(row["active"]):
+                raise PersonExclusionValidationError(
+                    "选择的样本已不是 active 样本，无法批量排除。",
+                    code="assignment_inactive",
+                )
+            selected_face_ids.append(int(row["face_observation_id"]))
+
+        duplicate_exclusions = connection.execute(
+            f"""
+            SELECT face_observation_id
+            FROM person_face_exclusions
+            WHERE excluded_person_id = ?
+              AND face_observation_id IN ({placeholders})
+            ORDER BY face_observation_id ASC
+            """,
+            (person_id, *selected_face_ids),
+        ).fetchall()
+        if duplicate_exclusions:
+            raise PersonExclusionValidationError(
+                "选择的样本已经排除过，不能重复提交。",
+                code="duplicate_exclusion",
+            )
+
+        now = utc_now_text()
+        for row_index, row in enumerate(assignment_rows):
+            assignment_id = int(row["id"])
+            face_observation_id = int(row["face_observation_id"])
+            connection.execute(
+                """
+                INSERT INTO person_face_exclusions (
+                  face_observation_id,
+                  excluded_person_id,
+                  source_assignment_id,
+                  created_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (face_observation_id, person_id, assignment_id, now),
+            )
+            deactivate_cursor = connection.execute(
+                """
+                UPDATE person_face_assignments
+                SET active = 0,
+                    updated_at = ?
+                WHERE id = ?
+                  AND person_id = ?
+                  AND active = 1
+                """,
+                (now, assignment_id, person_id),
+            )
+            if deactivate_cursor.rowcount != 1:
+                raise PeopleGalleryError("批量排除失败，请稍后重试。")
+            _maybe_inject_exclusion_failure(
+                "after_first_exclusion_insert",
+                row_index=row_index,
+            )
+
+        remaining_sample_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM person_face_assignments
+                WHERE person_id = ?
+                  AND active = 1
+                """,
+                (person_id,),
+            ).fetchone()[0]
+        )
+        if remaining_sample_count > 0:
+            connection.execute(
+                """
+                UPDATE person
+                SET write_revision = write_revision + 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, person_id),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE person
+                SET status = 'inactive',
+                    write_revision = write_revision + 1,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, person_id),
+            )
+        connection.commit()
+    except PersonExclusionValidationError:
+        connection.rollback()
+        raise
+    except sqlite3.IntegrityError as exc:
+        connection.rollback()
+        if "person_face_exclusions.face_observation_id, person_face_exclusions.excluded_person_id" in str(exc):
+            raise PersonExclusionValidationError(
+                "选择的样本已经排除过，不能重复提交。",
+                code="duplicate_exclusion",
+            ) from exc
+        raise PeopleGalleryError("批量排除失败，请稍后重试。") from exc
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise PeopleGalleryError("批量排除失败，请稍后重试。") from exc
+    except RuntimeError as exc:
+        connection.rollback()
+        raise PeopleGalleryError("批量排除失败，请稍后重试。") from exc
+    finally:
+        connection.close()
+
+    return PersonExclusionResult(
+        person_id=person_id,
+        remaining_sample_count=remaining_sample_count,
     )
 
 
@@ -1107,6 +1330,14 @@ def _maybe_inject_merge_failure(stage: str) -> None:
     # 仅用于自动化验证事务回滚；未设置环境变量时不会影响正常逻辑。
     if os.environ.get("HIKBOX_TEST_MERGE_FAIL_STAGE") == stage:
         raise RuntimeError(f"merge fault injected at stage={stage}")
+
+
+def _maybe_inject_exclusion_failure(stage: str, *, row_index: int) -> None:
+    # 仅用于自动化验证事务回滚；未设置环境变量时不会影响正常逻辑。
+    if row_index != 0:
+        return
+    if os.environ.get("HIKBOX_TEST_EXCLUSION_FAIL_STAGE") == stage:
+        raise RuntimeError(f"exclusion fault injected at stage={stage}")
 
 
 def _maybe_hold_undo_transaction() -> None:

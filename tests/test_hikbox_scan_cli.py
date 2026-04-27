@@ -222,6 +222,50 @@ def test_scan_start_fails_cleanly_for_slice_a_only_workspace(tmp_path: Path) -> 
     assert "scan session 初始化失败" not in normalized_stderr
 
 
+def test_scan_start_fails_early_when_workspace_lacks_person_face_exclusions_table(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-missing-exclusions-table"
+    external_root = tmp_path / "external-root-missing-exclusions-table"
+    source_dir = tmp_path / "source-missing-exclusions-table"
+    source_dir.mkdir()
+    (source_dir / "sample.jpg").write_bytes((FIXTURE_DIR / "pg_001_single_alex_01.jpg").read_bytes())
+
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, source_dir)
+    assert add_result.returncode == 0
+
+    library_db = workspace / ".hikbox" / "library.db"
+    connection = sqlite3.connect(library_db)
+    try:
+        with connection:
+            connection.execute("DROP TABLE person_face_exclusions")
+    finally:
+        connection.close()
+
+    result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+
+    assert result.returncode != 0
+    assert "Traceback" not in result.stderr
+    normalized_stderr = _normalized_stderr(result.stderr)
+    assert normalized_stderr.startswith("scan start 失败:")
+    assert "缺少扫描表" in normalized_stderr
+    assert "person_face_exclusions" in normalized_stderr
+    assert "不支持自动升级" in normalized_stderr
+    assert "assignment 输入读取失败" not in normalized_stderr
+    assert "no such table" not in normalized_stderr
+    assert _count_rows(library_db, "scan_sessions") == 0
+    assert _count_rows(library_db, "assets") == 0
+    assert _count_rows(library_db, "face_observations") == 0
+
+
 def test_scan_start_downgrades_unreadable_supported_file_to_asset_failure(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace-unreadable-file"
     external_root = tmp_path / "external-root-unreadable-file"
