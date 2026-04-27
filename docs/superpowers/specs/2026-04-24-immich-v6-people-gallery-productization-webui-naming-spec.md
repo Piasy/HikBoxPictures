@@ -15,7 +15,7 @@
 - 本 slice 的分页验收只验证显式传入 `--person-detail-page-size 7` 时的公开页面行为；默认值 `204` 通过服务级默认参数测试覆盖。
 - WebUI 只面向本机单用户、`localhost` 使用；首版不做账号系统、多用户协作、远程访问和多标签页一致性保障。
 - WebUI 根路径必须可直接进入人物首页；实现可以直接渲染人物首页，也可以把 `/` 重定向到 `/people`，但用户不需要手工猜测入口。
-- 存在 `running` 扫描会话时，`hikbox-pictures serve` 必须失败退出且不监听端口；不得提供“边扫描边命名”的并发写路径。
+- 同一 workspace 上，`hikbox-pictures serve` 与 `hikbox-pictures scan start` 完全互斥：扫描运行中 `serve` 必须失败退出且不监听端口；`serve` 运行中新的 `scan start` 也必须直接失败。不得提供“边扫描边命名”的并发路径。
 - 本 slice 只定义人物首页、人物详情页和命名表单的产品语义；不定义合并、撤销合并、排除、导出模板、导出历史、运行日志页或源目录管理页的可操作语义。
 - manifest 只允许作为自动化断言输入；产品运行、页面渲染、命名和 Live 标记逻辑不得读取 manifest。
 - 页面自动化验收统一使用 Chromium；这是当前用户明确确认后的浏览器基线，也与 `python3 -m playwright install chromium` 和 CI 安装路径保持一致；仍需遵循仓库现有 Playwright 入口约定。

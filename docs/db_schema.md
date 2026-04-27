@@ -10,6 +10,7 @@
     config.json
     library.db
     embedding.db
+    operation.lock
     models/
       insightface/
         models/
@@ -28,6 +29,7 @@
 
 - `hikbox-pictures init --workspace <path> --external-root <path>` 创建 `config.json`、`library.db`、`embedding.db` 和外部目录骨架。
 - `hikbox-pictures scan start --workspace <path> [--batch-size <n>]` 只读取已初始化工作区，不会隐式补建工作区或 source。
+- `.hikbox/operation.lock` 是 `scan start` 与 `serve` 共享的工作区运行锁文件；同一 workspace 上两者完全互斥。锁的 OS 级持有态是运行时真相，文件内容只用于诊断当前持锁操作。
 - 扫描运行时显式把 `workspace/.hikbox/models/insightface` 作为 InsightFace 模型根目录传入；不依赖 `~/.insightface` 默认目录。
 - `external_root/artifacts/crops/` 存放 face crop，`external_root/artifacts/context/` 存放整图缩放加框 context 图。
 

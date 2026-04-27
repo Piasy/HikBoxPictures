@@ -247,27 +247,6 @@ def ensure_webui_schema_ready(workspace_context: WorkspaceContext) -> None:
         )
 
 
-def ensure_no_running_scan(workspace_context: WorkspaceContext) -> None:
-    connection = sqlite3.connect(workspace_context.library_db_path)
-    try:
-        row = connection.execute(
-            """
-            SELECT id
-            FROM scan_sessions
-            WHERE status = 'running'
-            ORDER BY id DESC
-            LIMIT 1
-            """
-        ).fetchone()
-    except sqlite3.Error as exc:
-        raise PeopleGalleryError("扫描状态读取失败，无法确认是否允许启动 WebUI。") from exc
-    finally:
-        connection.close()
-
-    if row is not None:
-        raise PeopleGalleryError("当前存在运行中的扫描会话，scan 运行中不能启动 WebUI。")
-
-
 def load_people_home_page(workspace_context: WorkspaceContext) -> PeopleHomePage:
     connection = sqlite3.connect(workspace_context.library_db_path)
     connection.row_factory = sqlite3.Row

@@ -5,10 +5,11 @@ import socket
 
 import uvicorn
 
-from hikbox_pictures.product.people_gallery import ensure_no_running_scan
 from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import ensure_webui_schema_ready
 from hikbox_pictures.product.sources import load_workspace_context
+from hikbox_pictures.product.workspace_runtime import acquire_workspace_operation_lock
+from hikbox_pictures.product.workspace_runtime import WorkspaceOperationLockError
 from hikbox_pictures.web.app import create_people_gallery_app
 
 
@@ -26,23 +27,29 @@ def serve_workspace(
         _ensure_valid_port(port)
         workspace_context = load_workspace_context(workspace)
         ensure_webui_schema_ready(workspace_context)
-        ensure_no_running_scan(workspace_context)
-        _ensure_port_available(port)
     except PeopleGalleryError as exc:
         raise ServeStartError(str(exc)) from exc
 
-    app = create_people_gallery_app(
-        workspace_context=workspace_context,
-        person_detail_page_size=person_detail_page_size,
-    )
-    uvicorn.run(
-        app,
-        host="127.0.0.1",
-        port=port,
-        access_log=False,
-        log_level="warning",
-        server_header=False,
-    )
+    try:
+        with acquire_workspace_operation_lock(
+            workspace_context=workspace_context,
+            operation_name="serve",
+        ):
+            _ensure_port_available(port)
+            app = create_people_gallery_app(
+                workspace_context=workspace_context,
+                person_detail_page_size=person_detail_page_size,
+            )
+            uvicorn.run(
+                app,
+                host="127.0.0.1",
+                port=port,
+                access_log=False,
+                log_level="warning",
+                server_header=False,
+            )
+    except WorkspaceOperationLockError as exc:
+        raise ServeStartError(str(exc)) from exc
 
 
 def _ensure_port_available(port: int) -> None:

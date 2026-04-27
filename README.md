@@ -60,6 +60,8 @@ hikbox-pictures scan start --workspace /path/to/workspace
 
 默认会把扫描进度打印到 `stderr`。批处理阶段按 10 秒周期输出当前阶段、已完成批次数/总批次数、已完成照片数/总照片数；进入在线归属阶段时也会输出同一格式的阶段切换进度，例如 `scan 进度: 阶段=批处理，批次 2/6，照片 17/52`。
 
+同一 workspace 上，`hikbox-pictures scan start` 与 `hikbox-pictures serve` 完全互斥：扫描运行中不能启动 WebUI，WebUI 运行中也不能启动新的扫描；需要做二次扫描时，先结束 `serve`，扫描完成后再重新启动 `serve`。
+
 WebUI 的 `hikbox-pictures serve` 入口已经实现，可用于在本机启动人物库 WebUI；当前支持 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`。
 
 `--person-detail-page-size` 默认值为 `204`，只影响人物详情页分页。

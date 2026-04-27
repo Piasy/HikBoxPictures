@@ -9,6 +9,7 @@
 - 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice F，只覆盖人物详情页批量排除、exclusion 真相和后续在线归属对 exclusion 的尊重；不定义手动改派、恢复排除、人物拆分或导出模板。
 - 本 slice 依赖 Slice 0 的固定真实小图库和 manifest、Slice A 的 workspace/source 契约、Slice B 的扫描和 artifact 契约、Slice C 的匿名 person 与 active assignment 契约、Slice D 的人物详情页和命名契约，以及 Slice E 的 merge/undo 契约；不重新定义初始化、扫描、分页、命名或 merge winner 语义。
 - 公共入口仍然只有 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供的真实 WebUI/API，以及后续再次执行的真实 `hikbox-pictures scan start --workspace <path> [--batch-size <n>]`；本 slice 不新增 CLI。
+- 同一 workspace 上，`hikbox-pictures serve` 与 `hikbox-pictures scan start` 完全互斥；本 slice 中任何需要重扫的验收都必须先结束真实 `serve` 进程，再执行 `scan start`，扫描完成后如仍需继续页面操作或断言，再重新启动 `serve`。
 - 本 slice 只定义一种排除操作：人物详情页上的批量排除。用户勾选 1 条样本再提交，等价于“批量排除 1 条”；本 slice 不再定义独立的“单条排除”按钮、接口或语义。
 - exclusion 的持久化真相必须是“这张 face 不能再自动归到这个 person”，而不是“这条 assignment 被点过一次按钮”。因此，POST 可以提交 `assignment_id`，但落库后的稳定 exclusion 键必须至少能表达 `face_observation_id + excluded_person_id`；同一对 `face_observation_id + excluded_person_id` 不得重复写入。一个 face 在不同时间可以累积针对不同 `person_id` 的 exclusion。
 - 排除成功只会失效当前 active assignment，并记录 exclusion；不得删除 `face_observations`、`assets`、crop/context artifact、merge/name 历史或其他扫描产物。

@@ -26,6 +26,8 @@ from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
 from hikbox_pictures.product.sources import WorkspaceAccessError
 from hikbox_pictures.product.sources import load_workspace_context
+from hikbox_pictures.product.workspace_runtime import acquire_workspace_operation_lock
+from hikbox_pictures.product.workspace_runtime import WorkspaceOperationLockError
 
 
 class ScanStartError(RuntimeError):
@@ -58,56 +60,94 @@ def start_scan(
     command = " ".join(["hikbox-pictures", *command_args])
     try:
         workspace_context = load_workspace_context(workspace)
-        _ensure_scan_schema_ready(workspace_context)
-        _reconcile_completed_running_sessions(workspace_context)
-        active_sources = _load_active_sources(workspace_context)
-        resumable_session = _load_resumable_session(workspace_context)
-        effective_batch_size = batch_size
-        if resumable_session is not None:
-            session = resumable_session
-            total_batches = int(session["total_batches"])
-            plan_fingerprint = str(session["plan_fingerprint"])
-            effective_batch_size = int(session["batch_size"])
-        else:
-            candidates = _discover_candidates(active_sources)
-            if not candidates:
-                raise ScanStartError("没有可扫描照片。")
+        with acquire_workspace_operation_lock(
+            workspace_context=workspace_context,
+            operation_name="scan",
+        ):
+            _ensure_scan_schema_ready(workspace_context)
+            _reconcile_completed_running_sessions(workspace_context)
+            active_sources = _load_active_sources(workspace_context)
+            resumable_session = _load_resumable_session(workspace_context)
+            effective_batch_size = batch_size
+            if resumable_session is not None:
+                session = resumable_session
+                total_batches = int(session["total_batches"])
+                plan_fingerprint = str(session["plan_fingerprint"])
+                effective_batch_size = int(session["batch_size"])
+            else:
+                candidates = _discover_candidates(active_sources)
+                if not candidates:
+                    raise ScanStartError("没有可扫描照片。")
 
-            total_batches = (len(candidates) + batch_size - 1) // batch_size
-            plan_fingerprint = _compute_plan_fingerprint(candidates=candidates, batch_size=batch_size)
-            session = _ensure_scan_session(
-                workspace_context=workspace_context,
-                candidates=candidates,
-                batch_size=batch_size,
-                total_batches=total_batches,
-                plan_fingerprint=plan_fingerprint,
-                command=command,
-            )
-        session_id = int(session["id"])
-        progress_state = _load_scan_progress_state(
-            workspace_context=workspace_context,
-            session_id=session_id,
-        )
-        _append_scan_log(
-            workspace_context=workspace_context,
-            payload={
-                "timestamp": utc_now_text(),
-                "event": "scan_started",
-                "session_id": session_id,
-                "plan_fingerprint": plan_fingerprint,
-                "batch_size": effective_batch_size,
-                "total_batches": total_batches,
-                "model_root": str(workspace_context.model_root_path),
-                "command": command,
-            },
-        )
-        pending_batches = _load_pending_batches(workspace_context, session_id=session_id)
-        if not pending_batches:
-            _refresh_session_summary(
+                total_batches = (len(candidates) + batch_size - 1) // batch_size
+                plan_fingerprint = _compute_plan_fingerprint(candidates=candidates, batch_size=batch_size)
+                session = _ensure_scan_session(
+                    workspace_context=workspace_context,
+                    candidates=candidates,
+                    batch_size=batch_size,
+                    total_batches=total_batches,
+                    plan_fingerprint=plan_fingerprint,
+                    command=command,
+                )
+            session_id = int(session["id"])
+            progress_state = _load_scan_progress_state(
                 workspace_context=workspace_context,
                 session_id=session_id,
-                final_status="running",
             )
+            _append_scan_log(
+                workspace_context=workspace_context,
+                payload={
+                    "timestamp": utc_now_text(),
+                    "event": "scan_started",
+                    "session_id": session_id,
+                    "plan_fingerprint": plan_fingerprint,
+                    "batch_size": effective_batch_size,
+                    "total_batches": total_batches,
+                    "model_root": str(workspace_context.model_root_path),
+                    "command": command,
+                },
+            )
+            pending_batches = _load_pending_batches(workspace_context, session_id=session_id)
+            if not pending_batches:
+                _refresh_session_summary(
+                    workspace_context=workspace_context,
+                    session_id=session_id,
+                    final_status="running",
+                )
+                _run_assignment_stage(
+                    workspace_context=workspace_context,
+                    session_id=session_id,
+                    progress_state=progress_state,
+                )
+                summary = _refresh_session_summary(
+                    workspace_context=workspace_context,
+                    session_id=session_id,
+                    final_status="completed",
+                )
+                _append_scan_log(
+                    workspace_context=workspace_context,
+                    payload={
+                        "timestamp": utc_now_text(),
+                        "event": "scan_skipped",
+                        "session_id": session_id,
+                        "reason": "无新增待处理批次",
+                        "completed_batches": summary["completed_batches"],
+                        "total_batches": summary["total_batches"],
+                        "failed_assets": summary["failed_assets"],
+                        "success_faces": summary["success_faces"],
+                        "artifact_files": summary["artifact_files"],
+                    },
+                )
+                return
+
+            for batch in pending_batches:
+                _run_batch(
+                    workspace_context=workspace_context,
+                    batch=batch,
+                    session_id=session_id,
+                    progress_state=progress_state,
+                )
+
             _run_assignment_stage(
                 workspace_context=workspace_context,
                 session_id=session_id,
@@ -122,49 +162,24 @@ def start_scan(
                 workspace_context=workspace_context,
                 payload={
                     "timestamp": utc_now_text(),
-                    "event": "scan_skipped",
+                    "event": "scan_completed",
                     "session_id": session_id,
-                    "reason": "无新增待处理批次",
-                    "completed_batches": summary["completed_batches"],
                     "total_batches": summary["total_batches"],
+                    "completed_batches": summary["completed_batches"],
                     "failed_assets": summary["failed_assets"],
                     "success_faces": summary["success_faces"],
                     "artifact_files": summary["artifact_files"],
                 },
             )
-            return
-
-        for batch in pending_batches:
-            _run_batch(
-                workspace_context=workspace_context,
-                batch=batch,
-                session_id=session_id,
-                progress_state=progress_state,
-            )
-
-        _run_assignment_stage(
+    except WorkspaceOperationLockError as exc:
+        failure = ScanStartError(str(exc))
+        _handle_scan_start_failure(
             workspace_context=workspace_context,
             session_id=session_id,
-            progress_state=progress_state,
+            command=command,
+            reason=str(failure),
         )
-        summary = _refresh_session_summary(
-            workspace_context=workspace_context,
-            session_id=session_id,
-            final_status="completed",
-        )
-        _append_scan_log(
-            workspace_context=workspace_context,
-            payload={
-                "timestamp": utc_now_text(),
-                "event": "scan_completed",
-                "session_id": session_id,
-                "total_batches": summary["total_batches"],
-                "completed_batches": summary["completed_batches"],
-                "failed_assets": summary["failed_assets"],
-                "success_faces": summary["success_faces"],
-                "artifact_files": summary["artifact_files"],
-            },
-        )
+        raise failure from exc
     except ScanStartError as exc:
         _handle_scan_start_failure(
             workspace_context=workspace_context,

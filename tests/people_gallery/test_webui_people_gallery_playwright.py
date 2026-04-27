@@ -2111,19 +2111,34 @@ def test_people_gallery_undo_rejects_after_incremental_assignment_write(tmp_path
                 person_ids=[casey_person_id, alex_person_id],
             )
             browser.close()
+    finally:
+        _terminate_process(process)
 
-        add_result = _add_source(workspace, FIXTURE_DIR_2)
-        assert add_result.returncode == 0
-        scan_result = _run_hikbox(
-            "scan",
-            "start",
-            "--workspace",
-            str(workspace),
-            "--batch-size",
-            "10",
-        )
-        assert scan_result.returncode == 0, scan_result.stderr
+    add_result = _add_source(workspace, FIXTURE_DIR_2)
+    assert add_result.returncode == 0
+    scan_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert scan_result.returncode == 0, scan_result.stderr
 
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+        "--person-detail-page-size",
+        "100",
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             page = browser.new_page(viewport={"width": 1440, "height": 900})

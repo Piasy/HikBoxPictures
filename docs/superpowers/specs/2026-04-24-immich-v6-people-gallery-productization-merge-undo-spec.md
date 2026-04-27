@@ -9,6 +9,7 @@
 - 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice E，只覆盖人物首页 two-person merge、最近一次撤销、相关账本与错误边界。
 - 本 slice 依赖 Slice 0 的固定真实小图库和 manifest、Slice A 的 workspace/source 契约、Slice B 的扫描和 artifact 契约、Slice C 的匿名 person 与 active assignment 契约，以及 Slice D 的人物首页/详情页、命名/重命名和 `serve` PRG 契约；不重新定义扫描、在线归属、分页或命名语义。
 - 本 slice 中用于验证“merge 后新增 loser-like 样本继续归到 winner”和“发生新增人物相关写入后 undo 被拒绝”的第二批真实扫描，统一复用 Slice 0 固定入库的 `tests/fixtures/people_gallery_scan_2/` 作为第二个 source；不得通过从 `tests/fixtures/people_gallery_scan/` 临时复制照片、拼装子目录或其它等价方式绕开这套固定增量验收基线。
+- 同一 workspace 上，`hikbox-pictures serve` 与 `hikbox-pictures scan start` 完全互斥；本 slice 中所有增量扫描验收都必须先结束真实 `serve` 进程，再执行 `scan start`，扫描完成后如仍需页面断言，再重新启动 `serve`。
 - 公共入口仍然只有 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供的真实 WebUI/API；本 slice 不新增 CLI。
 - 本 slice 当前明确只支持 exactly-two merge：每次合并请求只能包含两个 person，且 undo 账本也只需要恢复这一次 two-person merge 的 winner/loser 关系。一次合并三个及以上 person 不在本 slice 范围内。
 - 合并不是展示层 alias，也不是只在导出时解释的“人物关联”。合并必须真实修改 person 与 active assignment 的持久化归属，使后续 WebUI、导出和在线 assignment 看到的是同一个 canonical winner。

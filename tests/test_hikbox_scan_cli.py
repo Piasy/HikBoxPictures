@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import stat
 import shutil
 import sqlite3
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import time
 
+import httpx
 import numpy as np
 from PIL import Image
 import pytest
@@ -138,6 +140,38 @@ def _find_model_root() -> Path:
     raise AssertionError("缺少 InsightFace buffalo_l 模型目录，无法执行 scan CLI 集成测试")
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        return int(sock.getsockname()[1])
+
+
+def _wait_for_http_ready(base_url: str) -> None:
+    deadline = time.time() + 30
+    last_error: Exception | None = None
+    while time.time() < deadline:
+        try:
+            response = httpx.get(base_url, follow_redirects=True, timeout=1.0)
+            if response.status_code < 500:
+                return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+        time.sleep(0.2)
+    raise AssertionError(f"等待服务可用超时: {base_url}; last_error={last_error!r}")
+
+
+def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
+    if process.poll() is None:
+        process.send_signal(signal.SIGTERM)
+    try:
+        stdout_text, stderr_text = process.communicate(timeout=30)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout_text, stderr_text = process.communicate(timeout=30)
+    return stdout_text, stderr_text
+
+
 def _read_manifest() -> dict[str, object]:
     return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
@@ -192,6 +226,48 @@ def test_scan_start_fails_when_no_active_source_exists(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "active source" in result.stderr or "没有可用 source" in result.stderr
     assert _count_rows(workspace / ".hikbox" / "library.db", "library_sources") == 0
+
+
+def test_scan_start_fails_when_serve_is_running(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace-serve-running"
+    external_root = tmp_path / "external-root-serve-running"
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    _prepare_workspace_models(workspace)
+    add_result = _add_source(workspace, FIXTURE_DIR)
+    assert add_result.returncode == 0
+
+    port = _find_free_port()
+    process = _spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        _wait_for_http_ready(f"{base_url}/")
+        result = _run_hikbox(
+            "scan",
+            "start",
+            "--workspace",
+            str(workspace),
+            "--batch-size",
+            "10",
+        )
+    finally:
+        _terminate_process(process)
+
+    assert result.returncode != 0
+    normalized_stderr = _normalized_stderr(result.stderr)
+    assert normalized_stderr.startswith("scan start 失败:")
+    assert "serve" in normalized_stderr
+    assert "互斥" in normalized_stderr or "运行中" in normalized_stderr
+    library_db = workspace / ".hikbox" / "library.db"
+    assert _count_rows(library_db, "scan_sessions") == 0
+    assert _count_rows(library_db, "assets") == 0
+    assert _count_rows(library_db, "face_observations") == 0
 
 
 def test_scan_start_fails_cleanly_for_slice_a_only_workspace(tmp_path: Path) -> None:

@@ -87,7 +87,7 @@
 - WebUI 仅面向本机单用户、`localhost` 使用；首版不做账号系统、多用户协作、远程访问和多标签页一致性保障。
 - `hikbox-pictures serve` 固定监听 `localhost/127.0.0.1`；首版不提供 `--host` 配置。
 - WebUI 使用 FastAPI + Jinja2 服务端渲染，可用少量原生 JS 增强表单提交、局部刷新和确认弹窗；首版不引入 React/Vue 等前端框架。
-- 扫描运行期间禁止启动 WebUI；存在 `running` 扫描会话时，`hikbox-pictures serve --workspace <path>` 必须失败退出且不监听端口。
+- 同一 workspace 上，`hikbox-pictures scan start` 与 `hikbox-pictures serve` 完全互斥：扫描运行期间禁止启动 WebUI，WebUI 运行期间也禁止启动新的 `scan start`；任何需要二次扫描的验收都必须先结束 `serve`，扫描完成后如仍需页面断言，再重新启动 `serve`。
 - 导出运行中禁止命名、合并、撤销合并、排除等人物归属写操作；这把锁的可观察运行态和自动化验收由后续 Slice G 定义。
 - 页面自动化验收以 Python Playwright + pytest 为主，截图不作为默认必留产物；只有在视觉或布局不确定、需要人工复核、用户明确要求，或正在排查视觉回归时才保存到 `.tmp/<task-name>/`。JSON 报告和服务日志按调试需要保存到 `.tmp/<task-name>/`。
 
