@@ -6,7 +6,7 @@
 
 ## Global Constraints
 
-- 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice D，只覆盖 `serve`、人物首页/详情页浏览、命名/重命名和 rename 审计。
+- 本 spec 是父 spec `docs/LittlePower/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice D，只覆盖 `serve`、人物首页/详情页浏览、命名/重命名和 rename 审计。
 - 本 slice 依赖 Slice 0 的固定真实小图库和 manifest、Slice A 的 workspace/source 契约、Slice B 的 asset/face/artifact 契约，以及 Slice C 已创建的匿名 person、active assignment 和 assignment run；不重新定义初始化、扫描、人脸检测或在线归属语义。
 - 公共入口是 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]`；首版不新增独立 `rename-person` CLI，也不要求公开 JSON API。
 - `hikbox-pictures serve` 固定监听本机 `localhost/127.0.0.1`；本 slice 不提供 `--host` 参数，也不定义 host 相关配置或校验分支。

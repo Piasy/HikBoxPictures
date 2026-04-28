@@ -21,7 +21,7 @@
 1. codex 发生 context compact 后，subagent 信息好像会丢失，导致 subagent 会泄露。
 2. gpt 5.4 写 spec（包括 review 和修订）感觉比 5.5 慢很多，老是纠结一些琐碎点。
 3. 但慢归慢，质量还是可以的，只要在交互式对话里确认/纠正 spec 内容后，后面 agent 自己的 review-fix 之后出来的内容，其实基本没啥大问题，拿去 subagent driven development 都能行。
-3. claude code + kimi k2.6
+3. claude code + kimi k2.6 brainstorming 还行，但 subagent driven development 好像一直不干活。
 
 LittlePower 初步实践下来，效果满意，做出来的东西确实是可用的，关键指标，相同图库：
 

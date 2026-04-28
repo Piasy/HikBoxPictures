@@ -6,7 +6,7 @@
 
 ## Global Constraints
 
-- 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice C，只负责 v6 在线人物归属、匿名 person 创建、active assignment、assignment run 与归属日志。
+- 本 spec 是父 spec `docs/LittlePower/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice C，只负责 v6 在线人物归属、匿名 person 创建、active assignment、assignment run 与归属日志。
 - 本 slice 依赖 Slice 0 的固定真实小图库、Slice A 的 workspace/source 契约，以及 Slice B 已写入的 active asset、active face observation、main embedding、crop/context 和扫描批次状态；不重新定义初始化、source 管理、人脸检测或 artifact 生成行为。
 - 公共入口仍是 `hikbox-pictures scan start --workspace <path> [--batch-size <n>]`；首版不新增独立 `assign`、`recognize`、`cluster`、`force-redetect` 或 `rebuild` CLI。
 - assignment 输入只能来自 `library.db` 中 active face observation 和 `embedding.db` 中对应的 main embedding；不得重新读取照片、不得重新调用 InsightFace 检测或识别模型、不得依赖 manifest 作为产品逻辑输入。

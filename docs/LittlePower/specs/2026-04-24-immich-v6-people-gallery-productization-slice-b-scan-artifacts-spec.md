@@ -6,7 +6,7 @@
 
 ## Global Constraints
 
-- 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice B，只负责扫描、人脸检测、main embedding 与产物入库。
+- 本 spec 是父 spec `docs/LittlePower/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice B，只负责扫描、人脸检测、main embedding 与产物入库。
 - 本 slice 依赖 Slice A 已定义的 workspace、external_root、source、`config.json`、`library.db`、`embedding.db` 和日志目录语义，不重新定义初始化或 source 管理行为。
 - 本 slice 引用父 spec 的真实验收小图库基线；测试图库生成会作为独立子 spec 管理，本 slice 不负责生成图库。
 - 产品语义以 `hikbox_pictures/immich_face_single_file.py` 和 `docs/group_pics_algo.md` 的 v6 章节为准；本 slice 只产出 v6 归属所需输入，不执行人物归属。

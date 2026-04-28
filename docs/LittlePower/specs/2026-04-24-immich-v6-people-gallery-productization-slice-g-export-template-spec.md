@@ -6,7 +6,7 @@
 
 ## Global Constraints
 
-- 产品语义以父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 和已写子 spec（Slice 0-F）的 cross-slice contracts 为准。
+- 产品语义以父 spec `docs/LittlePower/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 和已写子 spec（Slice 0-F）的 cross-slice contracts 为准。
 - 核心行为必须通过公共入口验证；mock/stub/no-op 路径不得满足验收。
 - 任何数据库 schema 修改都必须同步更新 `docs/db_schema.md`。
 - 模板保存后不可编辑；支持多次执行，但执行时模板配置不可变。

@@ -6,7 +6,7 @@
 
 ## Global Constraints
 
-- 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice F，只覆盖人物详情页批量排除、exclusion 真相和后续在线归属对 exclusion 的尊重；不定义手动改派、恢复排除、人物拆分或导出模板。
+- 本 spec 是父 spec `docs/LittlePower/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice F，只覆盖人物详情页批量排除、exclusion 真相和后续在线归属对 exclusion 的尊重；不定义手动改派、恢复排除、人物拆分或导出模板。
 - 本 slice 依赖 Slice 0 的固定真实小图库和 manifest、Slice A 的 workspace/source 契约、Slice B 的扫描和 artifact 契约、Slice C 的匿名 person 与 active assignment 契约、Slice D 的人物详情页和命名契约，以及 Slice E 的 merge/undo 契约；不重新定义初始化、扫描、分页、命名或 merge winner 语义。
 - 公共入口仍然只有 `hikbox-pictures serve --workspace <path> [--port <port>] [--person-detail-page-size <n>]` 提供的真实 WebUI/API，以及后续再次执行的真实 `hikbox-pictures scan start --workspace <path> [--batch-size <n>]`；本 slice 不新增 CLI。
 - 同一 workspace 上，`hikbox-pictures serve` 与 `hikbox-pictures scan start` 完全互斥；本 slice 中任何需要重扫的验收都必须先结束真实 `serve` 进程，再执行 `scan start`，扫描完成后如仍需继续页面操作或断言，再重新启动 `serve`。

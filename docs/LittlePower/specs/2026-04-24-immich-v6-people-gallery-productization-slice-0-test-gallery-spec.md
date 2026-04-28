@@ -6,7 +6,7 @@
 
 ## Global Constraints
 
-- 本 spec 是父 spec `docs/superpowers/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice 0，只负责入库验收图库、`manifest.json` 和验收测试，不实现扫描、人物归属、WebUI 或导出功能。
+- 本 spec 是父 spec `docs/LittlePower/specs/2026-04-24-immich-v6-people-gallery-productization-spec.md` 的 Slice 0，只负责入库验收图库、`manifest.json` 和验收测试，不实现扫描、人物归属、WebUI 或导出功能。
 - 主基线小图库必须直接入库到 `tests/fixtures/people_gallery_scan/`；补充增量扫描小图库必须直接入库到 `tests/fixtures/people_gallery_scan_2/`；两者都不提供下载脚本、生成脚本或运行时生成路径。
 - 图片和 `manifest.json` 由 agent 直接生成并提交；生成过程需要保证同一人物跨多张照片的一致性、不同人物之间可区分、合照中人物可见，并在 manifest 中记录生成说明和 checksum。
 - 验收只通过一个测试用例完成：`tests/people_gallery/test_people_gallery_fixture.py`。该测试读取入库 fixture 和 manifest，执行 schema、文件、checksum、解码、类别数量、Live MOV 配对和真实 InsightFace 探针检查。
