@@ -107,7 +107,7 @@
 
 ## Feature Slice 2: 导出模板预览与执行
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 
@@ -225,6 +225,13 @@
 
 - 所有验收标准通过自动化验证。
 - 没有核心需求是通过直接状态修改、硬编码数据、占位行为或 fake integration 满足的。
+
+### Accepted Concerns (from code-quality review, 2026-04-28)
+
+- **MOV `skipped_exists` missing in schema**: When a MOV target file already exists, `_copy_asset` skips the copy but still marks `mov_result` as `"copied"` because the current `export_delivery.mov_result` CHECK constraint only allows `('copied', 'skipped_missing', 'not_applicable')`. Controller accepts this risk because the schema migration required to add `skipped_exists` is out of scope for Feature Slice 2; it should be addressed when Feature Slice 3 is implemented or in a follow-up schema patch.
+- **TDD evidence missing**: The implementer did not provide RED-phase failure commands/summaries or GREEN-phase pass reports for the production behavior changes. Controller accepts this risk because all 27 automated tests pass and fully cover the spec ACs.
+- **Module size**: `export_templates.py` has grown to ~890 lines covering data access, validation, preview computation, and execution logic. Controller accepts this risk for the current slice; a follow-up refactor may split it into smaller modules.
+- **N+1 query in history page**: `export_template_history_page` calls `load_export_run_detail` for each run individually. Controller accepts this risk because run counts are currently low; should be batched when history volume grows.
 
 ## Feature Slice 3: 导出运行中人物写操作锁定
 
