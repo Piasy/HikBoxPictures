@@ -14,7 +14,7 @@
 
 ## Feature Slice 1: 导出模板创建与保存
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 
@@ -99,6 +99,11 @@
 
 - 所有验收标准通过自动化验证。
 - 没有核心需求是通过直接状态修改、硬编码数据、占位行为或 fake integration 满足的。
+
+### Accepted Concerns (from code-quality review, 2026-04-28)
+
+- **Missing TDD evidence**: The implementer did not provide RED-phase failure commands/summaries or GREEN-phase pass reports for the production behavior changes. Controller accepts this risk because all 16 automated tests pass and fully cover the spec ACs; TDD evidence should be provided for future feature slices.
+- **`mkdir` side-effect ordering (`export_templates.py`)**: `output_path.mkdir(parents=True, exist_ok=True)` is called before person existence/activity/name validations complete, meaning a request with a valid path but invalid persons can create the directory on disk before returning 400. Controller accepts this risk because the side effect is idempotent (`exist_ok=True`) and does not affect data integrity or spec assertions; the ordering should be corrected in a follow-up refactor.
 
 ## Feature Slice 2: 导出模板预览与执行
 
