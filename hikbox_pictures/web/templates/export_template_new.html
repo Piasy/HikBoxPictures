@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="detail-head">
+    <div>
+      <a class="back-link" href="/exports">返回模板列表</a>
+      <h1>新建导出模板</h1>
+      <p>选择至少 2 个已命名人物并指定输出目录。</p>
+    </div>
+  </div>
+
+  <section class="panel detail-shell">
+    {% if form_feedback %}
+      <p
+        class="name-feedback{% if form_feedback.level == 'error' %} is-error{% endif %}"
+        {% if form_feedback.level == 'error' %}
+          role="alert"
+        {% else %}
+          role="status"
+        {% endif %}
+      >
+        {{ form_feedback.message }}
+      </p>
+    {% endif %}
+
+    <form class="name-form" method="post" action="/exports/new" data-export-template-form>
+      <div class="name-form-row">
+        <label class="name-form-label" for="name">模板名称</label>
+        <input
+          id="name"
+          name="name"
+          type="text"
+          value="{{ form_name_value or '' }}"
+          maxlength="120"
+          autocomplete="off"
+          required
+        >
+      </div>
+
+      <div class="name-form-row">
+        <label class="name-form-label" for="output_root">输出目录（绝对路径）</label>
+        <input
+          id="output_root"
+          name="output_root"
+          type="text"
+          value="{{ form_output_root_value or '' }}"
+          autocomplete="off"
+          required
+        >
+      </div>
+
+      <div class="name-form-row">
+        <span class="name-form-label">选择人物（至少 2 个）</span>
+      </div>
+
+      {% if eligible_persons %}
+        <div class="sample-grid" data-person-selector>
+          {% for person in eligible_persons %}
+            <article class="sample-card" data-person-id="{{ person.person_id }}">
+              <label class="merge-choice" style="padding:14px 14px 8px;">
+                <input
+                  type="checkbox"
+                  name="person_id"
+                  value="{{ person.person_id }}"
+                  data-person-checkbox
+                  {% if person.person_id in form_person_ids %}checked{% endif %}
+                >
+                <span data-person-display-name>{{ person.display_name }}</span>
+              </label>
+              <div class="sample-card-body">
+                <div class="sample-card-meta">
+                  <span data-person-sample-count>{{ person.sample_count }} 个样本</span>
+                </div>
+              </div>
+            </article>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="empty-state">没有可用的已命名人物。请先完成扫描并为人物命名。</p>
+      {% endif %}
+
+      <div class="name-form-row" style="margin-top:18px;">
+        <button type="submit">保存模板</button>
+      </div>
+    </form>
+  </section>
+{% endblock %}

@@ -1778,7 +1778,7 @@ def test_people_gallery_merge_prefers_named_person_over_anonymous_even_with_fewe
         _terminate_process(process)
 
 
-def test_people_gallery_merge_rejects_two_named_people_via_real_home(tmp_path: Path) -> None:
+def test_people_gallery_merge_two_named_people_succeeds_via_real_home(tmp_path: Path) -> None:
     workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
     people_by_label = {str(person["label"]): person for person in manifest["people"]}
     alex_person_id = target_person_ids["target_alex"]
@@ -1836,7 +1836,6 @@ def test_people_gallery_merge_rejects_two_named_people_via_real_home(tmp_path: P
                 display_name=blair_display_name,
             )
 
-            db_snapshot_before_merge_attempt = _read_name_slice_db_snapshot(library_db)
             page.goto(f"{base_url}/people", wait_until="networkidle")
             response_start = len(response_log)
             _submit_merge_from_home(
@@ -1844,16 +1843,14 @@ def test_people_gallery_merge_rejects_two_named_people_via_real_home(tmp_path: P
                 base_url=base_url,
                 person_ids=[alex_person_id, blair_person_id],
             )
-            assert not any(
-                response["method"] == "POST"
-                and response["url"] == f"{base_url}/people/merge"
-                and int(response["status"]) == 303
-                for response in response_log[response_start:]
+            _assert_merge_prg_flow(
+                responses=response_log[response_start:],
+                base_url=base_url,
             )
-            expect(page.get_by_role("alert")).to_contain_text("不支持合并两个已命名人物")
-            assert _read_name_slice_db_snapshot(library_db) == db_snapshot_before_merge_attempt
-            assert _count_person_name_events(library_db) == 2
-            assert _read_person_merge_operations(library_db) == []
+            expect(page.locator("[data-undo-submit]")).to_be_enabled()
+            assert len(_read_person_merge_operations(library_db)) == 1
+            active_people_after = _read_active_people(library_db)
+            assert len(active_people_after) == 2
             browser.close()
     finally:
         _terminate_process(process)

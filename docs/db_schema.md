@@ -1,6 +1,6 @@
 # 数据库 Schema 说明（当前已实现）
 
-本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」、Slice D / Feature Slice 2「人物命名与重命名」、Slice E / Feature Slice 1「人物合并」与 Feature Slice 2「最近一次撤销」，以及 Slice F / Feature Slice 1「人物详情页批量排除」。本文不承诺 export 等尚未落地 slice 的 schema。
+本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」、Slice D / Feature Slice 2「人物命名与重命名」、Slice E / Feature Slice 1「人物合并」与 Feature Slice 2「最近一次撤销」、Slice F / Feature Slice 1「人物详情页批量排除」，以及 Slice G / Feature Slice 1「导出模板创建与保存」的 schema。
 
 ## 1. 存储布局
 
@@ -577,6 +577,135 @@ CREATE INDEX idx_person_merge_operation_assignments_merge_id
 - 每次成功 merge 会把 merge 前 winner 与 loser 的 active assignment id 集合完整快照到该表。
 - undo 会依赖这张表把 merge 前属于 loser 的 assignment 精确恢复给 loser；如果最近一次 merge 在这张表里的快照不完整，则 undo 必须失败并保持 DB 不变。
 
+### 3.15 `export_template`
+
+```sql
+CREATE TABLE export_template (
+  template_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  output_root TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'invalid')),
+  created_at TEXT NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_template_status ON export_template(status, created_at);
+```
+
+字段语义：
+
+- `template_id`：模板唯一标识，UUIDv4。
+- `name`：用户填写的模板名称，trim 后保存。
+- `output_root`：绝对路径，创建模板时系统会尝试创建该目录。
+- `status`：`active` 表示模板有效；`invalid` 表示模板关联的某个人物已失效（inactive 或 display_name 被清空）。
+- `created_at`：创建时间，带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
+
+运行时语义：
+
+- 模板保存后不可编辑；`name` 不参与去重键。
+- 去重键为 `person_ids` 排序后 + `output_root` 组合。
+- 当关联的 `person_id` 变为 `inactive` 或 `display_name` 变为 `NULL` 时，级联更新为 `invalid`。
+
+### 3.16 `export_template_person`
+
+```sql
+CREATE TABLE export_template_person (
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  person_id TEXT NOT NULL REFERENCES person(id),
+  PRIMARY KEY (template_id, person_id)
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_template_person_person_id ON export_template_person(person_id, template_id);
+```
+
+字段语义：
+
+- `template_id`：所属导出模板。
+- `person_id`：快照保存时关联的人物 ID；不保存 `display_name`，防止重命名后语义漂移。
+
+运行时语义：
+
+- 创建模板时记录所选人物的 `person_id` 快照。
+- 模板至少关联 2 个 active 且已命名的人物。
+
+### 3.17 `export_run`
+
+```sql
+CREATE TABLE export_run (
+  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  copied_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_run_template_id ON export_run(template_id, run_id);
+CREATE INDEX idx_export_run_status ON export_run(status);
+```
+
+字段语义：
+
+- `run_id`：运行记录自增 ID。
+- `template_id`：关联的导出模板。
+- `status`：`running` / `completed` / `failed`。
+- `started_at`：启动时间。
+- `completed_at`：完成时间；失败时也写入。
+- `copied_count` / `skipped_count`：实际复制/跳过的静态图数量（MOV 不计入）。
+
+运行时语义：
+
+- 任何 `export_run` 处于 `running` 状态时，全局锁定人物写操作（命名、合并、撤销合并、排除）。
+- 服务启动时若存在残留 `running` 记录，自动标记为 `failed` 以解除锁定。
+- 不允许并发执行多个导出运行。
+
+### 3.18 `export_delivery`
+
+```sql
+CREATE TABLE export_delivery (
+  delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES export_run(run_id),
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  target_path TEXT NOT NULL,
+  result TEXT NOT NULL CHECK (result IN ('copied', 'skipped_exists')),
+  mov_result TEXT NOT NULL CHECK (mov_result IN ('copied', 'skipped_missing', 'not_applicable'))
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_delivery_run_id ON export_delivery(run_id, asset_id);
+```
+
+字段语义：
+
+- `run_id`：所属导出运行。
+- `asset_id`：被处理的资产。
+- `target_path`：目标文件路径。
+- `result`：静态图复制结果。
+- `mov_result`：MOV 配对复制结果。
+
+运行时语义：
+
+- 每个被处理的 asset 产生一条记录。
+- 目标文件已存在时记 `skipped_exists`，不覆盖。
+- MOV 缺失或不可读时记 `skipped_missing`。
+- JPG/PNG 等无 MOV 配对时记 `not_applicable`。
+
 ## 4. `embedding.db`
 
 ### 4.1 `schema_meta`
@@ -668,6 +797,5 @@ CREATE INDEX idx_face_embeddings_face_id ON face_embeddings(face_observation_id,
 
 以下内容尚未在当前实现中落地，因此不属于本文档承诺范围：
 
-- 命名、合并、排除、导出相关表
-- WebUI、服务端 API、导出账本
+- 导出预览、执行与导出运行锁定（Slice G / Feature Slice 2 与 Feature Slice 3）的具体运行时语义与 API 契约
 - 任何 `schema_version > 1` 的 migration 规则

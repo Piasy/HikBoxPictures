@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="detail-head">
+    <div>
+      <a class="back-link" href="/people">返回人物首页</a>
+      <h1>导出模板</h1>
+      <p>管理已保存的导出模板；每个模板至少包含 2 个已命名人物。</p>
+    </div>
+    <a class="back-link" href="/exports/new">新建模板</a>
+  </div>
+
+  {% if list_feedback %}
+    <p
+      class="feedback-banner{% if list_feedback.level == 'error' %} is-error{% endif %}"
+      {% if list_feedback.level == 'error' %}
+        role="alert"
+      {% else %}
+        role="status"
+      {% endif %}
+    >
+      {{ list_feedback.message }}
+    </p>
+  {% endif %}
+
+  <section class="panel detail-shell">
+    {% if not templates %}
+      <p class="empty-state">暂无导出模板。</p>
+    {% else %}
+      <table style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--panel-border);">
+            <th style="padding:12px 8px;">模板名称</th>
+            <th style="padding:12px 8px;">创建时间</th>
+            <th style="padding:12px 8px;">已选人物</th>
+            <th style="padding:12px 8px;">输出目录</th>
+            <th style="padding:12px 8px;">状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for template in templates %}
+            <tr data-template-id="{{ template.template_id }}" style="border-bottom:1px solid rgba(74,52,35,0.08);">
+              <td style="padding:12px 8px;" data-template-name>{{ template.name }}</td>
+              <td style="padding:12px 8px;" data-template-created-at>{{ template.created_at }}</td>
+              <td style="padding:12px 8px;" data-template-person-names>{{ template.person_names | join(", ") }}</td>
+              <td style="padding:12px 8px;" data-template-output-root>{{ template.output_root }}</td>
+              <td style="padding:12px 8px;" data-template-status>{{ template.status }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </section>
+{% endblock %}

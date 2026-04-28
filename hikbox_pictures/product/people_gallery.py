@@ -8,6 +8,8 @@ import sqlite3
 import time
 import uuid
 
+from hikbox_pictures.product.export_templates import invalidate_templates_for_person
+from hikbox_pictures.product.export_templates import invalidate_templates_for_persons_if_inactive_or_anonymous
 from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
 
@@ -26,6 +28,10 @@ REQUIRED_WEBUI_TABLES = (
     "person_name_events",
     "person_merge_operations",
     "person_merge_operation_assignments",
+    "export_template",
+    "export_template_person",
+    "export_run",
+    "export_delivery",
 )
 REQUIRED_WEBUI_COLUMNS = {
     "assets": {
@@ -92,6 +98,35 @@ REQUIRED_WEBUI_COLUMNS = {
         "merge_operation_id",
         "assignment_id",
         "person_role",
+    },
+    "export_template": {
+        "template_id",
+        "name",
+        "output_root",
+        "status",
+        "created_at",
+        "dedup_key",
+    },
+    "export_template_person": {
+        "template_id",
+        "person_id",
+    },
+    "export_run": {
+        "run_id",
+        "template_id",
+        "status",
+        "started_at",
+        "completed_at",
+        "copied_count",
+        "skipped_count",
+    },
+    "export_delivery": {
+        "delivery_id",
+        "run_id",
+        "asset_id",
+        "target_path",
+        "result",
+        "mov_result",
     },
 }
 
@@ -638,6 +673,7 @@ def submit_people_merge(
             """,
             (loser_write_revision_after_merge, now, loser.person_id),
         )
+        invalidate_templates_for_person(connection, person_id=loser.person_id)
         _maybe_inject_merge_failure("after_loser_inactivation")
 
         cursor = connection.execute(
@@ -890,6 +926,7 @@ def submit_person_exclusions(
                 """,
                 (now, person_id),
             )
+            invalidate_templates_for_person(connection, person_id=person_id)
         connection.commit()
     except PersonExclusionValidationError:
         connection.rollback()
@@ -1051,6 +1088,10 @@ def submit_people_merge_undo(
                 now,
                 merge_operation.loser_person_id,
             ),
+        )
+        invalidate_templates_for_persons_if_inactive_or_anonymous(
+            connection,
+            person_ids=[merge_operation.winner_person_id, merge_operation.loser_person_id],
         )
         _maybe_inject_undo_failure("after_person_restore")
 
@@ -1274,8 +1315,6 @@ def build_anonymous_label(person_id: str) -> str:
 
 def _pick_merge_winner(candidates: list[MergeCandidate]) -> tuple[MergeCandidate, MergeCandidate]:
     first, second = candidates
-    if first.is_named and second.is_named:
-        raise PersonMergeValidationError("不支持合并两个已命名人物。", code="both_named")
     if first.is_named and not second.is_named:
         return first, second
     if second.is_named and not first.is_named:
