@@ -456,3 +456,136 @@ class TestExportTemplateWebUI:
             assert db_status == "active"
         finally:
             _terminate_process(process)
+
+    def test_preview_page_grid_and_counts(self, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+        alex_id = target_person_ids["target_alex"]
+        blair_id = target_person_ids["target_blair"]
+
+        port = _find_free_port()
+        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        output_root = str(tmp_path / "export-output")
+        try:
+            _wait_for_http_ready(f"{base_url}/")
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch()
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+
+                import httpx
+                httpx.post(f"{base_url}/people/{alex_id}/name", data={"display_name": "Alex Chen"}, follow_redirects=False, timeout=5.0)
+                httpx.post(f"{base_url}/people/{blair_id}/name", data={"display_name": "Blair Lin"}, follow_redirects=False, timeout=5.0)
+
+                # Create template
+                page.goto(f"{base_url}/exports/new")
+                page.fill("input#name", "Alex & Blair")
+                page.fill("input#output_root", output_root)
+                page.locator(f"article[data-person-id='{alex_id}'] input[type=checkbox]").check()
+                page.locator(f"article[data-person-id='{blair_id}'] input[type=checkbox]").check()
+                page.locator("button[type=submit]").click()
+                expect(page).to_have_url(f"{base_url}/exports")
+
+                # Get template id from DOM and visit preview directly
+                template_id = page.locator("tr[data-template-id]").first.get_attribute("data-template-id")
+                page.goto(f"{base_url}/exports/{template_id}/preview")
+
+                # Assert counts visible
+                expect(page.locator("[data-preview-total]")).not_to_have_text("")
+                expect(page.locator("[data-preview-only]")).not_to_have_text("")
+                expect(page.locator("[data-preview-group]")).not_to_have_text("")
+
+                # Assert grid CSS (6 columns on desktop)
+                grid = page.locator("[data-preview-grid]").first
+                grid_css = grid.evaluate("el => getComputedStyle(el).gridTemplateColumns")
+                assert len(grid_css.split()) == 6
+
+                # Fetch preview API to cross-check DOM structure
+                preview = httpx.get(f"{base_url}/api/export-templates/{template_id}/preview", timeout=5.0).json()
+
+                # AC-1 + AC-2: verify month buckets and per-asset data-person-id
+                for month_bucket in preview["months"]:
+                    month = month_bucket["month"]
+                    section = page.locator(f"section[data-month='{month}']")
+                    expect(section).to_be_visible()
+
+                    for bucket in ("only", "group"):
+                        assets = month_bucket[bucket]
+                        if not assets:
+                            continue
+                        grid_locator = section.locator(f"div[data-preview-grid][data-bucket='{bucket}']")
+                        expect(grid_locator).to_be_visible()
+
+                        # Verify each article's data-person-id matches API representative_person_id
+                        for asset in assets:
+                            article = grid_locator.locator(f"article[data-asset-id='{asset['asset_id']}']")
+                            expect(article).to_be_visible()
+                            dom_person_id = article.get_attribute("data-person-id")
+                            assert dom_person_id == asset["representative_person_id"], (
+                                f"asset {asset['file_name']} data-person-id mismatch: "
+                                f"dom={dom_person_id}, api={asset['representative_person_id']}"
+                            )
+                            # Also verify the displayed file name
+                            expect(article.locator("[data-asset-file-name]")).to_contain_text(asset["file_name"])
+
+                browser.close()
+        finally:
+            _terminate_process(process)
+
+    def test_history_page_shows_run_details(self, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+        alex_id = target_person_ids["target_alex"]
+        blair_id = target_person_ids["target_blair"]
+
+        port = _find_free_port()
+        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        output_root = str(tmp_path / "export-output")
+        try:
+            _wait_for_http_ready(f"{base_url}/")
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch()
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+
+                import httpx
+                httpx.post(f"{base_url}/people/{alex_id}/name", data={"display_name": "Alex Chen"}, follow_redirects=False, timeout=5.0)
+                httpx.post(f"{base_url}/people/{blair_id}/name", data={"display_name": "Blair Lin"}, follow_redirects=False, timeout=5.0)
+
+                # Create template and execute via API
+                response = httpx.post(
+                    f"{base_url}/api/export-templates",
+                    data={"name": "Alex & Blair", "output_root": output_root, "person_id": [alex_id, blair_id]},
+                    timeout=5.0,
+                )
+                template_id = response.json()["template_id"]
+                execute_resp = httpx.post(f"{base_url}/api/export-templates/{template_id}/execute", timeout=30.0)
+                run_id = execute_resp.json()["run_id"]
+
+                # Fetch run detail API to cross-check DOM
+                run_detail = httpx.get(f"{base_url}/api/export-runs/{run_id}", timeout=5.0).json()
+
+                # Visit history page
+                page.goto(f"{base_url}/exports/{template_id}/history")
+
+                row = page.locator("tr[data-run-id]").first
+                expect(row.locator("[data-run-status]")).to_contain_text("completed")
+                expect(row.locator("[data-run-copied]")).not_to_have_text("")
+                expect(row.locator("[data-run-skipped]")).not_to_have_text("")
+
+                # AC-6: deliveries detail list
+                deliveries_section = page.locator(f"tr[data-run-deliveries='{run_id}']")
+                expect(deliveries_section).to_be_visible()
+
+                deliveries = run_detail["deliveries"]
+                assert len(deliveries) > 0
+                for d in deliveries:
+                    delivery_row = deliveries_section.locator(f"tr[data-delivery-id='{d['delivery_id']}']")
+                    expect(delivery_row).to_be_visible()
+                    expect(delivery_row.locator("[data-delivery-target-path]")).to_contain_text(d["target_path"])
+                    expect(delivery_row.locator("[data-delivery-result]")).to_contain_text(d["result"])
+                    expect(delivery_row.locator("[data-delivery-mov-result]")).to_contain_text(d["mov_result"])
+
+                browser.close()
+        finally:
+            _terminate_process(process)

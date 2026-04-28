@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="detail-head">
+    <div>
+      <a class="back-link" href="/exports">返回模板列表</a>
+      <h1>导出历史：{{ template.name }}</h1>
+      <p>查看每次导出的执行结果与明细。</p>
+    </div>
+  </div>
+
+  <section class="panel detail-shell">
+    {% if not runs %}
+      <p class="empty-state">暂无导出记录。</p>
+    {% else %}
+      <table style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr style="text-align:left;border-bottom:1px solid var(--panel-border);">
+            <th style="padding:12px 8px;">执行时间</th>
+            <th style="padding:12px 8px;">状态</th>
+            <th style="padding:12px 8px;">已复制</th>
+            <th style="padding:12px 8px;">已跳过</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for run in runs %}
+            <tr data-run-id="{{ run.run_id }}" style="border-bottom:1px solid rgba(74,52,35,0.08);">
+              <td style="padding:12px 8px;" data-run-started-at>{{ run.started_at }}</td>
+              <td style="padding:12px 8px;" data-run-status>{{ run.status }}</td>
+              <td style="padding:12px 8px;" data-run-copied>{{ run.copied_count }}</td>
+              <td style="padding:12px 8px;" data-run-skipped>{{ run.skipped_count }}</td>
+            </tr>
+            {% if run.deliveries %}
+              <tr data-run-deliveries="{{ run.run_id }}">
+                <td colspan="4" style="padding:0 8px 16px;">
+                  <table style="width:100%;border-collapse:collapse;margin-top:8px;">
+                    <thead>
+                      <tr style="text-align:left;border-bottom:1px solid rgba(74,52,35,0.06);">
+                        <th style="padding:8px;">目标路径</th>
+                        <th style="padding:8px;">静态图结果</th>
+                        <th style="padding:8px;">MOV 结果</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for d in run.deliveries %}
+                        <tr data-delivery-id="{{ d.delivery_id }}" style="border-bottom:1px solid rgba(74,52,35,0.04);">
+                          <td style="padding:8px;" data-delivery-target-path>{{ d.target_path }}</td>
+                          <td style="padding:8px;" data-delivery-result>{{ d.result }}</td>
+                          <td style="padding:8px;" data-delivery-mov-result>{{ d.mov_result }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </td>
+              </tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </section>
+{% endblock %}

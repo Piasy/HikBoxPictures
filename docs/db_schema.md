@@ -797,5 +797,7 @@ CREATE INDEX idx_face_embeddings_face_id ON face_embeddings(face_observation_id,
 
 以下内容尚未在当前实现中落地，因此不属于本文档承诺范围：
 
-- 导出预览、执行与导出运行锁定（Slice G / Feature Slice 2 与 Feature Slice 3）的具体运行时语义与 API 契约
+- 导出运行期间的人物写操作全局锁定（Slice G / Feature Slice 3）的具体运行时语义与 API 契约
 - 任何 `schema_version > 1` 的 migration 规则
+
+备注：Slice G / Feature Slice 2（导出模板预览、执行与导出历史）已在当前实现中落地，其运行时语义与 API 契约见上文 `export_run`、`export_delivery` 以及对应 Public Interface 描述。

@@ -14,10 +14,15 @@ from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
+from hikbox_pictures.product.export_templates import compute_export_preview
 from hikbox_pictures.product.export_templates import create_export_template
+from hikbox_pictures.product.export_templates import execute_export
 from hikbox_pictures.product.export_templates import ExportTemplateError
 from hikbox_pictures.product.export_templates import ExportTemplateValidationError
 from hikbox_pictures.product.export_templates import load_eligible_persons_for_template
+from hikbox_pictures.product.export_templates import load_export_run_detail
+from hikbox_pictures.product.export_templates import load_export_runs_for_template
+from hikbox_pictures.product.export_templates import load_export_template_detail
 from hikbox_pictures.product.export_templates import load_export_templates_list
 from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import load_assignment_context_path
@@ -467,6 +472,208 @@ def create_people_gallery_app(
         except ExportTemplateError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"template_id": result.template_id}
+
+    @app.get("/exports/{template_id}/preview", response_class=HTMLResponse)
+    def export_template_preview_page(request: Request, template_id: str) -> HTMLResponse:
+        try:
+            preview = compute_export_preview(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="export_template_preview.html",
+                context={
+                    "page_title": "预览导出模板",
+                    "error_message": str(exc),
+                },
+                status_code=400,
+            )
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        template = load_export_template_detail(workspace_context, template_id=template_id)
+        return templates.TemplateResponse(
+            request=request,
+            name="export_template_preview.html",
+            context={
+                "page_title": f"预览：{template.name}",
+                "template": template,
+                "preview": preview,
+            },
+        )
+
+    @app.get("/api/export-templates/{template_id}/preview")
+    def api_export_template_preview(template_id: str) -> dict[str, object]:
+        try:
+            preview = compute_export_preview(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {
+            "template_id": template_id,
+            "total_count": preview.total_count,
+            "only_count": preview.only_count,
+            "group_count": preview.group_count,
+            "months": [
+                {
+                    "month": m.month,
+                    "only": [
+                        {
+                            "asset_id": a.asset_id,
+                            "file_name": a.file_name,
+                            "context_url": a.context_url,
+                            "representative_person_id": a.representative_person_id,
+                        }
+                        for a in m.only_assets
+                    ],
+                    "group": [
+                        {
+                            "asset_id": a.asset_id,
+                            "file_name": a.file_name,
+                            "context_url": a.context_url,
+                            "representative_person_id": a.representative_person_id,
+                        }
+                        for a in m.group_assets
+                    ],
+                }
+                for m in preview.month_buckets
+            ],
+        }
+
+    @app.get("/exports/{template_id}/execute", response_class=HTMLResponse)
+    def export_template_execute_page(request: Request, template_id: str) -> HTMLResponse:
+        try:
+            template = load_export_template_detail(workspace_context, template_id=template_id)
+            preview = compute_export_preview(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="export_template_execute.html",
+                context={
+                    "page_title": "执行导出",
+                    "error_message": str(exc),
+                },
+                status_code=400,
+            )
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return templates.TemplateResponse(
+            request=request,
+            name="export_template_execute.html",
+            context={
+                "page_title": f"执行导出：{template.name}",
+                "template": template,
+                "preview": preview,
+            },
+        )
+
+    @app.post("/api/export-templates/{template_id}/execute")
+    def api_export_template_execute(template_id: str) -> dict[str, object]:
+        try:
+            run_id = execute_export(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            if exc.code == "export_in_progress":
+                raise HTTPException(status_code=423, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"导出执行失败：{exc}") from exc
+        return {"run_id": run_id}
+
+    @app.get("/exports/{template_id}/history", response_class=HTMLResponse)
+    def export_template_history_page(request: Request, template_id: str) -> HTMLResponse:
+        try:
+            template = load_export_template_detail(workspace_context, template_id=template_id)
+            runs = load_export_runs_for_template(workspace_context, template_id=template_id)
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        runs_with_deliveries = []
+        for run in runs:
+            try:
+                detail = load_export_run_detail(workspace_context, run_id=run.run_id)
+                deliveries = detail.deliveries
+            except ExportTemplateValidationError:
+                deliveries = []
+            runs_with_deliveries.append(
+                {
+                    "run_id": run.run_id,
+                    "status": run.status,
+                    "started_at": run.started_at,
+                    "copied_count": run.copied_count,
+                    "skipped_count": run.skipped_count,
+                    "deliveries": [
+                        {
+                            "delivery_id": d.delivery_id,
+                            "target_path": d.target_path,
+                            "result": d.result,
+                            "mov_result": d.mov_result,
+                        }
+                        for d in deliveries
+                    ],
+                }
+            )
+
+        return templates.TemplateResponse(
+            request=request,
+            name="export_template_history.html",
+            context={
+                "page_title": f"导出历史：{template.name}",
+                "template": template,
+                "runs": runs_with_deliveries,
+            },
+        )
+
+    @app.get("/api/export-templates/{template_id}/runs")
+    def api_export_template_runs(template_id: str) -> dict[str, object]:
+        try:
+            runs = load_export_runs_for_template(workspace_context, template_id=template_id)
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {
+            "runs": [
+                {
+                    "run_id": r.run_id,
+                    "template_id": r.template_id,
+                    "status": r.status,
+                    "started_at": r.started_at,
+                    "completed_at": r.completed_at,
+                    "copied_count": r.copied_count,
+                    "skipped_count": r.skipped_count,
+                }
+                for r in runs
+            ]
+        }
+
+    @app.get("/api/export-runs/{run_id}")
+    def api_export_run_detail(run_id: int) -> dict[str, object]:
+        try:
+            detail = load_export_run_detail(workspace_context, run_id=run_id)
+        except ExportTemplateValidationError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {
+            "run_id": detail.run_id,
+            "template_id": detail.template_id,
+            "template_name": detail.template_name,
+            "status": detail.status,
+            "started_at": detail.started_at,
+            "completed_at": detail.completed_at,
+            "copied_count": detail.copied_count,
+            "skipped_count": detail.skipped_count,
+            "deliveries": [
+                {
+                    "delivery_id": d.delivery_id,
+                    "asset_id": d.asset_id,
+                    "target_path": d.target_path,
+                    "result": d.result,
+                    "mov_result": d.mov_result,
+                }
+                for d in detail.deliveries
+            ],
+        }
 
     return app
 

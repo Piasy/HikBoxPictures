@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="detail-head">
+    <div>
+      <a class="back-link" href="/exports">返回模板列表</a>
+      {% if error_message %}
+        <h1>预览导出模板</h1>
+        <p class="feedback-banner is-error" role="alert">{{ error_message }}</p>
+      {% else %}
+        <h1>预览：{{ template.name }}</h1>
+        <p>预计导出 <strong data-preview-total>{{ preview.total_count }}</strong> 个文件（<span data-preview-only>{{ preview.only_count }}</span> 个 only，<span data-preview-group>{{ preview.group_count }}</span> 个 group）。</p>
+      {% endif %}
+    </div>
+    {% if not error_message %}
+      <a class="back-link" href="/exports/{{ template.template_id }}/execute">执行导出</a>
+    {% endif %}
+  </div>
+
+  {% if not error_message %}
+    {% for month_bucket in preview.month_buckets %}
+      <section class="panel section-block" data-month="{{ month_bucket.month }}">
+        <div class="section-head">
+          <h2>{{ month_bucket.month }}</h2>
+        </div>
+
+        {% if month_bucket.only_assets %}
+          <h3 style="font-size:16px;margin:18px 0 10px;color:var(--text-muted);">Only</h3>
+          <div class="sample-grid" data-preview-grid data-bucket="only" data-month="{{ month_bucket.month }}">
+            {% for asset in month_bucket.only_assets %}
+              <article class="sample-card" data-asset-id="{{ asset.asset_id }}" data-person-id="{{ asset.representative_person_id }}">
+                {% if asset.context_url %}
+                  <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
+                {% endif %}
+                <div class="sample-card-body">
+                  <div class="sample-card-meta">
+                    <span data-asset-file-name>{{ asset.file_name }}</span>
+                  </div>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% endif %}
+
+        {% if month_bucket.group_assets %}
+          <h3 style="font-size:16px;margin:28px 0 10px;color:var(--text-muted);">Group</h3>
+          <div class="sample-grid" data-preview-grid data-bucket="group" data-month="{{ month_bucket.month }}">
+            {% for asset in month_bucket.group_assets %}
+              <article class="sample-card" data-asset-id="{{ asset.asset_id }}" data-person-id="{{ asset.representative_person_id }}">
+                {% if asset.context_url %}
+                  <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
+                {% endif %}
+                <div class="sample-card-body">
+                  <div class="sample-card-meta">
+                    <span data-asset-file-name>{{ asset.file_name }}</span>
+                  </div>
+                </div>
+              </article>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </section>
+    {% endfor %}
+  {% endif %}
+{% endblock %}

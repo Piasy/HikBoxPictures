@@ -35,6 +35,7 @@
             <th style="padding:12px 8px;">已选人物</th>
             <th style="padding:12px 8px;">输出目录</th>
             <th style="padding:12px 8px;">状态</th>
+            <th style="padding:12px 8px;">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -45,6 +46,11 @@
               <td style="padding:12px 8px;" data-template-person-names>{{ template.person_names | join(", ") }}</td>
               <td style="padding:12px 8px;" data-template-output-root>{{ template.output_root }}</td>
               <td style="padding:12px 8px;" data-template-status>{{ template.status }}</td>
+              <td style="padding:12px 8px;">
+                <a href="/exports/{{ template.template_id }}/preview">预览</a>
+                <a href="/exports/{{ template.template_id }}/execute">执行</a>
+                <a href="/exports/{{ template.template_id }}/history">历史</a>
+              </td>
             </tr>
           {% endfor %}
         </tbody>
