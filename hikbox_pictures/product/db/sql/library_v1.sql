@@ -207,3 +207,46 @@ CREATE TABLE person_merge_operation_assignments (
 
 CREATE INDEX idx_person_merge_operation_assignments_merge_id
   ON person_merge_operation_assignments(merge_operation_id, person_role, assignment_id);
+
+CREATE TABLE export_template (
+  template_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  output_root TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'invalid')),
+  created_at TEXT NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE
+);
+
+CREATE INDEX idx_export_template_status ON export_template(status, created_at);
+
+CREATE TABLE export_template_person (
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  person_id TEXT NOT NULL REFERENCES person(id),
+  PRIMARY KEY (template_id, person_id)
+);
+
+CREATE INDEX idx_export_template_person_person_id ON export_template_person(person_id, template_id);
+
+CREATE TABLE export_run (
+  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  copied_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_export_run_template_id ON export_run(template_id, run_id);
+CREATE INDEX idx_export_run_status ON export_run(status);
+
+CREATE TABLE export_delivery (
+  delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES export_run(run_id),
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  target_path TEXT NOT NULL,
+  result TEXT NOT NULL CHECK (result IN ('copied', 'skipped_exists')),
+  mov_result TEXT NOT NULL CHECK (mov_result IN ('copied', 'skipped_missing', 'not_applicable'))
+);
+
+CREATE INDEX idx_export_delivery_run_id ON export_delivery(run_id, asset_id);

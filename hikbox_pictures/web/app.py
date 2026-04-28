@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from urllib.parse import parse_qs
+from urllib.parse import urlencode
 
 from fastapi import FastAPI
 from fastapi import HTTPException
@@ -13,6 +14,11 @@ from fastapi.responses import RedirectResponse
 from fastapi.responses import Response
 from fastapi.templating import Jinja2Templates
 
+from hikbox_pictures.product.export_templates import create_export_template
+from hikbox_pictures.product.export_templates import ExportTemplateError
+from hikbox_pictures.product.export_templates import ExportTemplateValidationError
+from hikbox_pictures.product.export_templates import load_eligible_persons_for_template
+from hikbox_pictures.product.export_templates import load_export_templates_list
 from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import load_assignment_context_path
 from hikbox_pictures.product.people_gallery import load_people_home_page
@@ -349,6 +355,118 @@ def create_people_gallery_app(
         if context_path is None or not context_path.is_file():
             raise HTTPException(status_code=404, detail="未找到样本图片。")
         return FileResponse(context_path)
+
+    @app.get("/exports", response_class=HTMLResponse)
+    def exports_list(request: Request) -> HTMLResponse:
+        try:
+            template_list = load_export_templates_list(workspace_context)
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return templates.TemplateResponse(
+            request=request,
+            name="exports_list.html",
+            context={
+                "page_title": "导出模板",
+                "templates": template_list,
+            },
+        )
+
+    @app.get("/exports/new", response_class=HTMLResponse)
+    def exports_new(request: Request) -> HTMLResponse:
+        try:
+            eligible_persons = load_eligible_persons_for_template(workspace_context)
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        form_feedback = request.query_params.get("form_feedback")
+        form_feedback_level = request.query_params.get("form_feedback_level", "error")
+        return templates.TemplateResponse(
+            request=request,
+            name="export_template_new.html",
+            context={
+                "page_title": "新建导出模板",
+                "eligible_persons": eligible_persons,
+                "form_feedback": {"message": form_feedback, "level": form_feedback_level} if form_feedback else None,
+                "form_name_value": request.query_params.get("form_name_value", ""),
+                "form_output_root_value": request.query_params.get("form_output_root_value", ""),
+                "form_person_ids": request.query_params.getlist("form_person_id"),
+            },
+        )
+
+    @app.post("/exports/new")
+    async def exports_new_post(request: Request) -> Response:
+        body = await request.body()
+        form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        name = form_data.get("name", [""])[0]
+        output_root = form_data.get("output_root", [""])[0]
+        person_ids = form_data.get("person_id", [])
+        try:
+            create_export_template(
+                workspace_context,
+                name=name,
+                person_ids=[str(pid) for pid in person_ids],
+                output_root=output_root,
+            )
+        except ExportTemplateValidationError as exc:
+            params = urlencode({
+                "form_feedback": str(exc),
+                "form_feedback_level": "error",
+                "form_name_value": name,
+                "form_output_root_value": output_root,
+                "form_person_id": person_ids,
+            }, doseq=True)
+            return RedirectResponse(url=f"/exports/new?{params}", status_code=303)
+        except ExportTemplateError as exc:
+            params = urlencode({
+                "form_feedback": str(exc),
+                "form_feedback_level": "error",
+                "form_name_value": name,
+                "form_output_root_value": output_root,
+                "form_person_id": person_ids,
+            }, doseq=True)
+            return RedirectResponse(url=f"/exports/new?{params}", status_code=303)
+        return RedirectResponse(url="/exports", status_code=303)
+
+    @app.get("/api/export-templates")
+    def api_export_templates_list() -> dict[str, object]:
+        try:
+            templates = load_export_templates_list(workspace_context)
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {
+            "templates": [
+                {
+                    "template_id": t.template_id,
+                    "name": t.name,
+                    "output_root": t.output_root,
+                    "status": t.status,
+                    "created_at": t.created_at,
+                    "person_count": t.person_count,
+                    "person_ids": t.person_ids,
+                    "person_names": t.person_names,
+                }
+                for t in templates
+            ]
+        }
+
+    @app.post("/api/export-templates")
+    async def api_export_templates_create(request: Request) -> Response:
+        body = await request.body()
+        form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        name = form_data.get("name", [""])[0]
+        output_root = form_data.get("output_root", [""])[0]
+        person_ids = form_data.get("person_id", [])
+        try:
+            result = create_export_template(
+                workspace_context,
+                name=name,
+                person_ids=[str(pid) for pid in person_ids],
+                output_root=output_root,
+            )
+        except ExportTemplateValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {"template_id": result.template_id}
 
     return app
 
