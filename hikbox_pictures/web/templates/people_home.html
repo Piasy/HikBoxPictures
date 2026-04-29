@@ -36,7 +36,7 @@
           <button
             type="submit"
             data-undo-submit
-            {% if not people_page.can_undo_latest_merge %}
+            {% if not people_page.can_undo_latest_merge or people_page.is_export_running %}
               disabled
             {% endif %}
           >
@@ -50,7 +50,7 @@
         <p>从首页当前可见人物中勾选两个对象后提交合并。winner 由系统根据命名状态、样本数和 person_id 自动决定。</p>
         <div>
           <div data-merge-selection></div>
-          <button type="submit">合并所选人物</button>
+          <button type="submit" {% if people_page.is_export_running %}disabled{% endif %}>合并所选人物</button>
         </div>
       </section>
 
@@ -79,6 +79,7 @@
                     value="{{ person.person_id }}"
                     data-merge-checkbox
                     data-merge-person-id="{{ person.person_id }}"
+                    {% if people_page.is_export_running %}disabled{% endif %}
                   >
                   <span>选择合并</span>
                 </label>
@@ -115,6 +116,7 @@
                     value="{{ person.person_id }}"
                     data-merge-checkbox
                     data-merge-person-id="{{ person.person_id }}"
+                    {% if people_page.is_export_running %}disabled{% endif %}
                   >
                   <span>选择合并</span>
                 </label>

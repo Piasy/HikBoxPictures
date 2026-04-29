@@ -5,6 +5,8 @@ import socket
 
 import uvicorn
 
+from hikbox_pictures.product.export_templates import cleanup_stale_export_runs
+from hikbox_pictures.product.export_templates import ExportTemplateError
 from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import ensure_webui_schema_ready
 from hikbox_pictures.product.sources import load_workspace_context
@@ -27,7 +29,8 @@ def serve_workspace(
         _ensure_valid_port(port)
         workspace_context = load_workspace_context(workspace)
         ensure_webui_schema_ready(workspace_context)
-    except PeopleGalleryError as exc:
+        cleanup_stale_export_runs(workspace_context)
+    except (PeopleGalleryError, ExportTemplateError) as exc:
         raise ServeStartError(str(exc)) from exc
 
     try:

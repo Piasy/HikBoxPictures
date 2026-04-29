@@ -154,6 +154,17 @@ def create_people_gallery_app(
                 workspace_context,
                 person_ids=[str(person_id) for person_id in person_ids],
             )
+        except ExportTemplateValidationError as exc:
+            if exc.code == "export_in_progress":
+                try:
+                    return _render_people_home(
+                        request,
+                        status_code=423,
+                        home_feedback={"level": "error", "message": str(exc)},
+                    )
+                except PeopleGalleryError as page_exc:
+                    raise HTTPException(status_code=500, detail=str(page_exc)) from page_exc
+            raise
         except PersonMergeValidationError as exc:
             try:
                 return _render_people_home(
@@ -187,6 +198,17 @@ def create_people_gallery_app(
     def people_merge_undo_submit(request: Request) -> Response:
         try:
             submit_people_merge_undo(workspace_context)
+        except ExportTemplateValidationError as exc:
+            if exc.code == "export_in_progress":
+                try:
+                    return _render_people_home(
+                        request,
+                        status_code=423,
+                        home_feedback={"level": "error", "message": str(exc)},
+                    )
+                except PeopleGalleryError as page_exc:
+                    raise HTTPException(status_code=500, detail=str(page_exc)) from page_exc
+            raise
         except PersonMergeUndoValidationError as exc:
             try:
                 return _render_people_home(
@@ -268,6 +290,16 @@ def create_people_gallery_app(
                 person_id=person_id,
                 display_name=display_name,
             )
+        except ExportTemplateValidationError as exc:
+            if exc.code == "export_in_progress":
+                return _render_person_detail(
+                    request,
+                    person_id=person_id,
+                    status_code=423,
+                    name_feedback={"level": "error", "message": str(exc)},
+                    name_form_value=display_name,
+                )
+            raise
         except PersonNameValidationError as exc:
             if exc.code == "person_not_found":
                 return _render_person_detail(request, person_id=person_id, status_code=404)
@@ -305,6 +337,15 @@ def create_people_gallery_app(
                 person_id=person_id,
                 assignment_ids=[str(assignment_id) for assignment_id in assignment_ids],
             )
+        except ExportTemplateValidationError as exc:
+            if exc.code == "export_in_progress":
+                return _render_person_detail(
+                    request,
+                    person_id=person_id,
+                    status_code=423,
+                    exclusion_feedback={"level": "error", "message": str(exc)},
+                )
+            raise
         except PersonExclusionValidationError as exc:
             if exc.code == "person_not_found":
                 return _render_person_detail(

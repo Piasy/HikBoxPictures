@@ -8,8 +8,11 @@ import sqlite3
 import time
 import uuid
 
+from hikbox_pictures.product.export_templates import assert_no_running_export
+from hikbox_pictures.product.export_templates import ExportTemplateValidationError
 from hikbox_pictures.product.export_templates import invalidate_templates_for_person
 from hikbox_pictures.product.export_templates import invalidate_templates_for_persons_if_inactive_or_anonymous
+from hikbox_pictures.product.export_templates import is_export_running
 from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
 
@@ -145,6 +148,7 @@ class PeopleHomePage:
     named_people: list[PersonCard]
     anonymous_people: list[PersonCard]
     can_undo_latest_merge: bool = False
+    is_export_running: bool = False
 
     @property
     def has_people(self) -> bool:
@@ -171,6 +175,7 @@ class PersonDetailPage:
     total_pages: int
     page_size: int
     samples: list[PersonSample]
+    is_export_running: bool = False
 
     @property
     def page_numbers(self) -> list[int]:
@@ -341,6 +346,7 @@ def load_people_home_page(workspace_context: WorkspaceContext) -> PeopleHomePage
         named_people=named_people,
         anonymous_people=anonymous_people,
         can_undo_latest_merge=can_undo_latest_merge,
+        is_export_running=is_export_running(workspace_context),
     )
 
 
@@ -436,6 +442,7 @@ def load_person_detail_page(
             )
             for row in sample_rows
         ],
+        is_export_running=is_export_running(workspace_context),
     )
 
 
@@ -480,6 +487,7 @@ def submit_person_name(
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("BEGIN IMMEDIATE")
+        assert_no_running_export(workspace_context, connection=connection)
         person_row = connection.execute(
             """
             SELECT
@@ -590,6 +598,7 @@ def submit_people_merge(
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("BEGIN IMMEDIATE")
+        assert_no_running_export(workspace_context, connection=connection)
         normalized_person_ids = [person_id.strip() for person_id in person_ids if person_id.strip()]
         if len(normalized_person_ids) != 2:
             raise PersonMergeValidationError("必须恰好选择 2 个人物。", code="invalid_count")
@@ -743,6 +752,9 @@ def submit_people_merge(
     except sqlite3.Error as exc:
         connection.rollback()
         raise PeopleGalleryError("人物合并失败，请稍后重试。") from exc
+    except ExportTemplateValidationError:
+        connection.rollback()
+        raise
     except RuntimeError as exc:
         connection.rollback()
         raise PeopleGalleryError("人物合并失败，请稍后重试。") from exc
@@ -765,6 +777,7 @@ def submit_person_exclusions(
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("BEGIN IMMEDIATE")
+        assert_no_running_export(workspace_context, connection=connection)
         person_row = connection.execute(
             """
             SELECT
@@ -942,6 +955,9 @@ def submit_person_exclusions(
     except sqlite3.Error as exc:
         connection.rollback()
         raise PeopleGalleryError("批量排除失败，请稍后重试。") from exc
+    except ExportTemplateValidationError:
+        connection.rollback()
+        raise
     except RuntimeError as exc:
         connection.rollback()
         raise PeopleGalleryError("批量排除失败，请稍后重试。") from exc
@@ -963,6 +979,7 @@ def submit_people_merge_undo(
     _record_undo_trace("handler_enter", request_id=trace_request_id)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        assert_no_running_export(workspace_context, connection=connection)
         _record_undo_trace("transaction_acquired", request_id=trace_request_id)
         merge_operation = _load_latest_merge_operation(connection)
         if merge_operation is None:
@@ -1120,6 +1137,9 @@ def submit_people_merge_undo(
         connection.rollback()
         _record_undo_trace("request_failed", request_id=trace_request_id)
         raise PeopleGalleryError("撤销最近一次合并失败，请稍后重试。") from exc
+    except ExportTemplateValidationError:
+        connection.rollback()
+        raise
     except RuntimeError as exc:
         connection.rollback()
         _record_undo_trace("request_failed", request_id=trace_request_id)

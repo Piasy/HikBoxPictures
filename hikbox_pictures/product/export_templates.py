@@ -124,6 +124,58 @@ class ExportRunDetail:
     deliveries: list[ExportDeliveryItem]
 
 
+def is_export_running(
+    workspace_context: WorkspaceContext,
+    connection: sqlite3.Connection | None = None,
+) -> bool:
+    if connection is not None:
+        row = connection.execute(
+            "SELECT 1 FROM export_run WHERE status = 'running' LIMIT 1"
+        ).fetchone()
+        return row is not None
+    conn = sqlite3.connect(workspace_context.library_db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM export_run WHERE status = 'running' LIMIT 1"
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error as exc:
+        raise ExportTemplateError("导出状态读取失败。") from exc
+    finally:
+        conn.close()
+
+
+def assert_no_running_export(
+    workspace_context: WorkspaceContext,
+    connection: sqlite3.Connection | None = None,
+) -> None:
+    if is_export_running(workspace_context, connection=connection):
+        raise ExportTemplateValidationError(
+            "导出进行中，暂不可修改人物库。", code="export_in_progress"
+        )
+
+
+def cleanup_stale_export_runs(
+    workspace_context: WorkspaceContext,
+) -> None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        connection.execute(
+            """
+            UPDATE export_run
+            SET status = 'failed'
+            WHERE status = 'running'
+            """
+        )
+        connection.commit()
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise ExportTemplateError("残留导出记录清理失败。") from exc
+    finally:
+        connection.close()
+
+
 def load_eligible_persons_for_template(
     workspace_context: WorkspaceContext,
 ) -> list[EligiblePerson]:
@@ -651,6 +703,8 @@ def execute_export(
     connection = sqlite3.connect(workspace_context.library_db_path)
     connection.row_factory = sqlite3.Row
     try:
+        # 设置 busy_timeout 以允许并发请求在事务锁上等待，避免立即失败返回 500
+        connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("BEGIN IMMEDIATE")
 
         template_row = connection.execute(
@@ -670,25 +724,22 @@ def execute_export(
                 "模板已失效，无法执行导出。", code="template_invalid"
             )
 
-        running = connection.execute(
-            "SELECT 1 FROM export_run WHERE status = 'running' LIMIT 1"
-        ).fetchone()
-        if running is not None:
+        output_root = Path(str(template_row["output_root"]))
+        now = utc_now_text()
+
+        cursor = connection.execute(
+            """
+            INSERT INTO export_run (template_id, status, started_at)
+            SELECT ?, 'running', ?
+            WHERE NOT EXISTS (SELECT 1 FROM export_run WHERE status = 'running')
+            """,
+            (template_id, now),
+        )
+        if cursor.rowcount == 0:
             connection.rollback()
             raise ExportTemplateValidationError(
                 "已有导出正在进行中。", code="export_in_progress"
             )
-
-        output_root = Path(str(template_row["output_root"]))
-        now = utc_now_text()
-
-        connection.execute(
-            """
-            INSERT INTO export_run (template_id, status, started_at)
-            VALUES (?, 'running', ?)
-            """,
-            (template_id, now),
-        )
         run_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
         connection.commit()
     except ExportTemplateValidationError:

@@ -23,8 +23,9 @@
           value="{{ name_form_value }}"
           maxlength="120"
           autocomplete="off"
+          {% if detail_page.is_export_running %}disabled{% endif %}
         >
-        <button type="submit">保存名称</button>
+        <button type="submit" {% if detail_page.is_export_running %}disabled{% endif %}>保存名称</button>
       </div>
     </form>
 
@@ -43,7 +44,7 @@
 
     <form class="exclude-form" method="post" action="/people/{{ detail_page.person_id }}/exclude" data-exclude-form>
       <div class="name-form-row">
-        <button type="submit">批量排除所选样本</button>
+        <button type="submit" {% if detail_page.is_export_running %}disabled{% endif %}>批量排除所选样本</button>
       </div>
 
       {% if exclusion_feedback %}
@@ -73,6 +74,7 @@
                 name="assignment_id"
                 value="{{ sample.assignment_id }}"
                 data-exclude-checkbox
+                {% if detail_page.is_export_running %}disabled{% endif %}
               >
               选择排除
             </label>
