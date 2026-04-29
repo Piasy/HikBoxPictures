@@ -123,6 +123,7 @@
   - 每个子区块展示候选 asset 的 context 样本（即 Slice B 生成的 480p 整图加人脸框样本，非整图缩略图），桌面一行 6 个；
   - 每个候选 asset 的样例 context 显示该 asset 中模板所选人物里 `person_id` 最小者的 context；
   - 预览页还展示预计导出文件总数（仅统计静态图，Live Photo 配对 MOV 不计入总数）、only 数量、group 数量。
+  - Live Photo 样本（`assets.live_photo_mov_path IS NOT NULL`）在预览页样本卡上显示 `Live` 标记，与 Slice D 人物详情页的 Live 标记一致。
 - **执行导出**：
   - 执行前再次校验模板有效性（所选人物全部 active 且有 display_name）；若模板已 invalid，执行按钮禁用或点击后返回可读错误。
   - 执行时按预览的同样分桶规则复制文件到 `output_root/only/YYYY-MM/` 和 `output_root/group/YYYY-MM/`；目标文件名使用 asset 原始照片文件名（如 `IMG_0001.JPG`）。
@@ -133,6 +134,7 @@
   - 复制文件时保留原始文件的完整 EXIF 元数据；同时保留原始文件的文件系统时间戳（创建时间/修改时间）。
   - 执行期间创建导出运行记录，状态为 `running`；完成后更新为 `completed`；失败时更新为 `failed`。
   - 执行完成后，真实文件树、DB 账本和运行记录可验证。
+  - 浏览器表单提交执行后，303 重定向到导出历史页（`/exports/{template_id}/history`），用户可直接查看运行状态；手动刷新历史页可看到最新状态（页面服务端渲染，每次请求实时查询 DB）。
 - **导出历史页**展示每次运行记录：
   - 模板名称、执行时间、状态（running/completed/failed）、实际导出文件数（仅统计静态图，MOV 不计入）、跳过文件数（仅统计静态图）；
   - 明细列表包含每个被处理的 asset、目标路径、结果（`copied` 或 `skipped_exists`）、MOV 复制结果（`copied`/`skipped_missing`/`not_applicable`）。
@@ -140,7 +142,8 @@
 ### Public Interface
 
 - Web 页面：`/exports/{template_id}/preview`（预览）、`/exports/{template_id}/execute`（执行确认页）、`/exports/{template_id}/history`（历史）。
-- API：`GET /api/export-templates/{template_id}/preview`（预览数据）、`POST /api/export-templates/{template_id}/execute`（执行）、`GET /api/export-templates/{template_id}/runs`（该模板的历史运行列表）、`GET /api/export-runs/{run_id}`（单条运行详情）。
+- API：`GET /api/export-templates/{template_id}/preview`（预览数据）、`POST /api/export-templates/{template_id}/execute`（程序化执行，返回 JSON `{"run_id": ...}`）、`GET /api/export-templates/{template_id}/runs`（该模板的历史运行列表）、`GET /api/export-runs/{run_id}`（单条运行详情）。
+- 页面表单：`POST /exports/{template_id}/execute`（浏览器表单提交入口，执行后 303 重定向到 `/exports/{template_id}/history`；失败时 303 重定向回 `/exports/{template_id}/execute?error=...`）。
 - DB：`export_run`、`export_delivery`。
 - 文件：`output_root/only/YYYY-MM/`、`output_root/group/YYYY-MM/`。
 

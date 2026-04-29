@@ -16,7 +16,7 @@
 
   {% if not error_message %}
     <section class="panel detail-shell">
-      <form method="post" action="/api/export-templates/{{ template.template_id }}/execute" data-export-execute-form>
+      <form method="post" action="/exports/{{ template.template_id }}/execute" data-export-execute-form>
         <div style="margin-bottom:16px;">
           <p style="margin:0 0 8px;color:var(--text-muted);">导出摘要</p>
           <ul style="margin:0;padding-left:20px;color:var(--text-muted);">

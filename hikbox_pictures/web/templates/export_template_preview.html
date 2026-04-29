@@ -35,6 +35,9 @@
                 <div class="sample-card-body">
                   <div class="sample-card-meta">
                     <span data-asset-file-name>{{ asset.file_name }}</span>
+                    {% if asset.is_live %}
+                      <span class="live-badge" data-live-badge>Live</span>
+                    {% endif %}
                   </div>
                 </div>
               </article>
@@ -53,6 +56,9 @@
                 <div class="sample-card-body">
                   <div class="sample-card-meta">
                     <span data-asset-file-name>{{ asset.file_name }}</span>
+                    {% if asset.is_live %}
+                      <span class="live-badge" data-live-badge>Live</span>
+                    {% endif %}
                   </div>
                 </div>
               </article>

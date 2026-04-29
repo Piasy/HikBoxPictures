@@ -74,6 +74,7 @@ class PreviewAsset:
     capture_month: str
     context_url: str
     representative_person_id: str
+    is_live: bool
 
 
 @dataclass(frozen=True)
@@ -566,6 +567,7 @@ def compute_export_preview(
                 "asset_id": asset_id,
                 "file_name": str(row["file_name"]),
                 "capture_month": str(row["capture_month"]) if row["capture_month"] else "",
+                "live_photo_mov_path": row["live_photo_mov_path"],
                 "faces": [],
             }
         area = float(row["bbox_x2"] - row["bbox_x1"]) * float(row["bbox_y2"] - row["bbox_y1"])
@@ -616,6 +618,7 @@ def compute_export_preview(
             capture_month=asset["capture_month"],
             context_url=f"/images/assignments/{rep_assignment_id}/context" if rep_assignment_id else "",
             representative_person_id=rep_person_id,
+            is_live=bool(asset.get("live_photo_mov_path")),
         )
 
         month = asset["capture_month"] if asset["capture_month"] else "unknown-date"

@@ -564,6 +564,7 @@ def create_people_gallery_app(
                             "file_name": a.file_name,
                             "context_url": a.context_url,
                             "representative_person_id": a.representative_person_id,
+                            "is_live": a.is_live,
                         }
                         for a in m.only_assets
                     ],
@@ -573,6 +574,7 @@ def create_people_gallery_app(
                             "file_name": a.file_name,
                             "context_url": a.context_url,
                             "representative_person_id": a.representative_person_id,
+                            "is_live": a.is_live,
                         }
                         for a in m.group_assets
                     ],
@@ -598,6 +600,7 @@ def create_people_gallery_app(
             )
         except ExportTemplateError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        error_message = request.query_params.get("error")
         return templates.TemplateResponse(
             request=request,
             name="export_template_execute.html",
@@ -605,8 +608,24 @@ def create_people_gallery_app(
                 "page_title": f"执行导出：{template.name}",
                 "template": template,
                 "preview": preview,
+                "error_message": error_message,
             },
         )
+
+    @app.post("/exports/{template_id}/execute")
+    def export_template_execute_action(template_id: str) -> RedirectResponse:
+        try:
+            execute_export(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            params = urlencode({"error": str(exc)})
+            return RedirectResponse(
+                url=f"/exports/{template_id}/execute?{params}", status_code=303
+            )
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"导出执行失败：{exc}") from exc
+        return RedirectResponse(url=f"/exports/{template_id}/history", status_code=303)
 
     @app.post("/api/export-templates/{template_id}/execute")
     def api_export_template_execute(template_id: str) -> dict[str, object]:
