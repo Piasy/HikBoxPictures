@@ -72,7 +72,7 @@
 
 ### Slice G：导出模板与执行
 
-- [ ] Implementation status: Feature Slice 1 (创建与保存) Done; Feature Slice 2 (预览与执行) Done; Feature Slice 3 (运行中锁定) Not done
+- [x] Implementation status: Feature Slice 1 (创建与保存) Done; Feature Slice 2 (预览与执行) Done; Feature Slice 3 (运行中锁定) Done
 - Spec: `docs/LittlePower/specs/2026-04-24-immich-v6-people-gallery-productization-slice-g-export-template-spec.md`
 - Scope: 基于已命名人物创建导出模板，预览并导出同时包含指定人物的照片，按 only/group 与月份分桶，并定义可观察导出运行态及其对命名、合并、撤销合并、排除等人物写操作的锁定；公共入口是 WebUI/API 和导出文件树。
 - Acceptance summary: 模板预览与 manifest `expected_exports` 一致；执行后真实文件树、Live MOV 配对复制和导出账本可验证；导出运行中人物写操作被公共入口拒绝。

@@ -235,7 +235,7 @@
 
 ## Feature Slice 3: 导出运行中人物写操作锁定
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 
@@ -327,3 +327,10 @@
 
 - 所有验收标准通过自动化验证。
 - 没有核心需求是通过直接状态修改、硬编码数据、占位行为或 fake integration 满足的。
+
+### Accepted Concerns (from code-quality review, 2026-04-29)
+
+- **`cleanup_stale_export_runs` has no time range limit**: The function updates all `status='running'` records to `failed` without a time bound. Controller accepts this risk because the product is explicitly a local single-user desktop application (see cross-slice contract: "WebUI 仅面向本机单用户"); there is no multi-tenant scenario in the current scope, and stale runs can only originate from a single local process crash.
+- **`is_export_running` query logic duplication**: The same `SELECT 1 FROM export_run WHERE status = 'running'` query appears twice in `is_export_running` (connection and no-connection branches). Controller accepts this minor duplication because extracting it would not meaningfully reduce line count or improve readability in the current two-branch structure.
+- **`PRAGMA busy_timeout = 5000` lacks comment**: The 5-second timeout value in `execute_export` has no inline explanation. Controller accepts this because the value is a conventional SQLite busy-timeout default and the surrounding context makes its purpose clear.
+- **`sitecustomize.py` test hook injection**: The Playwright and service tests use a `sitecustomize.py` module to inject per-file copy hooks. Controller accepts this approach because it is a well-known Python mechanism for module-level monkey-patching in subprocess-based integration tests, and the tests properly isolate the injection via `PYTHONPATH` prepend to a temporary directory.
