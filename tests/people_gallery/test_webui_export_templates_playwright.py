@@ -559,6 +559,7 @@ class TestExportTemplateWebUI:
                     timeout=5.0,
                 )
                 template_id = response.json()["template_id"]
+                httpx.get(f"{base_url}/api/export-templates/{template_id}/preview", timeout=30.0)
                 execute_resp = httpx.post(f"{base_url}/api/export-templates/{template_id}/execute", timeout=30.0)
                 run_id = execute_resp.json()["run_id"]
 

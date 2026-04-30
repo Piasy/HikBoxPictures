@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 import shutil
 import sqlite3
@@ -534,6 +533,7 @@ def compute_export_preview(
               a.absolute_path,
               a.file_extension,
               a.live_photo_mov_path,
+              a.source_id,
               fo.id AS face_id,
               fo.bbox_x1,
               fo.bbox_y1,
@@ -551,6 +551,15 @@ def compute_export_preview(
             """,
             (template_id,),
         ).fetchall()
+
+        # 查询 source_label 映射
+        source_labels: dict[int, str] = {}
+        source_rows = connection.execute(
+            "SELECT id, label FROM library_sources"
+        ).fetchall()
+        for sr in source_rows:
+            source_labels[int(sr["id"])] = str(sr["label"])
+
     except ExportTemplateValidationError:
         raise
     except sqlite3.Error as exc:
@@ -568,6 +577,7 @@ def compute_export_preview(
                 "file_name": str(row["file_name"]),
                 "capture_month": str(row["capture_month"]) if row["capture_month"] else "",
                 "live_photo_mov_path": row["live_photo_mov_path"],
+                "source_id": int(row["source_id"]),
                 "faces": [],
             }
         area = float(row["bbox_x2"] - row["bbox_x1"]) * float(row["bbox_y2"] - row["bbox_y1"])
@@ -580,6 +590,8 @@ def compute_export_preview(
     months: dict[str, dict[str, list[PreviewAsset]]] = defaultdict(
         lambda: {"only": [], "group": []}
     )
+    # 按 (bucket, month) 收集命中的 asset，用于冲突消解
+    bucket_month_assets: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
     total_count = 0
     only_count = 0
     group_count = 0
@@ -623,6 +635,7 @@ def compute_export_preview(
 
         month = asset["capture_month"] if asset["capture_month"] else "unknown-date"
         months[month][bucket].append(asset_preview)
+        bucket_month_assets[(bucket, month)].append(asset)
         total_count += 1
         if bucket == "only":
             only_count += 1
@@ -640,6 +653,14 @@ def compute_export_preview(
             )
         )
 
+    # 写入 export_plan（幂等 upsert + 冲突消解）
+    _persist_export_plan(
+        workspace_context,
+        template_id=template_id,
+        bucket_month_assets=bucket_month_assets,
+        source_labels=source_labels,
+    )
+
     return PreviewResult(
         total_count=total_count,
         only_count=only_count,
@@ -648,54 +669,136 @@ def compute_export_preview(
     )
 
 
-def _resolve_asset_month(asset: dict[str, object]) -> str:
-    capture_month = str(asset.get("capture_month", "")).strip()
-    if capture_month:
-        return capture_month
-    absolute_path = str(asset.get("absolute_path", ""))
-    if absolute_path:
-        try:
-            mtime = Path(absolute_path).stat().st_mtime
-            return datetime.fromtimestamp(mtime).strftime("%Y-%m")
-        except (OSError, ValueError):
-            pass
-    return "unknown-date"
+def _persist_export_plan(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+    bucket_month_assets: dict[tuple[str, str], list[dict[str, object]]],
+    source_labels: dict[int, str],
+) -> None:
+    """将 preview 计算结果持久化到 export_plan 表。
 
+    幂等语义：已有记录（按 UNIQUE(template_id, asset_id)）不动，新命中 insert。
+    同名冲突消解：同模板、同 bucket、同 month、同 file_name 的不同 asset_id →
+    后续文件在 stem 后追加 __<source_label> 后缀。
+    """
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("BEGIN IMMEDIATE")
 
-def _copy_asset(
-    asset: dict[str, object],
-    bucket: str,
-    output_root: Path,
-) -> tuple[str, str]:
-    absolute_path = str(asset["absolute_path"])
-    file_name = str(asset["file_name"])
-    file_extension = str(asset.get("file_extension", "")).lower()
-    live_photo_mov_path = asset.get("live_photo_mov_path")
+        # 读取已有的 plan 记录（用于冲突检测）
+        existing_rows = connection.execute(
+            "SELECT id, asset_id, bucket, month, file_name, mov_file_name FROM export_plan WHERE template_id = ?",
+            (template_id,),
+        ).fetchall()
 
-    month = _resolve_asset_month(asset)
-    bucket_dir = output_root / bucket / month
-    bucket_dir.mkdir(parents=True, exist_ok=True)
+        existing_asset_ids: set[int] = set()
+        # 已存在的 (bucket, month, file_name) 集合，用于冲突检测
+        existing_names_by_bucket_month: dict[tuple[str, str], set[str]] = defaultdict(set)
+        for row in existing_rows:
+            existing_asset_ids.add(int(row["asset_id"]))
+            key = (str(row["bucket"]), str(row["month"]))
+            existing_names_by_bucket_month[key].add(str(row["file_name"]))
 
-    src_path = Path(absolute_path)
-    dst_path = bucket_dir / file_name
+        # 按 asset_id 升序遍历，逐条写入
+        for (bucket, month), assets in bucket_month_assets.items():
+            # 当前批次已写入的文件名集合（合并已有记录）
+            batch_key = (bucket, month)
+            known_names = set(existing_names_by_bucket_month.get(batch_key, set()))
 
-    if dst_path.exists():
-        return "skipped_exists", "not_applicable"
+            # 每个 original_name 已见过的 source_label 集合
+            # 包含首个保持原名的 asset 的 source_label
+            seen_labels_by_original: dict[str, set[str]] = defaultdict(set)
 
-    shutil.copy2(src_path, dst_path)
+            # 按 asset_id 升序排序
+            sorted_assets = sorted(assets, key=lambda a: a["asset_id"])
 
-    mov_result = "not_applicable"
-    if file_extension in ("heic", "heif") and live_photo_mov_path:
-        mov_src = Path(str(live_photo_mov_path))
-        if mov_src.exists():
-            mov_dst = bucket_dir / mov_src.name
-            if not mov_dst.exists():
-                shutil.copy2(mov_src, mov_dst)
-            mov_result = "copied"
-        else:
-            mov_result = "skipped_missing"
+            for asset in sorted_assets:
+                asset_id = asset["asset_id"]
+                if asset_id in existing_asset_ids:
+                    # 已有记录，仍需记录其 source_label 以影响后续冲突消解
+                    source_label = source_labels.get(asset["source_id"], "unknown")
+                    original_file_name = str(asset["file_name"])
+                    seen_labels_by_original[original_file_name].add(source_label)
+                    continue
 
-    return "copied", mov_result
+                source_label = source_labels.get(asset["source_id"], "unknown")
+                original_file_name = str(asset["file_name"])
+
+                if original_file_name not in known_names:
+                    plan_file_name = original_file_name
+                    seen_labels_by_original[original_file_name].add(source_label)
+                    known_names.add(plan_file_name)
+                else:
+                    # 冲突：同模板、同 bucket、同 month、同 file_name
+                    seen_labels = seen_labels_by_original[original_file_name]
+                    suffix = Path(original_file_name).suffix
+                    stem = Path(original_file_name).stem
+
+                    if source_label not in seen_labels:
+                        # source_label 不同，用 __<source_label> 后缀
+                        candidate = f"{stem}__{source_label}{suffix}"
+                        if candidate not in known_names:
+                            plan_file_name = candidate
+                        else:
+                            # 不应发生（不同 label 但同名后缀），追加序号兜底
+                            seq = 2
+                            while True:
+                                candidate = f"{stem}__{source_label}-{seq}{suffix}"
+                                if candidate not in known_names:
+                                    break
+                                seq += 1
+                            plan_file_name = candidate
+                    else:
+                        # source_label 相同（两个源目录恰好同名），追加序号
+                        seq = 2
+                        while True:
+                            candidate = f"{stem}__{source_label}-{seq}{suffix}"
+                            if candidate not in known_names:
+                                break
+                            seq += 1
+                        plan_file_name = candidate
+
+                    seen_labels_by_original[original_file_name].add(source_label)
+                    known_names.add(plan_file_name)
+
+                # MOV 文件名同步重命名
+                mov_file_name = None
+                if asset.get("live_photo_mov_path"):
+                    mov_path = Path(str(asset["live_photo_mov_path"]))
+                    if plan_file_name != original_file_name:
+                        # 重命名 MOV 与静态图一致
+                        mov_stem = mov_path.name
+                        # MOV 文件名通常以 . 前缀开头，如 .IMG_0001.MOV
+                        if mov_stem.startswith("."):
+                            # 处理 dot-prefixed MOV：保留 . 前缀
+                            inner_name = mov_stem[1:]
+                            inner_stem = Path(inner_name).stem
+                            inner_suffix = Path(inner_name).suffix
+                            new_inner_name = f"{Path(plan_file_name).stem}{inner_suffix}"
+                            mov_file_name = f".{new_inner_name}"
+                        else:
+                            mov_suffix = mov_path.suffix
+                            mov_file_name = f"{Path(plan_file_name).stem}{mov_suffix}"
+                    else:
+                        mov_file_name = mov_path.name
+
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO export_plan
+                    (template_id, asset_id, bucket, month, file_name, mov_file_name, source_label)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (template_id, asset_id, bucket, month, plan_file_name, mov_file_name, source_label),
+                )
+
+        connection.commit()
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise ExportTemplateError("导出计划写入失败。") from exc
+    finally:
+        connection.close()
 
 
 def execute_export(
@@ -703,6 +806,7 @@ def execute_export(
     *,
     template_id: str,
 ) -> int:
+    # 第一阶段：验证模板、创建 export_run 记录
     connection = sqlite3.connect(workspace_context.library_db_path)
     connection.row_factory = sqlite3.Row
     try:
@@ -752,68 +856,90 @@ def execute_export(
     finally:
         connection.close()
 
+    # 第二阶段：从 export_plan 读取记录，执行文件复制
     copied_count = 0
     skipped_count = 0
     status = "completed"
 
     try:
-        preview = compute_export_preview(workspace_context, template_id=template_id)
-
         conn = sqlite3.connect(workspace_context.library_db_path)
         conn.row_factory = sqlite3.Row
         try:
-            for month_bucket in preview.month_buckets:
-                for bucket_name in ("only", "group"):
-                    assets = getattr(month_bucket, f"{bucket_name}_assets")
-                    for asset in assets:
-                        asset_row = conn.execute(
-                            """
-                            SELECT file_name, absolute_path, file_extension,
-                                   capture_month, live_photo_mov_path
-                            FROM assets WHERE id = ?
-                            """,
-                            (asset.asset_id,),
-                        ).fetchone()
+            # 从 export_plan 读取计划记录，关联 assets 获取源文件路径信息
+            plan_rows = conn.execute(
+                """
+                SELECT
+                  ep.id AS plan_id,
+                  ep.asset_id,
+                  ep.bucket,
+                  ep.month,
+                  ep.file_name AS plan_file_name,
+                  ep.mov_file_name AS plan_mov_file_name,
+                  a.absolute_path,
+                  a.file_extension,
+                  a.live_photo_mov_path
+                FROM export_plan ep
+                INNER JOIN assets a ON a.id = ep.asset_id
+                WHERE ep.template_id = ?
+                ORDER BY ep.asset_id
+                """,
+                (template_id,),
+            ).fetchall()
 
-                        if asset_row is None:
-                            continue
+            for plan_row in plan_rows:
+                plan_id = int(plan_row["plan_id"])
+                asset_id = int(plan_row["asset_id"])
+                bucket = str(plan_row["bucket"])
+                month = str(plan_row["month"])
+                plan_file_name = str(plan_row["plan_file_name"])
+                plan_mov_file_name = str(plan_row["plan_mov_file_name"]) if plan_row["plan_mov_file_name"] else None
+                absolute_path = str(plan_row["absolute_path"])
+                file_extension = str(plan_row["file_extension"]).lower()
+                live_photo_mov_path = plan_row["live_photo_mov_path"]
 
-                        asset_dict = {
-                            "file_name": str(asset_row["file_name"]),
-                            "absolute_path": str(asset_row["absolute_path"]),
-                            "file_extension": str(asset_row["file_extension"]),
-                            "capture_month": str(asset_row["capture_month"]) if asset_row["capture_month"] else "",
-                            "live_photo_mov_path": asset_row["live_photo_mov_path"],
-                        }
+                bucket_dir = output_root / bucket / month
+                src_path = Path(absolute_path)
+                dst_path = bucket_dir / plan_file_name
 
-                        result, mov_result = _copy_asset(
-                            asset_dict, bucket_name, output_root
-                        )
+                if dst_path.exists():
+                    result = "skipped_exists"
+                    mov_result = "not_applicable"
+                else:
+                    bucket_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src_path, dst_path)
+                    result = "copied"
 
-                        target_path = str(
-                            output_root
-                            / bucket_name
-                            / _resolve_asset_month(asset_dict)
-                            / asset_dict["file_name"]
-                        )
-
-                        conn.execute(
-                            """
-                            INSERT INTO export_delivery
-                            (run_id, asset_id, target_path, result, mov_result)
-                            VALUES (?, ?, ?, ?, ?)
-                            """,
-                            (run_id, asset.asset_id, target_path, result, mov_result),
-                        )
-                        conn.commit()
-
-                        if result == "copied":
-                            copied_count += 1
+                    # 处理 MOV 配对文件
+                    mov_result = "not_applicable"
+                    if file_extension in ("heic", "heif") and live_photo_mov_path and plan_mov_file_name:
+                        mov_src = Path(str(live_photo_mov_path))
+                        mov_dst = bucket_dir / plan_mov_file_name
+                        if mov_src.exists():
+                            if not mov_dst.exists():
+                                shutil.copy2(mov_src, mov_dst)
+                            mov_result = "copied"
                         else:
-                            skipped_count += 1
+                            mov_result = "skipped_missing"
 
-                        if _per_file_copy_hook is not None:
-                            _per_file_copy_hook()
+                target_path = str(output_root / bucket / month / plan_file_name)
+
+                conn.execute(
+                    """
+                    INSERT INTO export_delivery
+                    (run_id, asset_id, target_path, result, mov_result, plan_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (run_id, asset_id, target_path, result, mov_result, plan_id),
+                )
+                conn.commit()
+
+                if result == "copied":
+                    copied_count += 1
+                else:
+                    skipped_count += 1
+
+                if _per_file_copy_hook is not None:
+                    _per_file_copy_hook()
         finally:
             conn.close()
     except Exception:

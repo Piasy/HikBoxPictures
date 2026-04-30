@@ -600,6 +600,8 @@ class TestExportTemplateExecution:
             placeholder_path.write_bytes(placeholder_content)
             placeholder_mtime_before = placeholder_path.stat().st_mtime
 
+            # Preview first to populate export_plan
+            _get_preview_via_api(base_url, template_id)
             execute_result = _execute_template_via_api(base_url, template_id)
             run_id = execute_result["run_id"]
 
@@ -665,6 +667,8 @@ class TestExportTemplateExecution:
             result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
             template_id = result["template_id"]
 
+            # Preview first to populate export_plan
+            _get_preview_via_api(base_url, template_id)
             execute_result = _execute_template_via_api(base_url, template_id)
             run_id = execute_result["run_id"]
 
@@ -706,6 +710,8 @@ class TestExportTemplateExecution:
             result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
             template_id = result["template_id"]
 
+            # Preview first to populate export_plan (preview only writes to DB, not filesystem)
+            _get_preview_via_api(base_url, template_id)
             response = httpx.post(f"{base_url}/api/export-templates/{template_id}/execute", timeout=5.0)
             assert response.status_code == 500
 
@@ -735,6 +741,8 @@ class TestExportTemplateExecution:
             result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
             template_id = result["template_id"]
 
+            # Preview first to populate export_plan
+            _get_preview_via_api(base_url, template_id)
             _execute_template_via_api(base_url, template_id)
 
             # Find one exported JPG and compare with source

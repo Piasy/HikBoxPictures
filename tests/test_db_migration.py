@@ -9,7 +9,7 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LATEST_LIBRARY_VERSION = 2
+LATEST_LIBRARY_VERSION = 3
 LATEST_EMBEDDING_VERSION = 1  # No embedding_v2.sql yet; embedding stays at v1
 
 
@@ -540,7 +540,7 @@ def test_migrate_to_latest_skips_when_already_at_latest(tmp_path: Path) -> None:
         conn.executescript(
             """
             CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO schema_meta (key, value) VALUES ('schema_version', '2');
+            INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
             """
         )
     finally:
@@ -548,7 +548,7 @@ def test_migrate_to_latest_skips_when_already_at_latest(tmp_path: Path) -> None:
 
     # Should not raise, should be a no-op
     migrate_to_latest(db_path=db_path, db_name="library")
-    assert _read_schema_version(db_path) == "2"
+    assert _read_schema_version(db_path) == "3"
 
 
 def test_migrate_to_latest_raises_on_missing_schema_meta(tmp_path: Path) -> None:

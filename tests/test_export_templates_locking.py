@@ -346,12 +346,23 @@ class _LockingTestContext:
         self.template_id = response.json()["template_id"]
         return self.template_id
 
+    def preview_before_execute(self) -> None:
+        """调用 preview API 以写入 export_plan（execute 依赖 plan）。"""
+        resp = httpx.get(
+            f"{self.base_url}/api/export-templates/{self.template_id}/preview",
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+
     def start_blocking_export(self) -> int:
-        """在后台线程中发起 POST execute（将阻塞在 hook），等待 export_run 出现后返回。
+        """先调用 preview 写入 export_plan，然后在后台线程中发起 POST execute（将阻塞在 hook），等待 export_run 出现后返回。
 
         返回 run_id，如果未能在超时前获得 running 记录则返回 -1。
         """
         import threading
+
+        # 先写入 export_plan
+        self.preview_before_execute()
 
         # 在后台线程中发起请求（会被 hook 阻塞）
         result_container: list[dict[str, object] | Exception] = []
@@ -747,6 +758,11 @@ class TestExportLockingConcurrentExecute:
             template_id_1 = ctx.create_template(name="Template One", output_root=str(ctx.tmp_path / "export-output-1"))
             template_id_2 = ctx.create_template(name="Template Two", output_root=str(ctx.tmp_path / "export-output-2"))
 
+            # Preview both templates to populate export_plan before execute
+            for tid in (template_id_1, template_id_2):
+                resp = httpx.get(f"{ctx.base_url}/api/export-templates/{tid}/preview", timeout=30.0)
+                resp.raise_for_status()
+
             # 使用线程并发发送两个执行请求
             results: list[httpx.Response] = []
             semaphore = threading.Event()
@@ -875,6 +891,9 @@ class TestExportLockingCompletedRecovery:
             os.chmod(readonly_output, 0o555)
             template_id = ctx.create_template(output_root=str(readonly_output))
 
+            # Preview first to populate export_plan
+            preview_resp = httpx.get(f"{ctx.base_url}/api/export-templates/{template_id}/preview", timeout=30.0)
+            preview_resp.raise_for_status()
             response = _execute_template_via_api(ctx.base_url, template_id)
             assert response.status_code == 500, f"导出应失败: {response.status_code}"
 
@@ -982,6 +1001,12 @@ class TestExportLockingStaleRunningCleanup:
             ctx.create_template()
 
             # 执行一次正常导出以获得 template_id 关联的合法 run
+            # Preview first to populate export_plan
+            preview_resp = httpx.get(
+                f"{ctx.base_url}/api/export-templates/{ctx.template_id}/preview",
+                timeout=30.0,
+            )
+            preview_resp.raise_for_status()
             resp = httpx.post(
                 f"{ctx.base_url}/api/export-templates/{ctx.template_id}/execute",
                 timeout=30.0,

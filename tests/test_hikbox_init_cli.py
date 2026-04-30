@@ -123,7 +123,7 @@ def test_init_creates_workspace_schema_artifacts_and_success_log(tmp_path: Path)
         "config_version": 1,
         "external_root": str(external_root.resolve()),
     }
-    assert _read_schema_version(library_db_path) == "2"
+    assert _read_schema_version(library_db_path) == "3"
     assert _read_schema_version(embedding_db_path) == "1"
 
     library_sources_sql = _read_table_sql(library_db_path, "library_sources")
