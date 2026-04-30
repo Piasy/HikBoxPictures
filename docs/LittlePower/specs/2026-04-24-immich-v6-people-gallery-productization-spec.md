@@ -15,7 +15,7 @@
 
 ## Split Specs
 
-当前已写入并进入追踪的子 spec 包括 Slice 0、Slice A、Slice B、Slice C、Slice D、Slice E、Slice F 和 Slice G。所有子 spec 已写出；后续如有新增候选拆分，补充到 `Candidate Future Split Specs`。
+当前已写入并进入追踪的子 spec 包括 Slice 0、Slice A、Slice B、Slice C、Slice D、Slice E、Slice F 和 Slice G。所有计划子 spec 已写入；后续如有新增候选拆分，补充到 `Candidate Future Split Specs`。
 
 ### Slice 0：真实验收小图库生成
 

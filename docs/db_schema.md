@@ -2,6 +2,58 @@
 
 本文档只描述当前仓库已经落地并经自动化验证的 schema 契约。截止目前，已实现 Slice A「工作区与源目录」、Slice B「可恢复扫描与人脸产物」、Slice C「在线人物归属」、Slice D / Feature Slice 2「人物命名与重命名」、Slice E / Feature Slice 1「人物合并」与 Feature Slice 2「最近一次撤销」、Slice F / Feature Slice 1「人物详情页批量排除」，以及 Slice G / Feature Slice 1「导出模板创建与保存」的 schema。
 
+## 0. DB Migration 机制
+
+### 0.1 版本追踪
+
+`library.db` 和 `embedding.db` 各自通过 `schema_meta` 表独立追踪当前 `schema_version`：
+
+```sql
+CREATE TABLE schema_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+```
+
+初始化时固定写入 `schema_meta('schema_version', '1')`。每次 migration 执行后，`schema_version` 递增。
+
+两个 DB 各自独立维护版本，互不依赖。
+
+### 0.2 Migration SQL 文件
+
+Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则为 `library_v{N}.sql` 和 `embedding_v{N}.sql`，其中 N 为迁移目标版本号。
+
+示例：
+- `library_v1.sql` — library.db 初始全量建表（schema_version = 1）
+- `library_v2.sql` — 将 library.db 从 v1 升级到 v2 的增量 DDL
+- `embedding_v1.sql` — embedding.db 初始全量建表（schema_version = 1）
+
+### 0.3 自动执行时机
+
+**`init` 命令**：
+- 若 workspace 已存在（`.hikbox/` 目录或 `config.json`/`library.db`/`embedding.db` 任一存在），直接报错退出，不升级 DB
+- 若 workspace 不存在，创建新 workspace 时先执行 v1 全量建表 SQL，再依次执行后续 migration SQL 升级至最新版本
+
+**`init` 以外的所有命令**（`source add`、`source list`、`scan start`、`serve`）：
+- 打开 DB 连接后、执行业务逻辑前，自动执行 migration
+- 流程：读取当前 `schema_version` → 按版本序号递增查找后续 migration SQL 文件 → 在同一事务中执行 SQL 并更新 `schema_version` → 全部完成后进入业务逻辑
+- 任一 migration 失败则命令启动失败（事务回滚，`schema_version` 不变），不进入业务逻辑
+- 已是目标版本时零开销跳过
+
+### 0.4 当前版本
+
+| 数据库 | 文件 | 当前版本 |
+|--------|------|----------|
+| `library.db` | `library_v1.sql` | 1 |
+| `embedding.db` | `embedding_v1.sql` | 1 |
+
+### 0.5 新增 Migration 约定
+
+当需要修改 DB schema 时：
+1. 在 `hikbox_pictures/product/db/sql/` 下新增对应的 `library_v{N}.sql` 或 `embedding_v{N}.sql`
+2. 更新本文档中对应表的 DDL 描述、当前版本表以及字段语义
+3. migration 执行由自动机制完成，无需额外编写调用代码
+
 ## 1. 存储布局
 
 ```text

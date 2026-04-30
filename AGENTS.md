@@ -11,7 +11,13 @@
 - 在开始实现、规划、评审或说明时，先检查并遵循本文件。
 - 运行仓库内的 Python、测试或脚本命令时，优先使用仓库根目录的 `.venv` 环境；如果 `.venv` 不存在，先执行 `./scripts/install.sh` 完成环境安装，再继续后续操作。
 - 常用安装、测试和 CLI 命令说明查看 `README.md`；如果 README 与本文件冲突，以本文件为准。
-- 任何涉及数据库 schema 的修改，包括 migration、建表、字段、索引、约束调整，都必须同步更新 `docs/db_schema.md`，保证文档与最新 migration 链一致。
+- 任何涉及数据库 schema 的修改，都必须走 DB migration 机制，并同步更新 `docs/db_schema.md`，保证文档与最新 migration 链一致。
+- DB migration 机制约定：
+  - Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则为 `library_v{N}.sql` 和 `embedding_v{N}.sql`（N 为迁移目标版本号）。
+  - `library.db` 和 `embedding.db` 各自独立维护 `schema_meta.schema_version`，各自独立执行 migration。
+  - `init` 命令：检查 workspace 是否存在，若已存在则报错退出、不升级 DB；若不存在则创建新 workspace，先执行 v1 全量建表 SQL，再依次执行后续 migration SQL 升级至最新版本。
+  - `init` 以外的所有命令（`source add`、`source list`、`scan start`、`serve`）：打开 DB 连接后、执行业务逻辑前，自动按版本序号递增查找并执行后续 migration SQL，同一事务中更新 `schema_version`。任一 migration 失败则命令启动失败。
+  - 新增 migration 时，只需在 `hikbox_pictures/product/db/sql/` 下新增对应 SQL 文件，再更新 `docs/db_schema.md` 即可；migration 已有自动执行机制，无需额外编写调用代码。
 - 如果发现仓库中的既有内容与本约定冲突，后续修改时应优先向中文约定收敛；涉及大规模历史内容时，可分步骤整理，但新内容必须立即遵循本约定。
 - 所有临时测试文件、调试产物、截图、JSON 报告、临时 runner、临时日志等，一律放到仓库根目录 `.tmp/` 下，按任务创建子目录，不要散落在根目录其他位置。
 - 不要在仓库根目录新建 `.tmp-*`、`tmp-*` 等零散临时目录；如果工具支持输出目录参数，统一显式指向 `.tmp/<task-name>/`。
@@ -38,3 +44,13 @@
 - 当前做 Playwright 调试时，只覆盖桌面视口和 Chromium 布局。
 - 截图不是默认必留产物。只有在 agent 判断视觉或布局存在不确定性、需要人工复核、用户明确要求保存视觉截图，或正在排查视觉回归时，才保存页面截图。
 - 调试产物按需保留到 `.tmp/<task-name>/`：服务日志和 JSON 指标报告优先用于复盘自动化结果；截图只在上一条触发条件满足时保留。
+
+## 测试 Fixture 约定
+
+仓库固定入库两套真实验收图片 fixture，分别位于 `tests/fixtures/people_gallery_scan/` 和 `tests/fixtures/people_gallery_scan_2/`，各自由 `manifest.json` 描述内容与预期断言数据。
+
+- `people_gallery_scan/`（主基线）：精确包含 50 张支持扫描的照片，覆盖 3 个目标人物（每人 10 张单目标 + 合照）、非目标人物、无脸照片、HEIC/HEIF Live Photo 正反例、非支持后缀文件和损坏图片。后续所有需求开发默认复用此 fixture 作为全量基线。
+- `people_gallery_scan_2/`（增量补充）：精确包含 15 张新增单目标人物照片，覆盖与主基线相同的 3 个目标人物（每人 5 张）。用于主基线扫描完成后再次 `source add -> scan start` 触发增量扫描的场景，验证新增人脸仍归属到既有人物。
+- `people_gallery_scan_2/` 不替代 `people_gallery_scan/`；需要增量扫描的测试必须先以主基线完成全量扫描，再 `source add` 增量 fixture。
+- 两套 fixture 的 `manifest.json` 只能作为测试断言数据，不得作为产品逻辑输入。
+- 新增 fixture 需求时，优先复用现有 fixture 组合，而不是创建第三套 fixture 目录；确实需要新 fixture 时，先在对应 spec 中明确其内容矩阵和用途。
