@@ -332,7 +332,7 @@ runpy.run_module("hikbox_pictures", run_name="__main__")
     list_result = _run_hikbox_with_inline_python(python_source)
 
     assert list_result.returncode != 0
-    assert "工作区数据库无法打开" in list_result.stderr
+    assert "数据库连接失败" in list_result.stderr
     assert "Traceback" not in list_result.stderr
 
 
@@ -428,7 +428,7 @@ runpy.run_module("hikbox_pictures", run_name="__main__")
     add_result = _run_hikbox_with_inline_python(python_source)
 
     assert add_result.returncode != 0
-    assert "工作区数据库无法打开" in add_result.stderr
+    assert "数据库连接失败" in add_result.stderr
     assert "Traceback" not in add_result.stderr
     assert _read_sources(workspace / ".hikbox" / "library.db") == []
 

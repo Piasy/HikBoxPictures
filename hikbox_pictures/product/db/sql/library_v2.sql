@@ -1,0 +1,2 @@
+-- library v2 migration: placeholder (no schema changes)
+-- Real DDL will be added in library_v3.sql (Feature Slice 2)

@@ -16,7 +16,23 @@
 
 ## Feature Slice 1: DB Migration 基础设施
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
+
+### Non-Blocking Concerns (recorded by controller)
+
+**Concern 1: DDL auto-commit limitation in migration transaction**
+- Source: Code-quality reviewer
+- Slice/AC: Feature Slice 1, migration mechanism
+- Summary: SQLite inherently auto-commits DDL statements regardless of explicit `BEGIN`/`COMMIT`. If a future `library_v3.sql` contains two `CREATE TABLE` statements and the second fails, the first table will persist even though `ROLLBACK` executes. The `_apply_migration` docstring documents this limitation but doesn't enforce idempotent DDL patterns.
+- Controller decision: Accept risk. This is inherent SQLite behavior. When Feature Slice 2 adds `library_v3.sql`, migration files should use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` to ensure re-runnability. Not blocking for current slice.
+- Follow-up: Verify DDL idempotency when implementing Feature Slice 2.
+
+**Concern 2: Naive SQL statement splitter**
+- Source: Code-quality reviewer
+- Slice/AC: Feature Slice 1, `_split_sql_statements()` in migration.py
+- Summary: The line-by-line SQL parser will break on statements containing semicolons inside string literals (e.g., `INSERT INTO foo VALUES ('hello; world')`). Safe for all current and near-future migration files (DDL + simple DML).
+- Controller decision: Accept risk. Current migration files are DDL-only or simple DML. Will address if future migrations require complex DML with embedded semicolons.
+- Follow-up: None needed for current scope.
 
 ### Behavior
 - `library.db` 和 `embedding.db` 各自通过 `schema_meta.schema_version` 独立追踪当前版本，各自独立执行 migration。

@@ -6,6 +6,9 @@ from pathlib import Path
 import shutil
 import sqlite3
 
+from hikbox_pictures.product.db.migration import MigrationError
+from hikbox_pictures.product.db.migration import migrate_to_latest
+
 
 class WorkspaceInitializationError(RuntimeError):
     """工作区初始化失败。"""
@@ -54,6 +57,11 @@ def initialize_workspace(
         _initialize_database(
             db_path=embedding_db_path,
             sql_path=Path(__file__).resolve().parent / "db" / "sql" / "embedding_v1.sql",
+        )
+
+        _run_post_init_migrations(
+            library_db_path=library_db_path,
+            embedding_db_path=embedding_db_path,
         )
 
         log_path = external_root_path / "logs" / "init.log.jsonl"
@@ -237,6 +245,18 @@ def _remove_new_top_level_entries(*, root_path: Path, original_entry_names: set[
             shutil.rmtree(child, ignore_errors=True)
         else:
             child.unlink(missing_ok=True)
+
+
+def _run_post_init_migrations(
+    *,
+    library_db_path: Path,
+    embedding_db_path: Path,
+) -> None:
+    try:
+        migrate_to_latest(db_path=library_db_path, db_name="library")
+        migrate_to_latest(db_path=embedding_db_path, db_name="embedding")
+    except MigrationError as exc:
+        raise WorkspaceInitializationError(f"初始化后迁移失败：{exc}") from exc
 
 
 def _utc_now_text() -> str:

@@ -7,6 +7,9 @@ import os
 from pathlib import Path
 import sqlite3
 
+from hikbox_pictures.product.db.migration import MigrationError
+from hikbox_pictures.product.db.migration import migrate_to_latest
+
 
 class WorkspaceAccessError(RuntimeError):
     """工作区访问失败。"""
@@ -130,6 +133,12 @@ def load_workspace_context(workspace: Path) -> WorkspaceContext:
     external_root = config.get("external_root")
     if not isinstance(external_root, str) or not external_root.strip():
         raise WorkspaceAccessError(f"工作区配置缺少 external_root：{config_path}")
+
+    try:
+        migrate_to_latest(db_path=library_db_path, db_name="library")
+        migrate_to_latest(db_path=embedding_db_path, db_name="embedding")
+    except MigrationError as exc:
+        raise WorkspaceAccessError(f"数据库迁移失败：{exc}") from exc
 
     return WorkspaceContext(
         workspace_path=workspace_path,
