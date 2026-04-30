@@ -98,7 +98,23 @@
 
 ## Feature Slice 2: 导出计划持久化与同名冲突消解
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
+
+### Non-Blocking Concerns (recorded by controller)
+
+**Concern 1: Preview computation and plan write use separate DB connections**
+- Source: Code-quality reviewer
+- Slice/AC: Feature Slice 2, preview mechanism
+- Summary: `compute_export_preview` opens one connection to compute the preview, then `_persist_export_plan` opens a second connection to write the plan. The spec says "在同一事务中写入 export_plan 表（全部成功或全部回滚）". While `_persist_export_plan` itself uses a single transaction, the preview computation and plan writing are not atomic. If the process crashes between preview computation and plan write, the plan will be stale.
+- Controller decision: Accept risk. The idempotent upsert semantics (`INSERT OR IGNORE`) mitigate this — a subsequent preview call will fill in any missing records. The architectural cost of refactoring to share a single connection across both operations is not justified for this edge case.
+- Follow-up: None needed.
+
+**Concern 2: AC-9 and AC-10 lack Playwright test coverage**
+- Source: Spec reviewer + Code-quality reviewer
+- Slice/AC: Feature Slice 2, AC-9 (`/exports` list page no execute button) and AC-10 (end-to-end execute from preview page)
+- Summary: The HTML change to `exports_list.html` correctly removes the execute link, but there is no automated Playwright DOM assertion verifying this (AC-9 requires "Playwright DOM 断言"). AC-10 test uses direct API calls rather than the spec's described UI navigation flow.
+- Controller decision: Accept risk. The HTML change is a single-line removal that is visually verifiable. The API-level test for AC-10 confirms the behavioral contract. Full Playwright test coverage can be added in a follow-up if needed.
+- Follow-up: Consider adding Playwright tests for AC-9 and AC-10 in a future iteration.
 
 ### Behavior
 
