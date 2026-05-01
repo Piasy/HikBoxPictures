@@ -13,50 +13,169 @@
     {% if not runs %}
       <p class="empty-state">暂无导出记录。</p>
     {% else %}
-      <table style="width:100%;border-collapse:collapse;">
-        <thead>
-          <tr style="text-align:left;border-bottom:1px solid var(--panel-border);">
-            <th style="padding:12px 8px;">执行时间</th>
-            <th style="padding:12px 8px;">状态</th>
-            <th style="padding:12px 8px;">已复制</th>
-            <th style="padding:12px 8px;">已跳过</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for run in runs %}
-            <tr data-run-id="{{ run.run_id }}" style="border-bottom:1px solid rgba(74,52,35,0.08);">
-              <td style="padding:12px 8px;" data-run-started-at>{{ run.started_at }}</td>
-              <td style="padding:12px 8px;" data-run-status>{{ run.status }}</td>
-              <td style="padding:12px 8px;" data-run-copied>{{ run.copied_count }}</td>
-              <td style="padding:12px 8px;" data-run-skipped>{{ run.skipped_count }}</td>
-            </tr>
-            {% if run.deliveries %}
-              <tr data-run-deliveries="{{ run.run_id }}">
-                <td colspan="4" style="padding:0 8px 16px;">
-                  <table style="width:100%;border-collapse:collapse;margin-top:8px;">
-                    <thead>
-                      <tr style="text-align:left;border-bottom:1px solid rgba(74,52,35,0.06);">
-                        <th style="padding:8px;">目标路径</th>
-                        <th style="padding:8px;">静态图结果</th>
-                        <th style="padding:8px;">MOV 结果</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {% for d in run.deliveries %}
-                        <tr data-delivery-id="{{ d.delivery_id }}" style="border-bottom:1px solid rgba(74,52,35,0.04);">
-                          <td style="padding:8px;" data-delivery-target-path>{{ d.target_path }}</td>
-                          <td style="padding:8px;" data-delivery-result>{{ d.result }}</td>
-                          <td style="padding:8px;" data-delivery-mov-result>{{ d.mov_result }}</td>
-                        </tr>
-                      {% endfor %}
-                    </tbody>
-                  </table>
-                </td>
-              </tr>
-            {% endif %}
-          {% endfor %}
-        </tbody>
-      </table>
+      {% for run in runs %}
+        <details class="run-section"{% if loop.first %} open{% endif %}>
+          <summary class="run-summary">
+            <span class="run-summary-left">
+              <span class="run-badge">{{ run.status }}</span>
+              <span class="run-time">Run #{{ run.run_id }} &mdash; {{ run.started_at }}</span>
+            </span>
+            <span class="run-summary-right">
+              <span class="run-stat copied">已复制 {{ run.copied_count }}</span>
+              <span class="run-stat skipped">已跳过 {{ run.skipped_count }}</span>
+            </span>
+          </summary>
+          {% if run.deliveries %}
+            <div class="run-deliveries">
+              <table class="delivery-table">
+                <thead>
+                  <tr>
+                    <th>目标路径</th>
+                    <th>静态图结果</th>
+                    <th>MOV 结果</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for d in run.deliveries %}
+                    <tr data-delivery-id="{{ d.delivery_id }}">
+                      <td data-delivery-target-path>{{ d.target_path }}</td>
+                      <td data-delivery-result>{{ d.result }}</td>
+                      <td data-delivery-mov-result>{{ d.mov_result }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% else %}
+            <p class="empty-state">无明细记录。</p>
+          {% endif %}
+        </details>
+      {% endfor %}
     {% endif %}
   </section>
+
+  <style>
+    .run-section {
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.6);
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+
+    .run-section:last-child {
+      margin-bottom: 0;
+    }
+
+    .run-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+      transition: background 120ms ease;
+    }
+
+    .run-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .run-summary::marker {
+      content: "";
+    }
+
+    .run-summary:hover {
+      background: rgba(165, 72, 47, 0.06);
+    }
+
+    .run-summary-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .run-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      background: rgba(69, 111, 80, 0.12);
+      color: #2d5335;
+    }
+
+    .run-badge[style*="failed"],
+    .run-section[data-status="failed"] .run-badge {
+      background: rgba(165, 72, 47, 0.12);
+      color: var(--accent);
+    }
+
+    .run-time {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .run-summary-right {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .run-stat {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    .run-stat.copied {
+      color: #2d5335;
+    }
+
+    .run-stat.skipped {
+      color: var(--accent);
+    }
+
+    .run-deliveries {
+      padding: 0 18px 18px;
+    }
+
+    .delivery-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    .delivery-table th {
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(74, 52, 35, 0.1);
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .delivery-table td {
+      padding: 8px 10px;
+      border-bottom: 1px solid rgba(74, 52, 35, 0.06);
+      word-break: break-all;
+    }
+
+    .delivery-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    @media (max-width: 840px) {
+      .run-summary {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+      }
+    }
+  </style>
 {% endblock %}
