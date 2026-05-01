@@ -34,7 +34,6 @@ dev = [
 
 [project.scripts]
 hikbox-pictures = "hikbox_pictures.cli:main"
-hikbox-pictures-face-review = "hikbox_pictures.face_review_pipeline:main"
 
 [tool.setuptools.package-data]
 hikbox_pictures = [
