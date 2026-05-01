@@ -3,8 +3,10 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+import logging
 import shutil
 import sqlite3
+import threading
 import uuid
 
 from hikbox_pictures.product.scan_shared import utc_now_text
@@ -801,12 +803,15 @@ def _persist_export_plan(
         connection.close()
 
 
-def execute_export(
+_export_log = logging.getLogger("hikbox_pictures.export")
+
+
+def _create_export_run(
     workspace_context: WorkspaceContext,
     *,
     template_id: str,
-) -> int:
-    # 第一阶段：验证模板、创建 export_run 记录
+) -> tuple[int, Path]:
+    """验证模板、创建 export_run 记录，返回 (run_id, output_root)。"""
     connection = sqlite3.connect(workspace_context.library_db_path)
     connection.row_factory = sqlite3.Row
     try:
@@ -849,6 +854,7 @@ def execute_export(
             )
         run_id = int(connection.execute("SELECT last_insert_rowid()").fetchone()[0])
         connection.commit()
+        return run_id, output_root
     except ExportTemplateValidationError:
         raise
     except sqlite3.Error as exc:
@@ -856,7 +862,15 @@ def execute_export(
     finally:
         connection.close()
 
-    # 第二阶段：从 export_plan 读取记录，执行文件复制
+
+def _run_export(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+    run_id: int,
+    output_root: Path,
+) -> None:
+    """从 export_plan 读取记录，执行文件复制，更新 run 状态。"""
     copied_count = 0
     skipped_count = 0
     status = "completed"
@@ -865,7 +879,6 @@ def execute_export(
         conn = sqlite3.connect(workspace_context.library_db_path)
         conn.row_factory = sqlite3.Row
         try:
-            # 从 export_plan 读取计划记录，关联 assets 获取源文件路径信息
             plan_rows = conn.execute(
                 """
                 SELECT
@@ -960,6 +973,38 @@ def execute_export(
         finally:
             conn.close()
 
+
+def execute_export(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+) -> int:
+    """同步执行导出（创建 run + 复制文件），返回 run_id。"""
+    run_id, output_root = _create_export_run(workspace_context, template_id=template_id)
+    _run_export(workspace_context, template_id=template_id, run_id=run_id, output_root=output_root)
+    return run_id
+
+
+def execute_export_async(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+) -> int:
+    """创建 export_run 记录后立即返回 run_id，文件复制在后台线程中执行。"""
+    run_id, output_root = _create_export_run(workspace_context, template_id=template_id)
+
+    def _background() -> None:
+        try:
+            _run_export(
+                workspace_context,
+                template_id=template_id,
+                run_id=run_id,
+                output_root=output_root,
+            )
+        except Exception:
+            _export_log.exception("后台导出 run_id=%d 失败", run_id)
+
+    threading.Thread(target=_background, daemon=True).start()
     return run_id
 
 
@@ -981,23 +1026,45 @@ def load_export_runs_for_template(
             """,
             (template_id,),
         ).fetchall()
+
+        result = []
+        for row in rows:
+            status = str(row["status"])
+            copied_count = int(row["copied_count"])
+            skipped_count = int(row["skipped_count"])
+
+            # running 状态下 copied_count/skipped_count 尚未写入，从 delivery 实时计算
+            if status == "running":
+                counts = connection.execute(
+                    """
+                    SELECT
+                      SUM(CASE WHEN result = 'copied' THEN 1 ELSE 0 END) AS copied,
+                      SUM(CASE WHEN result = 'skipped_exists' THEN 1 ELSE 0 END) AS skipped
+                    FROM export_delivery
+                    WHERE run_id = ?
+                    """,
+                    (int(row["run_id"]),),
+                ).fetchone()
+                if counts is not None:
+                    copied_count = int(counts["copied"] or 0)
+                    skipped_count = int(counts["skipped"] or 0)
+
+            result.append(
+                ExportRunListItem(
+                    run_id=int(row["run_id"]),
+                    template_id=str(row["template_id"]),
+                    status=status,
+                    started_at=str(row["started_at"]),
+                    completed_at=str(row["completed_at"]) if row["completed_at"] else None,
+                    copied_count=copied_count,
+                    skipped_count=skipped_count,
+                )
+            )
+        return result
     except sqlite3.Error as exc:
         raise ExportTemplateError("导出历史读取失败。") from exc
     finally:
         connection.close()
-
-    return [
-        ExportRunListItem(
-            run_id=int(row["run_id"]),
-            template_id=str(row["template_id"]),
-            status=str(row["status"]),
-            started_at=str(row["started_at"]),
-            completed_at=str(row["completed_at"]) if row["completed_at"] else None,
-            copied_count=int(row["copied_count"]),
-            skipped_count=int(row["skipped_count"]),
-        )
-        for row in rows
-    ]
 
 
 def load_export_run_detail(

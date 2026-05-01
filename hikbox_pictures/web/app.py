@@ -17,6 +17,7 @@ from fastapi.templating import Jinja2Templates
 from hikbox_pictures.product.export_templates import compute_export_preview
 from hikbox_pictures.product.export_templates import create_export_template
 from hikbox_pictures.product.export_templates import execute_export
+from hikbox_pictures.product.export_templates import execute_export_async
 from hikbox_pictures.product.export_templates import ExportTemplateError
 from hikbox_pictures.product.export_templates import ExportTemplateValidationError
 from hikbox_pictures.product.export_templates import load_eligible_persons_for_template
@@ -615,7 +616,7 @@ def create_people_gallery_app(
     @app.post("/exports/{template_id}/execute")
     def export_template_execute_action(template_id: str) -> RedirectResponse:
         try:
-            execute_export(workspace_context, template_id=template_id)
+            execute_export_async(workspace_context, template_id=template_id)
         except ExportTemplateValidationError as exc:
             params = urlencode({"error": str(exc)})
             return RedirectResponse(

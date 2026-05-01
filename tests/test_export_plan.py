@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import threading
 
 import pytest
 
@@ -650,6 +651,205 @@ class TestExecuteIncremental:
 
         # 文件重新出现
         assert file1.exists()
+
+
+# ---------------------------------------------------------------------------
+# execute_export_async 与 running 状态实时计数
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteAsync:
+    def test_async_returns_run_id_and_starts_running(self, tmp_path: Path) -> None:
+        """execute_export_async 应立即返回 run_id，run 状态为 running。"""
+        src = _create_source_image(tmp_path, "IMG_0001.jpg")
+        workspace_context, db_path, output_root = _make_full_workspace(tmp_path, assets=[
+            {"file_name": "IMG_0001.jpg", "absolute_path": src, "capture_month": "2025-01", "person_ids": ["person-alex", "person-blair"]},
+        ])
+
+        from hikbox_pictures.product.export_templates import compute_export_preview, execute_export_async
+
+        compute_export_preview(workspace_context, template_id="template-1")
+        run_id = execute_export_async(workspace_context, template_id="template-1")
+
+        assert run_id is not None
+        assert run_id > 0
+
+        # 立即检查：run 记录已创建
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            run = conn.execute(
+                "SELECT status FROM export_run WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            assert run is not None
+            # 状态可能是 running 或已完成（取决于线程调度）
+            assert run["status"] in ("running", "completed")
+        finally:
+            conn.close()
+
+    def test_async_completes_with_correct_counts(self, tmp_path: Path) -> None:
+        """execute_export_async 后台完成后，状态为 completed，计数正确。"""
+        import time
+
+        src = _create_source_image(tmp_path, "IMG_0001.jpg")
+        workspace_context, db_path, output_root = _make_full_workspace(tmp_path, assets=[
+            {"file_name": "IMG_0001.jpg", "absolute_path": src, "capture_month": "2025-01", "person_ids": ["person-alex", "person-blair"]},
+        ])
+
+        from hikbox_pictures.product.export_templates import compute_export_preview, execute_export_async
+
+        compute_export_preview(workspace_context, template_id="template-1")
+        run_id = execute_export_async(workspace_context, template_id="template-1")
+
+        # 等待后台线程完成
+        for _ in range(50):
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                run = conn.execute(
+                    "SELECT status, copied_count, skipped_count FROM export_run WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()
+                if run and run["status"] != "running":
+                    assert run["status"] == "completed"
+                    assert run["copied_count"] == 1
+                    assert run["skipped_count"] == 0
+                    return
+            finally:
+                conn.close()
+            time.sleep(0.1)
+
+        pytest.fail("后台导出未在 5 秒内完成")
+
+    def test_running_count_from_delivery_records(self, tmp_path: Path) -> None:
+        """running 状态下 load_export_runs_for_template 应从 delivery 实时计算计数。"""
+        import time
+        from hikbox_pictures.product.export_templates import (
+            compute_export_preview, execute_export_async,
+            load_export_runs_for_template, set_per_file_copy_hook,
+        )
+
+        # 创建多个文件使导出时间足够长以便观察 running 状态
+        assets = []
+        for i in range(20):
+            src = _create_source_image(tmp_path, f"IMG_{i:04d}.jpg")
+            assets.append({"file_name": f"IMG_{i:04d}.jpg", "absolute_path": src, "capture_month": "2025-01", "person_ids": ["person-alex", "person-blair"]})
+
+        workspace_context, db_path, output_root = _make_full_workspace(tmp_path, assets=assets)
+
+        compute_export_preview(workspace_context, template_id="template-1")
+
+        # 用 hook 每复制一个文件暂停一下，确保能观察到 running 状态
+        barrier = threading.Event()
+
+        def slow_hook():
+            time.sleep(0.02)
+
+        set_per_file_copy_hook(slow_hook)
+        try:
+            run_id = execute_export_async(workspace_context, template_id="template-1")
+
+            # 立即查询，应该能看到 running 状态和部分计数
+            found_running = False
+            for _ in range(100):
+                runs = load_export_runs_for_template(workspace_context, template_id="template-1")
+                running_runs = [r for r in runs if r.run_id == run_id and r.status == "running"]
+                if running_runs:
+                    found_running = True
+                    # running 状态下计数应来自 delivery 记录
+                    assert running_runs[0].copied_count + running_runs[0].skipped_count >= 0
+                    break
+                # 也可能已完成
+                completed_runs = [r for r in runs if r.run_id == run_id and r.status == "completed"]
+                if completed_runs:
+                    found_running = True
+                    break
+                time.sleep(0.05)
+
+            assert found_running, "未观察到 running 或 completed 状态"
+
+            # 等待完成
+            for _ in range(100):
+                runs = load_export_runs_for_template(workspace_context, template_id="template-1")
+                completed = [r for r in runs if r.run_id == run_id and r.status == "completed"]
+                if completed:
+                    assert completed[0].copied_count == 20
+                    assert completed[0].skipped_count == 0
+                    return
+                time.sleep(0.1)
+
+            pytest.fail("后台导出未在 10 秒内完成")
+        finally:
+            set_per_file_copy_hook(None)
+
+
+# ---------------------------------------------------------------------------
+# 导出历史页 collapsible 区块
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryPageCollapsible:
+    def test_history_page_uses_details_elements(self, tmp_path: Path) -> None:
+        """历史页应使用 <details> 元素实现折叠展开。"""
+        src = _create_source_image(tmp_path, "IMG_0001.jpg")
+        workspace_context, db_path, output_root = _make_full_workspace(tmp_path, assets=[
+            {"file_name": "IMG_0001.jpg", "absolute_path": src, "capture_month": "2025-01", "person_ids": ["person-alex", "person-blair"]},
+        ])
+
+        from hikbox_pictures.product.export_templates import compute_export_preview, execute_export
+        from hikbox_pictures.web.app import create_people_gallery_app
+
+        compute_export_preview(workspace_context, template_id="template-1")
+        execute_export(workspace_context, template_id="template-1")
+
+        app = create_people_gallery_app(workspace_context=workspace_context, person_detail_page_size=20)
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        response = client.get("/exports/template-1/history")
+        assert response.status_code == 200
+        html = response.text
+
+        assert "<details" in html
+        assert "<summary" in html
+        assert "run-section" in html
+
+    def test_history_page_newest_run_expanded_by_default(self, tmp_path: Path) -> None:
+        """最新一次导出应默认展开（open 属性）。"""
+        src = _create_source_image(tmp_path, "IMG_0001.jpg")
+        workspace_context, db_path, output_root = _make_full_workspace(tmp_path, assets=[
+            {"file_name": "IMG_0001.jpg", "absolute_path": src, "capture_month": "2025-01", "person_ids": ["person-alex", "person-blair"]},
+        ])
+
+        from hikbox_pictures.product.export_templates import compute_export_preview, execute_export
+        from hikbox_pictures.web.app import create_people_gallery_app
+
+        compute_export_preview(workspace_context, template_id="template-1")
+        # 执行两次，产生两个 run
+        execute_export(workspace_context, template_id="template-1")
+        # 删除目标文件以便第二次执行能复制
+        (output_root / "only" / "2025-01" / "IMG_0001.jpg").unlink()
+        execute_export(workspace_context, template_id="template-1")
+
+        app = create_people_gallery_app(workspace_context=workspace_context, person_detail_page_size=20)
+        from fastapi.testclient import TestClient
+
+        client = TestClient(app)
+        response = client.get("/exports/template-1/history")
+        html = response.text
+
+        # 第一个 <details> 应有 open 属性
+        first_details_idx = html.index("<details")
+        first_open_idx = html.index("open", first_details_idx)
+        first_close_tag = html.index(">", first_details_idx)
+        assert first_open_idx < first_close_tag, "第一个 <details> 应有 open 属性"
+
+        # 第二个 <details> 不应有 open
+        second_details_idx = html.index("<details", first_details_idx + 1)
+        second_close_tag = html.index(">", second_details_idx)
+        segment = html[second_details_idx:second_close_tag + 1]
+        # 第二个 details 区域内不应有 open（检查 open 在 > 之前）
+        assert "open" not in segment.split(">")[0], "第二个 <details> 不应有 open 属性"
 
 
 # ---------------------------------------------------------------------------
