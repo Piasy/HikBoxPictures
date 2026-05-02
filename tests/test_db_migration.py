@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -17,6 +18,7 @@ def _run_hikbox(
     *args: str,
     cwd: Path | None = None,
     env_updates: dict[str, str] | None = None,
+    timeout: int | None = 60,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     pythonpath_parts = [str(REPO_ROOT)]
@@ -32,6 +34,7 @@ def _run_hikbox(
         env=env,
         text=True,
         capture_output=True,
+        timeout=timeout,
         check=False,
     )
 
@@ -309,16 +312,23 @@ def test_serve_auto_migrates_old_workspace(tmp_path: Path) -> None:
 
     assert _read_schema_version(workspace / ".hikbox" / "library.db") == "1"
 
-    # serve will fail because v1 workspace lacks WebUI tables, but migration should succeed
-    result = _run_hikbox(
-        "serve",
-        "--workspace",
-        str(workspace),
-        "--port",
-        "18765",
-    )
+    # 预占端口，让 serve 在 migration 完成后、启动 uvicorn 前因端口冲突快速退出。
+    # v1 workspace 经 migration 自动升级后已具备所有 WebUI 表，不阻断的话 serve 会成功启动并永久阻塞。
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("127.0.0.1", 18765))
+    try:
+        result = _run_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            "18765",
+        )
+    finally:
+        blocker.close()
 
-    # Migration should have happened even though serve fails
+    # serve 虽然因端口占用启动失败，但 migration 应该已成功执行
     assert _read_schema_version(workspace / ".hikbox" / "library.db") == str(LATEST_LIBRARY_VERSION)
     assert _read_schema_version(workspace / ".hikbox" / "embedding.db") == str(LATEST_EMBEDDING_VERSION)
 

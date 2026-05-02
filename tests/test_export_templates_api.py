@@ -188,26 +188,6 @@ def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> d
     return mapping
 
 
-def _create_scanned_workspace(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, object], dict[str, str]]:
-    workspace = tmp_path / "workspace"
-    external_root = tmp_path / "external-root"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-    library_db = workspace / ".hikbox" / "library.db"
-    return workspace, external_root, library_db, manifest, _expected_target_mapping(library_db, manifest)
 
 
 def _name_person_via_api(base_url: str, person_id: str, display_name: str) -> None:
@@ -257,8 +237,8 @@ def _list_templates_via_api(base_url: str) -> list[dict[str, object]]:
 
 
 class TestExportTemplateCreation:
-    def test_create_template_success(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_success(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -298,8 +278,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_create_template_rejects_zero_or_one_person(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_rejects_zero_or_one_person(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
 
         port = _find_free_port()
@@ -327,8 +307,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_create_template_rejects_missing_or_relative_or_uncreatable_output_root(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_rejects_missing_or_relative_or_uncreatable_output_root(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -366,8 +346,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_create_template_rejects_inactive_or_anonymous_person(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_rejects_inactive_or_anonymous_person(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         casey_id = target_person_ids["target_casey"]
 
@@ -398,8 +378,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_create_template_rejects_active_anonymous_person(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_rejects_active_anonymous_person(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         casey_id = target_person_ids["target_casey"]
 
@@ -433,8 +413,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_create_template_dedup_by_person_ids_and_output_root(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_dedup_by_person_ids_and_output_root(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -462,8 +442,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_create_template_rejects_blank_name(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_rejects_blank_name(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -491,8 +471,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_template_stores_person_ids_not_display_names(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_template_stores_person_ids_not_display_names(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -517,8 +497,8 @@ class TestExportTemplateCreation:
         finally:
             _terminate_process(process)
 
-    def test_api_list_returns_status(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_api_list_returns_status(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -544,8 +524,8 @@ class TestExportTemplateCreation:
 
 
 class TestExportTemplateCascadeInvalidation:
-    def test_merge_winner_absorption_keeps_template_active(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_merge_winner_absorption_keeps_template_active(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
         casey_id = target_person_ids["target_casey"]
@@ -571,8 +551,8 @@ class TestExportTemplateCascadeInvalidation:
         finally:
             _terminate_process(process)
 
-    def test_exclusion_emptying_person_invalidates_template(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_exclusion_emptying_person_invalidates_template(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 

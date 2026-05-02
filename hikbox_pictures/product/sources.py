@@ -145,7 +145,7 @@ def load_workspace_context(workspace: Path) -> WorkspaceContext:
         external_root_path=Path(external_root),
         library_db_path=library_db_path,
         embedding_db_path=embedding_db_path,
-        model_root_path=hikbox_dir / "models" / "insightface",
+        model_root_path=Path(__file__).resolve().parent.parent.parent / ".tmp" / "insightface_model",
     )
 
 

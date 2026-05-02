@@ -59,12 +59,13 @@ def start_scan(
     session_id: int | None = None
     command = " ".join(["hikbox-pictures", *command_args])
     try:
+        _ensure_scan_schema_ready(workspace)
+
         workspace_context = load_workspace_context(workspace)
         with acquire_workspace_operation_lock(
             workspace_context=workspace_context,
             operation_name="scan",
         ):
-            _ensure_scan_schema_ready(workspace_context)
             _reconcile_completed_running_sessions(workspace_context)
             active_sources = _load_active_sources(workspace_context)
             resumable_session = _load_resumable_session(workspace_context)
@@ -199,17 +200,23 @@ def start_scan(
         raise failure from exc
 
 
-def _ensure_scan_schema_ready(workspace_context: WorkspaceContext) -> None:
+def _ensure_scan_schema_ready(workspace: Path) -> None:
+    library_db_path = workspace / ".hikbox" / "library.db"
+    embedding_db_path = workspace / ".hikbox" / "embedding.db"
+
+    if not library_db_path.is_file() or not embedding_db_path.is_file():
+        return
+
     missing_tables: list[str] = []
     missing_tables.extend(
         _find_missing_tables(
-            db_path=workspace_context.library_db_path,
+            db_path=library_db_path,
             required_tables=REQUIRED_LIBRARY_SCAN_TABLES,
         )
     )
     missing_tables.extend(
         _find_missing_tables(
-            db_path=workspace_context.embedding_db_path,
+            db_path=embedding_db_path,
             required_tables=REQUIRED_EMBEDDING_SCAN_TABLES,
         )
     )
@@ -371,32 +378,46 @@ def _load_active_sources(workspace_context: WorkspaceContext) -> list[dict[str, 
 
 
 def _discover_candidates(active_sources: list[dict[str, object]]) -> list[dict[str, object]]:
-    discovered: list[dict[str, object]] = []
-    for source in active_sources:
-        source_id = int(source["id"])
-        source_path = Path(str(source["path"]))
-        for child in sorted(source_path.iterdir(), key=lambda path: (path.name.casefold(), path.name)):
-            if not child.is_file():
-                continue
-            if child.suffix.lower() not in SUPPORTED_SCAN_SUFFIXES:
-                continue
-            absolute_path = child.resolve()
-            discovered.append(
-                {
-                    "source_id": source_id,
-                    "source_path": str(source_path),
-                    "absolute_path": str(absolute_path),
-                    "file_name": child.name,
-                    "file_extension": child.suffix.lower().lstrip("."),
-                    "capture_month": compute_capture_month(absolute_path),
-                    "file_fingerprint": compute_file_fingerprint(absolute_path),
-                    "live_photo_mov_path": find_live_photo_mov(absolute_path),
-                }
-            )
-    return sorted(
-        discovered,
-        key=lambda item: (str(item["absolute_path"]).casefold(), str(item["absolute_path"])),
-    )
+    stop_discover_progress = threading.Event()
+
+    def _log_discover_progress() -> None:
+        while not stop_discover_progress.is_set():
+            print("scan 进度: 阶段=文件发现，正在扫描文件系统...", file=sys.stderr, flush=True)
+            stop_discover_progress.wait(timeout=_SCAN_PROGRESS_INTERVAL_SECONDS)
+
+    progress_thread = threading.Thread(target=_log_discover_progress, daemon=True)
+    progress_thread.start()
+
+    try:
+        discovered: list[dict[str, object]] = []
+        for source in active_sources:
+            source_id = int(source["id"])
+            source_path = Path(str(source["path"]))
+            for child in sorted(source_path.iterdir(), key=lambda path: (path.name.casefold(), path.name)):
+                if not child.is_file():
+                    continue
+                if child.suffix.lower() not in SUPPORTED_SCAN_SUFFIXES:
+                    continue
+                absolute_path = child.resolve()
+                discovered.append(
+                    {
+                        "source_id": source_id,
+                        "source_path": str(source_path),
+                        "absolute_path": str(absolute_path),
+                        "file_name": child.name,
+                        "file_extension": child.suffix.lower().lstrip("."),
+                        "capture_month": compute_capture_month(absolute_path),
+                        "file_fingerprint": compute_file_fingerprint(absolute_path),
+                        "live_photo_mov_path": find_live_photo_mov(absolute_path),
+                    }
+                )
+        return sorted(
+            discovered,
+            key=lambda item: (str(item["absolute_path"]).casefold(), str(item["absolute_path"])),
+        )
+    finally:
+        stop_discover_progress.set()
+        progress_thread.join()
 
 
 def _compute_plan_fingerprint(*, candidates: list[dict[str, object]], batch_size: int) -> str:

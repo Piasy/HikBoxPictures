@@ -28,6 +28,8 @@ import time
 import httpx
 import pytest
 
+from tests.conftest import copy_scanned_workspace
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
@@ -265,18 +267,7 @@ class _LockingTestContext:
 
     def setup_baseline(self) -> None:
         """创建扫描 workspace、命名人物、创建模板（不启动 serve）。"""
-        workspace = self.tmp_path / "workspace"
-        external_root = self.tmp_path / "external-root"
-        manifest = _load_manifest()
-        init_result = _init_workspace(workspace, external_root)
-        assert init_result.returncode == 0, init_result.stderr
-        _prepare_workspace_models(workspace)
-        add_result = _add_source(workspace, FIXTURE_DIR)
-        assert add_result.returncode == 0, add_result.stderr
-        scan_result = _run_hikbox("scan", "start", "--workspace", str(workspace), "--batch-size", "10")
-        assert scan_result.returncode == 0, scan_result.stderr
-        library_db = workspace / ".hikbox" / "library.db"
-        target_ids = _expected_target_mapping(library_db, manifest)
+        workspace, external_root, library_db, manifest, target_ids = copy_scanned_workspace(self.tmp_path)
         alex_id = target_ids["target_alex"]
         blair_id = target_ids["target_blair"]
         output_root = self.tmp_path / "export-output"

@@ -197,26 +197,6 @@ def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> d
     return mapping
 
 
-def _create_scanned_workspace(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, object], dict[str, str]]:
-    workspace = tmp_path / "workspace"
-    external_root = tmp_path / "external-root"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-    library_db = workspace / ".hikbox" / "library.db"
-    return workspace, external_root, library_db, manifest, _expected_target_mapping(library_db, manifest)
 
 
 def _name_person_via_api(base_url: str, person_id: str, display_name: str) -> None:
@@ -400,8 +380,8 @@ et.set_per_file_copy_hook(make_hook())
 
 
 class TestExportTemplatePreview:
-    def test_preview_api_aligns_with_manifest(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_preview_api_aligns_with_manifest(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -441,8 +421,8 @@ class TestExportTemplatePreview:
         finally:
             _terminate_process(process)
 
-    def test_preview_rejects_invalid_template(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_preview_rejects_invalid_template(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -469,8 +449,8 @@ class TestExportTemplatePreview:
 
 
 class TestExportTemplateExecution:
-    def test_execute_copies_files_and_mov(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_execute_copies_files_and_mov(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -571,8 +551,8 @@ class TestExportTemplateExecution:
         finally:
             _terminate_process(process)
 
-    def test_execute_skips_existing_files(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_execute_skips_existing_files(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -623,8 +603,8 @@ class TestExportTemplateExecution:
         finally:
             _terminate_process(process)
 
-    def test_invalid_template_execute_rejected(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_invalid_template_execute_rejected(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -650,8 +630,8 @@ class TestExportTemplateExecution:
         finally:
             _terminate_process(process)
 
-    def test_history_shows_run_and_deliveries(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_history_shows_run_and_deliveries(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -690,8 +670,8 @@ class TestExportTemplateExecution:
         finally:
             _terminate_process(process)
 
-    def test_unwritable_output_root_marks_failed(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_unwritable_output_root_marks_failed(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -722,10 +702,10 @@ class TestExportTemplateExecution:
             os.chmod(output_root, 0o755)
             _terminate_process(process)
 
-    def test_export_preserves_exif_and_timestamps(self, tmp_path: Path) -> None:
+    def test_export_preserves_exif_and_timestamps(self, scanned_workspace, tmp_path: Path) -> None:
         from PIL import Image
 
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -764,12 +744,12 @@ class TestExportTemplateExecution:
         finally:
             _terminate_process(process)
 
-    def test_execute_ignores_later_asset_changes(self, tmp_path: Path) -> None:
+    def test_execute_ignores_later_asset_changes(self, scanned_workspace, tmp_path: Path) -> None:
         # AC-7: export should use snapshot from start time.
         # We use the test-specific per-file copy hook to inject a new assignment
         # for an asset that is NOT in the preview snapshot, proving the export
         # continues with its snapshot and does not pick up the injected change.
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 

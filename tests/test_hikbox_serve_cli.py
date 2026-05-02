@@ -27,7 +27,7 @@ CREATE TABLE schema_meta (
   value TEXT NOT NULL
 );
 
-INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
 
 CREATE TABLE library_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +51,7 @@ CREATE TABLE schema_meta (
   value TEXT NOT NULL
 );
 
-INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
 
 CREATE TABLE library_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,6 +157,40 @@ CREATE TABLE person_merge_operation_assignments (
   assignment_id INTEGER NOT NULL REFERENCES person_face_assignments(id),
   person_role TEXT NOT NULL
 );
+
+CREATE TABLE export_template (
+  template_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  output_root TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'invalid')),
+  created_at TEXT NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE export_template_person (
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  person_id TEXT NOT NULL REFERENCES person(id),
+  PRIMARY KEY (template_id, person_id)
+);
+
+CREATE TABLE export_run (
+  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  copied_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE export_delivery (
+  delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES export_run(run_id),
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  target_path TEXT NOT NULL,
+  result TEXT NOT NULL CHECK (result IN ('copied', 'skipped_exists')),
+  mov_result TEXT NOT NULL CHECK (mov_result IN ('copied', 'skipped_missing', 'not_applicable'))
+);
 """.strip()
 BROKEN_WEBUI_LIBRARY_SQL_MISSING_ASSIGNMENT_UPDATED_AT = """
 CREATE TABLE schema_meta (
@@ -164,7 +198,7 @@ CREATE TABLE schema_meta (
   value TEXT NOT NULL
 );
 
-INSERT INTO schema_meta (key, value) VALUES ('schema_version', '1');
+INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
 
 CREATE TABLE library_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -272,6 +306,40 @@ CREATE TABLE person_merge_operation_assignments (
   merge_operation_id INTEGER NOT NULL REFERENCES person_merge_operations(id),
   assignment_id INTEGER NOT NULL REFERENCES person_face_assignments(id),
   person_role TEXT NOT NULL
+);
+
+CREATE TABLE export_template (
+  template_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  output_root TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('active', 'invalid')),
+  created_at TEXT NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE export_template_person (
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  person_id TEXT NOT NULL REFERENCES person(id),
+  PRIMARY KEY (template_id, person_id)
+);
+
+CREATE TABLE export_run (
+  run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  started_at TEXT NOT NULL,
+  completed_at TEXT,
+  copied_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE export_delivery (
+  delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES export_run(run_id),
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  target_path TEXT NOT NULL,
+  result TEXT NOT NULL CHECK (result IN ('copied', 'skipped_exists')),
+  mov_result TEXT NOT NULL CHECK (mov_result IN ('copied', 'skipped_missing', 'not_applicable'))
 );
 """.strip()
 
@@ -613,49 +681,6 @@ def _read_merge_slice_db_snapshot(library_db: Path) -> dict[str, Any]:
     }
 
 
-def _load_manifest() -> dict[str, object]:
-    return json.loads((FIXTURE_DIR / "manifest.json").read_text(encoding="utf-8"))
-
-
-def _asset_assignment_rows(library_db: Path) -> dict[str, list[tuple[int, str]]]:
-    rows = _fetch_all(
-        library_db,
-        """
-        SELECT
-          assets.file_name,
-          face_observations.face_index,
-          person_face_assignments.person_id
-        FROM person_face_assignments
-        INNER JOIN face_observations
-          ON face_observations.id = person_face_assignments.face_observation_id
-        INNER JOIN assets
-          ON assets.id = face_observations.asset_id
-        WHERE person_face_assignments.active = 1
-        ORDER BY assets.file_name ASC, face_observations.face_index ASC
-        """,
-    )
-    result: dict[str, list[tuple[int, str]]] = {}
-    for file_name, face_index, person_id in rows:
-        result.setdefault(str(file_name), []).append((int(face_index), str(person_id)))
-    return result
-
-
-def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> dict[str, str]:
-    assignment_rows = _asset_assignment_rows(library_db)
-    mapping: dict[str, str] = {}
-    for label in manifest["expected_person_groups"]:
-        observed_person_ids: set[str] = set()
-        for asset in manifest["assets"]:
-            if asset["expected_target_people"] != [label]:
-                continue
-            file_name = str(asset["file"])
-            observed_person_ids.update(person_id for _, person_id in assignment_rows.get(file_name, []))
-        assert observed_person_ids, f"{label} 缺少 target assignment"
-        assert len(observed_person_ids) == 1, observed_person_ids
-        mapping[str(label)] = next(iter(observed_person_ids))
-    return mapping
-
-
 def _read_person_page_status(base_url: str, person_id: str) -> int:
     return int(httpx.get(f"{base_url}/people/{person_id}", timeout=5.0).status_code)
 
@@ -994,28 +1019,11 @@ def test_serve_renders_empty_state_and_missing_person_returns_404(tmp_path: Path
         _terminate_process(process)
 
 
-def test_serve_merge_rejects_crafted_requests_without_db_changes(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-merge-crafted"
-    external_root = tmp_path / "external-root-merge-crafted"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_merge_rejects_crafted_requests_without_db_changes(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     blair_person_id = target_person_ids["target_blair"]
@@ -1107,28 +1115,11 @@ def test_serve_undo_rejects_crafted_request_when_no_merge_exists(tmp_path: Path)
         _terminate_process(process)
 
 
-def test_serve_merge_rolls_back_when_fault_injection_fails_mid_transaction(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-merge-fault"
-    external_root = tmp_path / "external-root-merge-fault"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_merge_rolls_back_when_fault_injection_fails_mid_transaction(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     db_snapshot_before_merge = _read_merge_slice_db_snapshot(library_db)
@@ -1167,28 +1158,11 @@ def test_serve_merge_rolls_back_when_fault_injection_fails_mid_transaction(tmp_p
         _terminate_process(process)
 
 
-def test_serve_undo_rolls_back_when_fault_injection_fails_mid_transaction(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-undo-fault"
-    external_root = tmp_path / "external-root-undo-fault"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_undo_rolls_back_when_fault_injection_fails_mid_transaction(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
 
@@ -1284,28 +1258,11 @@ def test_serve_undo_rolls_back_when_fault_injection_fails_mid_transaction(tmp_pa
         _terminate_process(success_process)
 
 
-def test_serve_undo_allows_only_one_real_rollback_under_concurrency(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-undo-concurrency"
-    external_root = tmp_path / "external-root-undo-concurrency"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_undo_allows_only_one_real_rollback_under_concurrency(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
 
@@ -1390,28 +1347,11 @@ def test_serve_undo_allows_only_one_real_rollback_under_concurrency(tmp_path: Pa
         _terminate_process(process)
 
 
-def test_serve_undo_rejects_incomplete_merge_snapshot_without_db_changes(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-undo-broken-snapshot"
-    external_root = tmp_path / "external-root-undo-broken-snapshot"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_undo_rejects_incomplete_merge_snapshot_without_db_changes(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
 
@@ -1464,30 +1404,23 @@ def test_serve_undo_rejects_incomplete_merge_snapshot_without_db_changes(tmp_pat
         _terminate_process(process)
 
 
-def test_serve_undo_rejects_after_scan_invalidation_deletes_winner_assignment(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-undo-invalidation"
-    external_root = tmp_path / "external-root-undo-invalidation"
+def test_serve_undo_rejects_after_scan_invalidation_deletes_winner_assignment(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     source_dir = tmp_path / "scan-source"
     shutil.copytree(FIXTURE_DIR, source_dir)
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, source_dir)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+    # 将 library_sources.path 更新为可写副本
+    connection = sqlite3.connect(str(library_db))
+    try:
+        with connection:
+            connection.execute(
+                "UPDATE library_sources SET path = ? WHERE id = 1",
+                (str(source_dir.resolve()),),
+            )
+    finally:
+        connection.close()
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     winner_person_id = min(alex_person_id, casey_person_id)
@@ -1565,28 +1498,11 @@ def test_serve_undo_rejects_after_scan_invalidation_deletes_winner_assignment(tm
         _terminate_process(undo_process)
 
 
-def test_serve_exclude_rejects_crafted_requests_without_db_changes(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-exclude-crafted"
-    external_root = tmp_path / "external-root-exclude-crafted"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_exclude_rejects_crafted_requests_without_db_changes(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     blair_person_id = target_person_ids["target_blair"]
     alex_assignment_ids = _fetch_all(
@@ -1691,28 +1607,11 @@ def test_serve_exclude_rejects_crafted_requests_without_db_changes(tmp_path: Pat
         _terminate_process(process)
 
 
-def test_serve_exclude_rolls_back_when_fault_injection_fails_mid_transaction(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-exclude-fault"
-    external_root = tmp_path / "external-root-exclude-fault"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_exclude_rolls_back_when_fault_injection_fails_mid_transaction(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     blair_person_id = target_person_ids["target_blair"]
     assignment_ids = [
         int(assignment_id)
@@ -1762,28 +1661,11 @@ def test_serve_exclude_rolls_back_when_fault_injection_fails_mid_transaction(tmp
         _terminate_process(process)
 
 
-def test_serve_exclude_invalidates_latest_merge_undo_with_real_http(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-exclude-undo-invalid"
-    external_root = tmp_path / "external-root-exclude-undo-invalid"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
+def test_serve_exclude_invalidates_latest_merge_undo_with_real_http(
+    tmp_path: Path,
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     winner_person_id = min(alex_person_id, casey_person_id)

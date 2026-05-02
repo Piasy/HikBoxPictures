@@ -20,6 +20,7 @@ import pytest
 
 import hikbox_pictures.product.scan as scan_module
 import hikbox_pictures.product.scan_worker as scan_worker_module
+from tests.conftest import copy_scanned_workspace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -122,24 +123,6 @@ def _add_source(workspace: Path, source_dir: Path) -> subprocess.CompletedProces
     )
 
 
-def _prepare_workspace_models(workspace: Path) -> Path:
-    source_root = _find_model_root()
-    target_root = workspace / ".hikbox" / "models" / "insightface"
-    if target_root.exists():
-        shutil.rmtree(target_root)
-    shutil.copytree(source_root, target_root)
-    return target_root
-
-
-def _find_model_root() -> Path:
-    candidates = [REPO_ROOT / ".insightface", Path.home() / ".insightface"]
-    candidates.extend(parent / ".insightface" for parent in REPO_ROOT.parents)
-    for candidate in candidates:
-        if (candidate / "models" / "buffalo_l" / "det_10g.onnx").exists():
-            return candidate
-    raise AssertionError("缺少 InsightFace buffalo_l 模型目录，无法执行 scan CLI 集成测试")
-
-
 def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -214,7 +197,7 @@ def test_scan_start_fails_when_no_active_source_exists(tmp_path: Path) -> None:
     external_root = tmp_path / "external-root"
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
 
     result = _run_hikbox(
         "scan",
@@ -233,7 +216,7 @@ def test_scan_start_fails_when_serve_is_running(tmp_path: Path) -> None:
     external_root = tmp_path / "external-root-serve-running"
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, FIXTURE_DIR)
     assert add_result.returncode == 0
 
@@ -307,7 +290,7 @@ def test_scan_start_fails_early_when_workspace_lacks_person_face_exclusions_tabl
 
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, source_dir)
     assert add_result.returncode == 0
 
@@ -354,7 +337,7 @@ def test_scan_start_downgrades_unreadable_supported_file_to_asset_failure(tmp_pa
 
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, source_dir)
     assert add_result.returncode == 0
 
@@ -436,7 +419,7 @@ def test_scan_start_handles_duplicate_content_assets_in_same_batch_without_artif
 
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, source_dir)
     assert add_result.returncode == 0
 
@@ -493,13 +476,7 @@ def test_scan_start_handles_duplicate_content_assets_in_same_batch_without_artif
 
 
 def test_scan_start_reports_log_path_io_failure_without_traceback(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-log-path-failure"
-    external_root = tmp_path / "external-root-log-path-failure"
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
+    workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
 
     logs_dir = external_root / "logs"
     shutil.rmtree(logs_dir)
@@ -543,7 +520,7 @@ def test_scan_start_fails_when_source_becomes_invalid(
 
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, source_dir)
     assert add_result.returncode == 0
 
@@ -584,7 +561,7 @@ def test_scan_start_runs_fixture_pipeline_and_persists_outputs(tmp_path: Path) -
 
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     home_without_models = tmp_path / "home-without-insightface"
     home_without_models.mkdir()
     spy_dir, spy_log_path = _prepare_faceanalysis_spy(tmp_path / "spy-success")
@@ -738,13 +715,13 @@ def test_scan_start_runs_fixture_pipeline_and_persists_outputs(tmp_path: Path) -
     assert red_box_pixels > 0
 
     scan_log_text = (logs_dir / "scan.log.jsonl").read_text(encoding="utf-8")
-    assert str(workspace / ".hikbox" / "models" / "insightface") in scan_log_text
+    assert str(REPO_ROOT / ".tmp" / "insightface_model") in scan_log_text
     assert str(home_without_models / ".insightface") not in scan_log_text
     spy_records = _read_jsonl(spy_log_path)
     assert spy_records
     assert {record["event"] for record in spy_records} == {"faceanalysis_init"}
     assert {record["name"] for record in spy_records} == {"buffalo_l"}
-    assert {record["root"] for record in spy_records} == {str((workspace / ".hikbox" / "models" / "insightface").resolve())}
+    assert {record["root"] for record in spy_records} == {str(REPO_ROOT / ".tmp" / "insightface_model")}
 
 
 def test_scan_worker_emits_batch_progress_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -921,7 +898,7 @@ def test_scan_start_fails_when_embedding_dimension_is_not_512_and_logs_failure(t
     external_root = tmp_path / "external-root-bad-embedding"
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, FIXTURE_DIR)
     assert add_result.returncode == 0
     spy_dir, spy_log_path = _prepare_faceanalysis_spy(tmp_path / "spy-bad-embedding")
@@ -968,7 +945,7 @@ def test_scan_start_marks_batch_and_session_failed_and_leaves_no_artifacts_when_
     external_root = tmp_path / "external-root-commit-failure"
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, FIXTURE_DIR)
     assert add_result.returncode == 0
     spy_dir, spy_log_path = _prepare_faceanalysis_spy(tmp_path / "spy-commit-failure")
@@ -1025,7 +1002,7 @@ def test_scan_start_rolls_back_partial_artifact_move_when_second_move_fails(tmp_
     external_root = tmp_path / "external-root-move-failure"
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, FIXTURE_DIR)
     assert add_result.returncode == 0
     spy_dir, spy_log_path = _prepare_faceanalysis_spy(tmp_path / "spy-move-failure")
@@ -1073,25 +1050,7 @@ def test_scan_start_rolls_back_partial_artifact_move_when_second_move_fails(tmp_
 
 
 def test_scan_start_failed_rescan_keeps_previously_committed_artifacts(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-rescan-move-failure"
-    external_root = tmp_path / "external-root-rescan-move-failure"
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    first_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert first_result.returncode == 0, first_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
+    workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
     embedding_db = workspace / ".hikbox" / "embedding.db"
     original_crop_path, original_context_path = _fetch_one(
         library_db,
@@ -1169,25 +1128,7 @@ def test_scan_start_failed_rescan_keeps_previously_committed_artifacts(tmp_path:
 
 
 def test_scan_start_keeps_committed_new_artifacts_when_old_cleanup_fails_after_commit(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace-old-cleanup-failure"
-    external_root = tmp_path / "external-root-old-cleanup-failure"
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    first_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert first_result.returncode == 0, first_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
+    workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
     original_crop_path, original_context_path = _fetch_one(
         library_db,
         """
@@ -1263,24 +1204,7 @@ def test_scan_start_keeps_committed_new_artifacts_when_old_cleanup_fails_after_c
 
 
 def test_scan_start_is_idempotent_after_completed_scan(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    external_root = tmp_path / "external-root"
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    first_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert first_result.returncode == 0, first_result.stderr
-    library_db = workspace / ".hikbox" / "library.db"
+    workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
     embedding_db = workspace / ".hikbox" / "embedding.db"
     before_counts = (
         _count_rows(library_db, "assets"),
@@ -1314,25 +1238,7 @@ def test_scan_start_is_idempotent_after_completed_scan(tmp_path: Path) -> None:
 def test_scan_start_refreshes_stale_running_session_when_all_batches_are_already_completed(
     tmp_path: Path,
 ) -> None:
-    workspace = tmp_path / "workspace-stale-session-summary"
-    external_root = tmp_path / "external-root-stale-session-summary"
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    first_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert first_result.returncode == 0, first_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
+    workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
     original_summary = _fetch_one(
         library_db,
         """
@@ -1407,7 +1313,7 @@ def test_scan_start_recovers_from_killed_process_without_rerunning_completed_bat
     external_root = tmp_path / f"external-root-{stop_signal.name.lower()}"
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, FIXTURE_DIR)
     assert add_result.returncode == 0
 
@@ -1485,7 +1391,7 @@ def test_scan_start_recovers_killed_batch_and_downgrades_missing_file_to_asset_f
 
     init_result = _init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
+
     add_result = _add_source(workspace, source_dir)
     assert add_result.returncode == 0
 

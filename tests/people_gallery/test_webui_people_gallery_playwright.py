@@ -20,6 +20,8 @@ from playwright.sync_api import Page
 from playwright.sync_api import expect
 from playwright.sync_api import sync_playwright
 
+from tests.conftest import copy_scanned_workspace
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
@@ -804,32 +806,6 @@ def _manifest_files_for_target(manifest: dict[str, object], label: str) -> list[
     ]
 
 
-def _create_scanned_workspace(
-    tmp_path: Path,
-    *,
-    fixture_dir: Path = FIXTURE_DIR,
-    batch_size: int = 10,
-) -> tuple[Path, Path, Path, dict[str, object], dict[str, str]]:
-    workspace = tmp_path / "workspace"
-    external_root = tmp_path / "external-root"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, fixture_dir)
-    assert add_result.returncode == 0
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        str(batch_size),
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-    library_db = workspace / ".hikbox" / "library.db"
-    return workspace, external_root, library_db, manifest, _expected_target_mapping(library_db, manifest)
-
 
 def test_people_gallery_home_sections_sort_by_sample_count_with_slice0_gallery(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
@@ -936,29 +912,9 @@ def test_people_gallery_home_sections_sort_by_sample_count_with_slice0_gallery(t
         _terminate_process(process)
 
 
-def test_people_gallery_browse_via_real_serve_and_real_page(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    external_root = tmp_path / "external-root"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
+def test_people_gallery_browse_via_real_serve_and_real_page(scanned_workspace, tmp_path: Path) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     expected_people = _read_active_people(library_db)
-    target_person_ids = _expected_target_mapping(library_db, manifest)
     manifest_asset_id_by_file_name = {
         str(asset["file"]): str(asset["id"]) for asset in manifest["assets"]
     }
@@ -1095,31 +1051,11 @@ def test_people_gallery_browse_via_real_serve_and_real_page(tmp_path: Path) -> N
         _terminate_process(process)
 
 
-def test_people_gallery_naming_via_real_serve_real_page_and_real_db(tmp_path: Path) -> None:
-    workspace = tmp_path / "workspace"
-    external_root = tmp_path / "external-root"
-    manifest = _load_manifest()
+def test_people_gallery_naming_via_real_serve_real_page_and_real_db(scanned_workspace, tmp_path: Path) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
     people_by_label = {
         str(person["label"]): person for person in manifest["people"]
     }
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-
-    library_db = workspace / ".hikbox" / "library.db"
-    target_person_ids = _expected_target_mapping(library_db, manifest)
     alex_person_id = target_person_ids["target_alex"]
     blair_person_id = target_person_ids["target_blair"]
     casey_person_id = target_person_ids["target_casey"]
@@ -1357,8 +1293,8 @@ def test_people_gallery_naming_via_real_serve_real_page_and_real_db(tmp_path: Pa
         _terminate_process(process)
 
 
-def test_people_gallery_merge_via_real_serve_real_page_and_real_db(tmp_path: Path) -> None:
-    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_merge_via_real_serve_real_page_and_real_db(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = scanned_workspace
     incremental_manifest = _load_incremental_manifest()
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
@@ -1547,8 +1483,8 @@ def test_people_gallery_merge_via_real_serve_real_page_and_real_db(tmp_path: Pat
         _terminate_process(process)
 
 
-def test_people_gallery_merge_prefers_sample_count_over_request_order(tmp_path: Path) -> None:
-    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_merge_prefers_sample_count_over_request_order(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     blair_person_id = target_person_ids["target_blair"]
@@ -1651,8 +1587,8 @@ def test_people_gallery_merge_prefers_sample_count_over_request_order(tmp_path: 
         _terminate_process(process)
 
 
-def test_people_gallery_merge_prefers_named_person_over_anonymous_even_with_fewer_samples(tmp_path: Path) -> None:
-    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_merge_prefers_named_person_over_anonymous_even_with_fewer_samples(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = scanned_workspace
     people_by_label = {str(person["label"]): person for person in manifest["people"]}
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
@@ -1778,8 +1714,8 @@ def test_people_gallery_merge_prefers_named_person_over_anonymous_even_with_fewe
         _terminate_process(process)
 
 
-def test_people_gallery_merge_two_named_people_succeeds_via_real_home(tmp_path: Path) -> None:
-    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_merge_two_named_people_succeeds_via_real_home(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = scanned_workspace
     people_by_label = {str(person["label"]): person for person in manifest["people"]}
     alex_person_id = target_person_ids["target_alex"]
     blair_person_id = target_person_ids["target_blair"]
@@ -1856,8 +1792,8 @@ def test_people_gallery_merge_two_named_people_succeeds_via_real_home(tmp_path: 
         _terminate_process(process)
 
 
-def test_people_gallery_undo_restores_latest_merge_via_real_home_and_db(tmp_path: Path) -> None:
-    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_undo_restores_latest_merge_via_real_home_and_db(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     winner_person_id = min(alex_person_id, casey_person_id)
@@ -1941,8 +1877,8 @@ def test_people_gallery_undo_restores_latest_merge_via_real_home_and_db(tmp_path
         _terminate_process(process)
 
 
-def test_people_gallery_undo_is_disabled_without_merge_and_after_already_undone_merge(tmp_path: Path) -> None:
-    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_undo_is_disabled_without_merge_and_after_already_undone_merge(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
 
@@ -1997,8 +1933,8 @@ def test_people_gallery_undo_is_disabled_without_merge_and_after_already_undone_
         _terminate_process(process)
 
 
-def test_people_gallery_undo_remains_available_after_third_person_rename(tmp_path: Path) -> None:
-    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_undo_remains_available_after_third_person_rename(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = scanned_workspace
     people_by_label = {str(person["label"]): person for person in manifest["people"]}
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
@@ -2079,8 +2015,8 @@ def test_people_gallery_undo_remains_available_after_third_person_rename(tmp_pat
         _terminate_process(process)
 
 
-def test_people_gallery_undo_rejects_after_incremental_assignment_write(tmp_path: Path) -> None:
-    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_undo_rejects_after_incremental_assignment_write(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     winner_person_id = min(alex_person_id, casey_person_id)
@@ -2157,9 +2093,9 @@ def test_people_gallery_undo_rejects_after_incremental_assignment_write(tmp_path
         _terminate_process(process)
 
 
-def test_people_gallery_undo_rejects_real_winner_name_writes_but_keeps_noop_eligible(tmp_path: Path) -> None:
+def test_people_gallery_undo_rejects_real_winner_name_writes_but_keeps_noop_eligible(scanned_workspace, tmp_path: Path) -> None:
     def _run_anonymous_winner_named_then_rejected(case_tmp_path: Path) -> None:
-        workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(case_tmp_path)
+        workspace, _, library_db, _, target_person_ids = copy_scanned_workspace(case_tmp_path)
         alex_person_id = target_person_ids["target_alex"]
         casey_person_id = target_person_ids["target_casey"]
         winner_person_id = min(alex_person_id, casey_person_id)
@@ -2213,7 +2149,7 @@ def test_people_gallery_undo_rejects_real_winner_name_writes_but_keeps_noop_elig
             _terminate_process(process)
 
     def _run_named_winner_renamed_then_rejected(case_tmp_path: Path) -> None:
-        workspace, _, _, manifest, target_person_ids = _create_scanned_workspace(case_tmp_path)
+        workspace, _, _, manifest, target_person_ids = copy_scanned_workspace(case_tmp_path)
         people_by_label = {str(person["label"]): person for person in manifest["people"]}
         alex_person_id = target_person_ids["target_alex"]
         casey_person_id = target_person_ids["target_casey"]
@@ -2275,7 +2211,7 @@ def test_people_gallery_undo_rejects_real_winner_name_writes_but_keeps_noop_elig
             _terminate_process(process)
 
     def _run_named_winner_noop_stays_eligible(case_tmp_path: Path) -> None:
-        workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(case_tmp_path)
+        workspace, _, library_db, manifest, target_person_ids = copy_scanned_workspace(case_tmp_path)
         people_by_label = {str(person["label"]): person for person in manifest["people"]}
         alex_person_id = target_person_ids["target_alex"]
         casey_person_id = target_person_ids["target_casey"]
@@ -2356,8 +2292,8 @@ def test_people_gallery_undo_rejects_real_winner_name_writes_but_keeps_noop_elig
     _run_named_winner_noop_stays_eligible(tmp_path / "named-winner-noop")
 
 
-def test_people_gallery_undo_only_rolls_back_latest_merge(tmp_path: Path) -> None:
-    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_undo_only_rolls_back_latest_merge(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     casey_person_id = target_person_ids["target_casey"]
     blair_person_id = target_person_ids["target_blair"]
@@ -2421,8 +2357,8 @@ def test_people_gallery_undo_only_rolls_back_latest_merge(tmp_path: Path) -> Non
         _terminate_process(process)
 
 
-def test_people_gallery_exclude_single_sample_prg_rescan_and_db_truth(tmp_path: Path) -> None:
-    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_exclude_single_sample_prg_rescan_and_db_truth(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = scanned_workspace
     alex_person_id = target_person_ids["target_alex"]
     alex_assignments_before = _read_active_assignment_details(library_db, alex_person_id)
     excluded_assignment = alex_assignments_before[0]
@@ -2524,8 +2460,8 @@ def test_people_gallery_exclude_single_sample_prg_rescan_and_db_truth(tmp_path: 
     assert len(_read_active_assignment_ids(library_db, alex_person_id)) == len(alex_assignments_before) - 1
 
 
-def test_people_gallery_exclude_two_samples_updates_exact_active_set(tmp_path: Path) -> None:
-    workspace, _, library_db, _, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_exclude_two_samples_updates_exact_active_set(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, target_person_ids = scanned_workspace
     blair_person_id = target_person_ids["target_blair"]
     blair_assignments_before = _read_active_assignment_details(library_db, blair_person_id)
     selected_assignments = blair_assignments_before[:2]
@@ -2603,8 +2539,8 @@ def test_people_gallery_exclude_two_samples_updates_exact_active_set(tmp_path: P
         assert exclusion_rows[0]["source_assignment_id"] == int(selected["assignment_id"])
 
 
-def test_people_gallery_exclude_all_samples_redirects_home_and_person_detail_404(tmp_path: Path) -> None:
-    workspace, _, library_db, _, _ = _create_scanned_workspace(tmp_path)
+def test_people_gallery_exclude_all_samples_redirects_home_and_person_detail_404(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, _ = scanned_workspace
     active_people_before = _read_active_people(library_db)
     target_person_id = next(
         person_id
@@ -2687,8 +2623,8 @@ def test_people_gallery_exclude_all_samples_redirects_home_and_person_detail_404
     assert int(remaining_face_rows[0][0]) == len(target_assignments)
 
 
-def test_people_gallery_full_exclusion_rescan_same_gallery_keeps_faces_unassigned(tmp_path: Path) -> None:
-    workspace, _, library_db, _, _ = _create_scanned_workspace(tmp_path)
+def test_people_gallery_full_exclusion_rescan_same_gallery_keeps_faces_unassigned(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, _ = scanned_workspace
     active_people_before = _read_active_people(library_db)
     target_person_id = next(
         person_id
@@ -2743,8 +2679,8 @@ def test_people_gallery_full_exclusion_rescan_same_gallery_keeps_faces_unassigne
         )
 
 
-def test_people_gallery_full_exclusion_releases_name_for_reuse_via_real_page(tmp_path: Path) -> None:
-    workspace, _, library_db, _, _ = _create_scanned_workspace(tmp_path)
+def test_people_gallery_full_exclusion_releases_name_for_reuse_via_real_page(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, _, _ = scanned_workspace
     active_people_before = _read_active_people(library_db)
     target_person_id = next(
         person_id
@@ -2822,8 +2758,8 @@ def test_people_gallery_full_exclusion_releases_name_for_reuse_via_real_page(tmp
     assert other_record["is_named"] is True
 
 
-def test_people_gallery_exclusion_respects_incremental_source_and_accumulates_person_truth(tmp_path: Path) -> None:
-    workspace, _, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+def test_people_gallery_exclusion_respects_incremental_source_and_accumulates_person_truth(scanned_workspace, tmp_path: Path) -> None:
+    workspace, _, library_db, manifest, target_person_ids = scanned_workspace
     people_by_label = {str(person["label"]): person for person in manifest["people"]}
     incremental_manifest = _load_incremental_manifest()
     alex_person_id = target_person_ids["target_alex"]

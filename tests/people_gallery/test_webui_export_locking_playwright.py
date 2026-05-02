@@ -204,22 +204,11 @@ et.set_per_file_copy_hook(make_hook())
 class TestWebUIExportLockingControls:
     """AC-8：导出 running 期间 WebUI 控件禁用/隐藏。"""
 
-    def test_controls_disabled_during_export_running(self, tmp_path: Path) -> None:
+    def test_controls_disabled_during_export_running(self, scanned_workspace, tmp_path: Path) -> None:
         """验证导出 running 时四类控件 disabled。"""
         import httpx
 
-        workspace = tmp_path / "workspace"
-        external_root = tmp_path / "external-root"
-        manifest = _load_manifest()
-        init_result = _init_workspace(workspace, external_root)
-        assert init_result.returncode == 0
-        _prepare_workspace_models(workspace)
-        add_result = _add_source(workspace, FIXTURE_DIR)
-        assert add_result.returncode == 0
-        scan_result = _run_hikbox("scan", "start", "--workspace", str(workspace), "--batch-size", "10")
-        assert scan_result.returncode == 0, scan_result.stderr
-        library_db = workspace / ".hikbox" / "library.db"
-        target_ids = _expected_target_mapping(library_db, manifest)
+        workspace, external_root, library_db, manifest, target_ids = scanned_workspace
         alex_id = target_ids["target_alex"]
         blair_id = target_ids["target_blair"]
         casey_id = target_ids["target_casey"]
@@ -270,6 +259,13 @@ class TestWebUIExportLockingControls:
             )
             resp.raise_for_status()
             template_id = resp.json()["template_id"]
+
+            # 先调用 preview 填充 export_plan，否则 _run_export 无数据可复制，hook 不会触发
+            preview_resp = httpx.get(
+                f"{base_url}/api/export-templates/{template_id}/preview",
+                timeout=30.0,
+            )
+            preview_resp.raise_for_status()
 
             # 在后台线程启动导出（将阻塞在 hook），主线程等待 running 记录出现
             import threading

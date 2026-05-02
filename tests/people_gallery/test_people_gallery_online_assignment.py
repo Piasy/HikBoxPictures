@@ -73,10 +73,6 @@ def _find_model_root() -> Path:
     raise AssertionError("缺少 InsightFace buffalo_l 模型目录，无法执行在线人物归属真实集成测试")
 
 
-def _read_manifest() -> dict[str, object]:
-    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-
-
 def _fetch_all(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
     connection = sqlite3.connect(db_path)
     try:
@@ -296,29 +292,10 @@ def test_target_group_assignment_helper_rejects_duplicate_person_when_target_cou
         )
 
 
-def test_scan_start_creates_expected_online_assignments_and_is_idempotent(tmp_path: Path) -> None:
-    manifest = _read_manifest()
-    workspace = tmp_path / "workspace-online-assignment"
-    external_root = tmp_path / "external-root-online-assignment"
-
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-
-    first_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-
-    assert first_result.returncode == 0, first_result.stderr
-    library_db = workspace / ".hikbox" / "library.db"
-    mapping = _expected_target_mapping(library_db, manifest)
+def test_scan_start_creates_expected_online_assignments_and_is_idempotent(
+    scanned_workspace: tuple[Path, Path, Path, dict[str, object], dict[str, str]],
+) -> None:
+    workspace, external_root, library_db, manifest, mapping = scanned_workspace
     assignment_rows = _asset_assignment_rows(library_db)
     target_person_ids = set(mapping.values())
 

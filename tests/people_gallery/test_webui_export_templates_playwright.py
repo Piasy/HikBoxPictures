@@ -190,31 +190,10 @@ def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> d
     return mapping
 
 
-def _create_scanned_workspace(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, object], dict[str, str]]:
-    workspace = tmp_path / "workspace"
-    external_root = tmp_path / "external-root"
-    manifest = _load_manifest()
-    init_result = _init_workspace(workspace, external_root)
-    assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, FIXTURE_DIR)
-    assert add_result.returncode == 0
-    scan_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
-    )
-    assert scan_result.returncode == 0, scan_result.stderr
-    library_db = workspace / ".hikbox" / "library.db"
-    return workspace, external_root, library_db, manifest, _expected_target_mapping(library_db, manifest)
-
 
 class TestExportTemplateWebUI:
-    def test_create_template_and_list_shows_fields(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_create_template_and_list_shows_fields(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -276,8 +255,8 @@ class TestExportTemplateWebUI:
         finally:
             _terminate_process(process)
 
-    def test_person_selector_excludes_anonymous_and_inactive(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_person_selector_excludes_anonymous_and_inactive(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
         casey_id = target_person_ids["target_casey"]
@@ -323,8 +302,8 @@ class TestExportTemplateWebUI:
         finally:
             _terminate_process(process)
 
-    def test_form_error_feedback_and_value_preserve(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_form_error_feedback_and_value_preserve(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
 
         port = _find_free_port()
@@ -360,8 +339,8 @@ class TestExportTemplateWebUI:
         finally:
             _terminate_process(process)
 
-    def test_cascade_invalidation_shows_invalid_status(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_cascade_invalidation_shows_invalid_status(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -410,8 +389,8 @@ class TestExportTemplateWebUI:
         finally:
             _terminate_process(process)
 
-    def test_merge_winner_keeps_template_active(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_merge_winner_keeps_template_active(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
         casey_id = target_person_ids["target_casey"]
@@ -457,8 +436,8 @@ class TestExportTemplateWebUI:
         finally:
             _terminate_process(process)
 
-    def test_preview_page_grid_and_counts(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_preview_page_grid_and_counts(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -532,8 +511,8 @@ class TestExportTemplateWebUI:
         finally:
             _terminate_process(process)
 
-    def test_history_page_shows_run_details(self, tmp_path: Path) -> None:
-        workspace, external_root, library_db, manifest, target_person_ids = _create_scanned_workspace(tmp_path)
+    def test_history_page_shows_run_details(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
@@ -569,13 +548,14 @@ class TestExportTemplateWebUI:
                 # Visit history page
                 page.goto(f"{base_url}/exports/{template_id}/history")
 
-                row = page.locator("tr[data-run-id]").first
-                expect(row.locator("[data-run-status]")).to_contain_text("completed")
-                expect(row.locator("[data-run-copied]")).not_to_have_text("")
-                expect(row.locator("[data-run-skipped]")).not_to_have_text("")
+                # 模板使用 <details class="run-section">，首个默认 open
+                run_section = page.locator("details.run-section").first
+                expect(run_section.locator(".run-badge")).to_contain_text("completed")
+                expect(run_section.locator(".run-stat.copied")).not_to_have_text("")
+                expect(run_section.locator(".run-stat.skipped")).not_to_have_text("")
 
-                # AC-6: deliveries detail list
-                deliveries_section = page.locator(f"tr[data-run-deliveries='{run_id}']")
+                # deliveries 明细
+                deliveries_section = run_section.locator(".run-deliveries")
                 expect(deliveries_section).to_be_visible()
 
                 deliveries = run_detail["deliveries"]
