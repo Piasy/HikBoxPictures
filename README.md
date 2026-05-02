@@ -66,6 +66,11 @@ hikbox-pictures serve --workspace /path/to/workspace [--port <port>] [--person-d
 
 WebUI 以 FastAPI + uvicorn 提供服务，默认绑定 `127.0.0.1`。
 
+## 工作区与运行时文档
+
+- 数据库 schema 和 migration 机制详见 `docs/db_schema.md`。
+- 工作区 `config.json`、日志输出和扫描/归属运行语义详见 `docs/runtime_semantics.md`。
+
 ## WebUI 功能
 
 ### 人物库浏览
@@ -118,40 +123,44 @@ WebUI 同时提供 JSON API 端点：
 
 ## DB Migration
 
-数据库 schema 变更通过 migration 机制自动执行：
-
-- SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则为 `library_v{N}.sql` 和 `embedding_v{N}.sql`。
-- `library.db` 和 `embedding.db` 各自独立维护版本号，各自独立执行 migration。
-- `init` 命令先执行 v1 全量建表，再依次升级到最新版本。
-- 其他命令打开 DB 连接后自动执行待升级的 migration SQL。
-- 涉及 schema 修改时，需同步更新 `docs/db_schema.md`。
+数据库 schema 和 migration 机制详见 `docs/db_schema.md`。涉及 schema 修改时，必须新增对应 migration SQL，并同步更新该文档。工作区配置、日志与运行语义见 `docs/runtime_semantics.md`。
 
 ## 运行测试
 
-推荐统一通过脚本运行：
+自动化验收统一通过 `./scripts/run_tests.sh` 执行。脚本会按测试文件逐个运行，并在每个文件结束后打印结果摘要（总运行用例数、失败用例数、总耗时）。如果 `.venv` 不存在，先执行 `./scripts/install.sh`，不要直接使用系统 Python 跑仓库测试。
 
 ```bash
 ./scripts/run_tests.sh
 ```
 
-运行单个测试文件或测试用例：
+常用运行方式：
 
 ```bash
 ./scripts/run_tests.sh tests/test_hikbox_init_cli.py
 ./scripts/run_tests.sh tests/people_gallery/test_people_gallery_online_assignment.py::test_scan_start_creates_expected_online_assignments_and_is_idempotent
+./scripts/run_tests.sh --scope backend
+./scripts/run_tests.sh --scope frontend
 ```
 
-如果 `.venv` 不存在，先执行 `./scripts/install.sh`，不要直接使用系统 Python 跑仓库测试。
+`--scope backend` 会排除 `test_webui_*_playwright.py`，`--scope frontend` 只运行 `test_webui_*_playwright.py`；scope 和文件路径可以组合，也可以传入多个文件路径。
 
-## Playwright 与前端验收
+最新一轮逐文件全量运行总耗时约 15 分钟，其中 `tests/test_hikbox_scan_cli.py` 约 6 分钟、`tests/people_gallery/test_webui_people_gallery_playwright.py` 约 4 分钟、`tests/test_hikbox_serve_cli.py` 约 2 分钟，是主要耗时来源；其余多数文件在 30 秒内完成。日常修改优先运行受影响文件，收尾或跨模块改动再运行 `--scope backend`、`--scope frontend` 或全量。
 
-WebUI 自动化验收以 Python Playwright + pytest 为主，测试路径约定为：
+已扫描图库基线已经抽到 `tests/conftest.py`：全量 fixture 的 `init -> source add -> scan start` 以 session 级金色工作区懒加载执行一次；新增测试只要需要“已完成主基线扫描的图库”，必须复用 `scanned_workspace` 或 `copy_scanned_workspace(tmp_path)`，不要重新内联完整 init/scan helper。
+
+使用预扫描工作区时，测试只应修改自己的副本；`copy_scanned_workspace` 会修复副本中的 `config.json`、`face_observations.crop_path` 和 `face_observations.context_path`。`library_sources.path`、`assets.absolute_path`、`assets.live_photo_mov_path` 保持指向固定 fixture 目录，不要在测试里额外改写。
+
+验证 `init` 自身、`source add/list` 行为、首次扫描或重扫语义、扫描中的拒绝服务、迁移启动路径、自定义图片子集，以及真实增量 `source add -> scan start` 的用例，继续使用真实 CLI、真实 SQLite 和真实图片 artifact。
+
+WebUI 自动化验收以 Python Playwright + pytest 为主，文件必须命名为：
 
 ```text
 tests/people_gallery/test_webui_*_playwright.py
 ```
 
-验收目标是验证真实链路：真实 `hikbox-pictures` CLI、真实 HTTP 服务、真实浏览器页面交互、真实 SQLite 和真实图片 artifact。截图不作为默认验收依据；只有在视觉或布局不确定、需要人工复核、用户明确要求，或正在排查视觉回归时才保存截图。
+其余测试文件属于 backend 用例。WebUI 主路径验收必须走真实公共入口：真实 `hikbox-pictures` CLI、真实 HTTP 服务、真实浏览器页面交互、真实 SQLite 和真实图片 artifact；只是在“已扫描基线”准备阶段允许复用预扫描工作区副本。CLI 启动失败、端口占用、schema 缺失、扫描运行中拒绝服务等边界，不必强行用浏览器覆盖，优先用服务级集成测试验证退出码、stderr 和端口状态。
+
+当前前端验收范围以 Chromium 桌面浏览器为准；移动端兼容性不作为本阶段要求，也不作为阻塞项。Playwright 交互优先使用 role/name 等语义定位，并结合页面暴露的稳定 `data-*` 标识与 DB/artifact 对齐；不要把截图识别或脆弱 CSS selector 作为主断言。
 
 本地调试或一次性排查也复用 Python Playwright + pytest 入口。需要额外调试能力时，优先在对应测试内补 helper、fixture、pytest 参数或环境变量，不新增独立的 Playwright 脚本入口。
 

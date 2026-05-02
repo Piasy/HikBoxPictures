@@ -2,13 +2,8 @@
 
 ## Agent 必读
 
-- 本文件所有章节都是工作约束：涉及语言、执行、spec、自动化验收、Playwright 调试或测试 fixture 的任务，必须先阅读并遵循对应章节的详细要求。
-- 「语言要求」规定沟通、文档和代码注释默认使用中文。
-- 「执行要求」规定环境、命令、DB migration、临时产物和仓库卫生要求。
-- 「Spec 与验收计划约定」规定编写 spec、任务拆分和测试计划时必须提前纳入验收入口与 fixture 复用约束。
-- 「自动化验收约定」规定统一测试入口、预扫描工作区复用、WebUI 验收方式和 Playwright 测试命名。
-- 「Playwright 调试约定」规定页面调试、截图留存和调试产物的入口与存放方式。
-- 「测试 Fixture 约定」规定固定图片 fixture 的用途、增量扫描使用方式和新增 fixture 的前置说明要求。
+- 本文件是仓库工作约束；涉及语言、执行、spec/测试计划、Playwright 调试或测试 fixture 时，必须遵循对应章节的详细要求；测试运行细则见 `README.md` 的「运行测试」。
+- 写新需求 spec 或测试前，优先确认是否能复用 `people_gallery_scan/` 的已扫描图库基线；默认使用 `scanned_workspace` 或 `copy_scanned_workspace(tmp_path)`，避免重复执行耗时的 `init -> source add -> scan start`。
 
 ## 语言要求
 
@@ -20,51 +15,17 @@
 
 - 在开始实现、规划、评审或说明时，先检查并遵循本文件。
 - 运行仓库内的 Python、测试或脚本命令时，优先使用仓库根目录的 `.venv` 环境；如果 `.venv` 不存在，先执行 `./scripts/install.sh` 完成环境安装，再继续后续操作。
-- 常用安装、测试和 CLI 命令说明查看 `README.md`；如果 README 与本文件冲突，以本文件为准。
-- 任何涉及数据库 schema 的修改，都必须走 DB migration 机制，并同步更新 `docs/db_schema.md`，保证文档与最新 migration 链一致。
-- DB migration 机制约定：
-  - Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则为 `library_v{N}.sql` 和 `embedding_v{N}.sql`（N 为迁移目标版本号）。
-  - `library.db` 和 `embedding.db` 各自独立维护 `schema_meta.schema_version`，各自独立执行 migration。
-  - `init` 命令：检查 workspace 是否存在，若已存在则报错退出、不升级 DB；若不存在则创建新 workspace，先执行 v1 全量建表 SQL，再依次执行后续 migration SQL 升级至最新版本。
-  - `init` 以外的所有命令（`source add`、`source list`、`scan start`、`serve`）：打开 DB 连接后、执行业务逻辑前，自动按版本序号递增查找并执行后续 migration SQL，同一事务中更新 `schema_version`。任一 migration 失败则命令启动失败。
-  - 新增 migration 时，只需在 `hikbox_pictures/product/db/sql/` 下新增对应 SQL 文件，再更新 `docs/db_schema.md` 即可；migration 已有自动执行机制，无需额外编写调用代码。
-- 如果发现仓库中的既有内容与本约定冲突，后续修改时应优先向中文约定收敛；涉及大规模历史内容时，可分步骤整理，但新内容必须立即遵循本约定。
-- 所有临时测试文件、调试产物、截图、JSON 报告、临时 runner、临时日志等，一律放到仓库根目录 `.tmp/` 下，按任务创建子目录，不要散落在根目录其他位置。
-- 不要在仓库根目录新建 `.tmp-*`、`tmp-*` 等零散临时目录；如果工具支持输出目录参数，统一显式指向 `.tmp/<task-name>/`。
-- `.gitignore` 对这类临时测试产物只保留 `.tmp/` 这一条忽略规则；新增临时用途时不要继续追加新的 `.tmp-*` 忽略模式。
+- 常用安装、测试和 CLI 命令说明查看 `README.md`。
+- 任何涉及数据库 schema 的修改，都必须遵循 `docs/db_schema.md` 的「DB Migration 机制」，并同步更新该文档，保证文档与最新 migration 链一致。
+- 所有临时测试文件、调试产物、截图、JSON 报告、临时 runner、临时日志等，一律放到仓库根目录 `.tmp/` 下，按任务创建子目录，不要散落在根目录其他位置；如果工具支持输出目录参数，统一显式指向 `.tmp/<task-name>/`。
 
-## Spec 与验收计划约定
+## Spec 与已扫描基线约定
 
-- 编写或修改 spec、任务拆分、验收说明、测试计划时，必须把本文件的「自动化验收约定」和「测试 Fixture 约定」当作输入约束；不要等到实现测试时才补救。
-- 只要 spec 需要“已完成主基线扫描的图库”“已有 People Gallery 人物数据”“WebUI 主路径的已扫描 workspace”，默认验收准备必须写为复用 `tests/conftest.py` 的 `scanned_workspace` fixture 或 `copy_scanned_workspace(tmp_path)` 副本；不得在 spec 中重新要求完整执行 `init -> source add tests/fixtures/people_gallery_scan -> scan start` 作为常规准备步骤。
-- 只有验收目标本身就是 `init`、`source add/list`、首次扫描、重扫语义、扫描运行中拒绝服务、迁移启动路径、自定义图片子集，或必须观察真实增量 `source add -> scan start` 时，spec 才能要求真实 CLI 准备链。使用这些例外时，必须在 spec 的“验证手段”或“测试计划”里写明例外理由。
-- 需要增量样本时，spec 必须写成“先复用主基线预扫描 workspace 副本，再把 `tests/fixtures/people_gallery_scan_2/` 作为第二个 source 执行真实 `source add -> scan start`”。不要写“新建 workspace 后一次性 `source add` 两个源再 `scan start`”，因为这既不能验证增量语义，也会绕开预扫描基线复用约定。
-- Spec 的自动化验收入口必须能落到 `./scripts/run_tests.sh` 可执行的 pytest 文件；WebUI 验收必须遵守 `tests/people_gallery/test_webui_*_playwright.py` 命名规则。不得把临时脚本、截图识别、mock/stub/no-op 或直接改库作为核心主路径验收。
-- 如果确实需要新增 fixture，spec 必须先说明为什么 `people_gallery_scan/` 与 `people_gallery_scan_2/` 的组合不能覆盖需求，并明确新增 fixture 的内容矩阵、用途和与既有 fixture 的关系。
-
-## 自动化验收约定
-
-- 自动化验收统一通过 `./scripts/run_tests.sh` 执行；它会按测试文件逐个运行，并在每个文件结束后打印结果摘要（总运行用例数、失败用例数、总耗时）。
-- `./scripts/run_tests.sh` 使用说明：
-  - 无参数运行所有用例：`./scripts/run_tests.sh`
-  - `--scope backend` 只运行 backend 用例（排除 `test_webui_*_playwright.py`）
-  - `--scope frontend` 只运行 frontend 用例（匹配 `test_webui_*_playwright.py`）
-  - 传入文件路径运行指定用例：`./scripts/run_tests.sh tests/people_gallery/test_xxx.py`
-  - 可组合 scope 和文件路径，也可传入多个文件路径
-- 最新一轮逐文件全量运行总耗时约 15 分钟，其中 `tests/test_hikbox_scan_cli.py` 约 6 分钟、`tests/people_gallery/test_webui_people_gallery_playwright.py` 约 4 分钟、`tests/test_hikbox_serve_cli.py` 约 2 分钟，是主要耗时来源；其余多数文件在 30 秒内完成。日常修改优先运行受影响文件，收尾或跨模块改动再运行 `--scope backend`、`--scope frontend` 或全量。
-- 已扫描图库基线已经抽到 `tests/conftest.py`：全量 fixture 的 `init -> source add -> scan start` 以 session 级金色工作区懒加载执行一次，各测试通过 `scanned_workspace` fixture 或 `copy_scanned_workspace(tmp_path)` 获得独立可写副本。新增测试只要需要“已完成主基线扫描的图库”，必须复用这两个入口；不要重新内联一套完整 init/scan helper，也不要在 spec 里把完整准备链写成默认验收步骤。
-- 使用预扫描工作区时，测试只应修改自己的副本；`copy_scanned_workspace` 会修复副本中的 `config.json`、`face_observations.crop_path` 和 `face_observations.context_path`。`library_sources.path`、`assets.absolute_path`、`assets.live_photo_mov_path` 保持指向固定 fixture 目录，不要在测试里额外改写。
-- 下列用例类型不得用预扫描工作区替代真实流程：验证 `init` 自身、`source add/list` 行为、首次扫描或重扫语义、扫描中的拒绝服务、迁移启动路径、自定义图片子集，以及必须观察真实增量 `source add -> scan start` 的场景。这些用例应继续用真实 CLI、真实 SQLite 和真实图片 artifact；对应 spec 必须说明为什么属于这些例外。
-- WebUI 的真正验收以 `tests/people_gallery/test_webui_*_playwright.py` 这类 Python Playwright + pytest 测试为主；测试应进入 CI 或至少能被 `./scripts/run_tests.sh` 直接执行。
-- 前端测试文件命名规范：所有前端 WebUI Playwright 测试文件必须以 `test_webui_` 开头、以 `_playwright.py` 结尾，即 `test_webui_*_playwright.py` 格式。其余测试文件属于 backend 用例。
-- WebUI 主路径验收必须尽量走真实公共入口：真实 `hikbox` CLI、真实 HTTP 服务、真实页面交互、真实 SQLite、真实图片 artifact；不要用 mock/stub/no-op、直接改库或模板函数调用替代核心行为。只是在“已扫描基线”准备阶段允许复用预扫描工作区副本。
-- CLI 启动失败、端口占用、schema 缺失、扫描运行中拒绝服务等边界，不必强行用浏览器覆盖；优先用服务级集成测试验证退出码、stderr 和端口状态。
-- 当前前端验收范围以 Chromium 桌面浏览器为准；移动端兼容性不作为本阶段要求，也不作为阻塞项。
-- Playwright 交互优先使用 role/name 等语义定位，并结合页面暴露的稳定 `data-*` 标识与 DB/artifact 对齐；不要把截图识别或脆弱 CSS selector 作为主断言。
-- 运行 Python Playwright 用例前，优先按 README 执行：
-  - `source .venv/bin/activate`
-  - `python3 -m playwright install chromium`
-- 只有在需要截图留档、做页面视觉检查，或排查中文渲染问题时，才额外执行 `./scripts/setup_playwright_zh_fonts.sh`。
+- 写 spec、任务拆分、验收说明或测试计划时，必须先选择“验收基线”；除非验证目标就是 CLI 初始化/扫描流程本身，否则默认复用已扫描图库基线。
+- 需要“已完成主基线扫描的图库”、“已有 People Gallery 人物数据”或“WebUI 主路径的已扫描 workspace”时，验收准备写为使用 `scanned_workspace` 或 `copy_scanned_workspace(tmp_path)`；不要要求重新执行 `init -> source add tests/fixtures/people_gallery_scan -> scan start`。
+- 只有验证 `init`、`source add/list`、首次扫描、重扫语义、扫描运行中拒绝服务、迁移启动路径、自定义图片子集，或必须观察真实增量 `source add -> scan start` 时，才能要求真实 CLI 准备链（只能使用 `tests/fixtures/people_gallery_scan/`），并必须写明例外理由。
+- 需要增量样本时，写为“复用主基线预扫描 workspace 副本 -> `source add tests/fixtures/people_gallery_scan_2/` -> 新的 `scan start`”。
+- 自动化验收入口和运行方式以 `README.md` 的「运行测试」为准；WebUI 验收文件必须命名为 `tests/people_gallery/test_webui_*_playwright.py`。
 
 ## Playwright 调试约定
 
@@ -81,6 +42,6 @@
 
 - `people_gallery_scan/`（主基线）：精确包含 50 张支持扫描的照片，覆盖 3 个目标人物（每人 10 张单目标 + 合照）、非目标人物、无脸照片、HEIC/HEIF Live Photo 正反例、非支持后缀文件和损坏图片。后续所有需求开发默认复用此 fixture 作为全量基线。
 - `people_gallery_scan_2/`（增量补充）：精确包含 15 张新增单目标人物照片，覆盖与主基线相同的 3 个目标人物（每人 5 张）。用于主基线扫描完成后再次 `source add -> scan start` 触发增量扫描的场景，验证新增人脸仍归属到既有人物。
-- `people_gallery_scan_2/` 不替代 `people_gallery_scan/`，也不得和 `people_gallery_scan/` 一起作为新 workspace 的两个初始 source 一次性扫描；需要增量扫描的测试必须先复用或完成主基线扫描，再 `source add` 增量 fixture 并执行新的 `scan start`。
+- `people_gallery_scan_2/` 不替代 `people_gallery_scan/`，也不得和 `people_gallery_scan/` 一起作为新 workspace 的两个初始 source 一次性扫描；增量使用方式见「Spec 与已扫描基线约定」。
 - 两套 fixture 的 `manifest.json` 只能作为测试断言数据，不得作为产品逻辑输入。
-- 新增 fixture 需求时，优先复用现有 fixture 组合，而不是创建第三套 fixture 目录；确实需要新 fixture 时，先在对应 spec 中明确其内容矩阵、用途、不能复用既有两套 fixture 的原因。
+- 不要为新需求默认新增第三套 fixture；确实需要时，先在对应 spec 中说明既有两套 fixture 为什么不够，并明确新增 fixture 的内容矩阵和用途。
