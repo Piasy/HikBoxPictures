@@ -387,10 +387,33 @@ def _discover_candidates(
     workspace_context: WorkspaceContext,
 ) -> list[dict[str, object]]:
     stop_discover_progress = threading.Event()
+    _progress_lock = threading.Lock()
+    _progress_ready = 0
+    _progress_total = -1
 
     def _log_discover_progress() -> None:
         while not stop_discover_progress.is_set():
-            print("scan 进度: 阶段=候选发现，正在准备处理队列...", file=sys.stderr, flush=True)
+            with _progress_lock:
+                ready = _progress_ready
+                total = _progress_total
+            if total < 0:
+                print(
+                    "scan 进度: 阶段=候选发现，正在统计文件总数...",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            elif total == 0:
+                print(
+                    "scan 进度: 阶段=候选发现，没有需要处理的文件",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    f"scan 进度: 阶段=候选发现，已准备好 {ready}/{total} 个文件...",
+                    file=sys.stderr,
+                    flush=True,
+                )
             stop_discover_progress.wait(timeout=_SCAN_PROGRESS_INTERVAL_SECONDS)
 
     progress_thread = threading.Thread(target=_log_discover_progress, daemon=True)
@@ -413,7 +436,8 @@ def _discover_candidates(
             else:
                 pending_sources.append(source)
 
-        # pending 源：遍历目录，计算指纹/EXIF/mov
+        # 先快速收集 pending 源的文件路径，以便得到总数
+        pending_paths: list[tuple[int, Path, Path]] = []
         for source in pending_sources:
             source_id = int(source["id"])
             source_path = Path(str(source["path"]))
@@ -422,26 +446,16 @@ def _discover_candidates(
                     continue
                 if child.suffix.lower() not in SUPPORTED_SCAN_SUFFIXES:
                     continue
-                absolute_path = child.resolve()
-                discovered.append(
-                    {
-                        "source_id": source_id,
-                        "source_path": str(source_path),
-                        "absolute_path": str(absolute_path),
-                        "file_name": child.name,
-                        "file_extension": child.suffix.lower().lstrip("."),
-                        "capture_month": compute_capture_month(absolute_path),
-                        "file_fingerprint": compute_file_fingerprint(absolute_path),
-                        "live_photo_mov_path": find_live_photo_mov(absolute_path),
-                    }
-                )
+                pending_paths.append((source_id, source_path, child.resolve()))
 
-        # scanned_with_retries 源：直接从 DB 构造重试候选
+        # 查询 scanned_with_retries 源的重试候选
+        retry_rows: list[sqlite3.Row] = []
         if retry_source_ids:
             connection = sqlite3.connect(workspace_context.library_db_path)
+            connection.row_factory = sqlite3.Row
             try:
                 placeholders = ", ".join("?" for _ in retry_source_ids)
-                rows = connection.execute(
+                retry_rows = connection.execute(
                     f"""
                     SELECT source_id, absolute_path, file_name, file_extension,
                            capture_month, file_fingerprint, live_photo_mov_path
@@ -452,25 +466,52 @@ def _discover_candidates(
                     """,
                     retry_source_ids,
                 ).fetchall()
-                for row in rows:
-                    source_id = int(row[0])
-                    absolute_path = Path(str(row[1]))
-                    if not absolute_path.exists() or not absolute_path.is_file():
-                        continue
-                    discovered.append(
-                        {
-                            "source_id": source_id,
-                            "source_path": retry_source_paths[source_id],
-                            "absolute_path": str(row[1]),
-                            "file_name": str(row[2]),
-                            "file_extension": str(row[3]),
-                            "capture_month": str(row[4]),
-                            "file_fingerprint": str(row[5]),
-                            "live_photo_mov_path": row[6],
-                        }
-                    )
             finally:
                 connection.close()
+
+        total_candidates = len(pending_paths) + len(retry_rows)
+        with _progress_lock:
+            _progress_total = total_candidates
+
+        # pending 源：逐个计算指纹/EXIF/mov
+        for source_id, source_path, absolute_path in pending_paths:
+            discovered.append(
+                {
+                    "source_id": source_id,
+                    "source_path": str(source_path),
+                    "absolute_path": str(absolute_path),
+                    "file_name": absolute_path.name,
+                    "file_extension": absolute_path.suffix.lower().lstrip("."),
+                    "capture_month": compute_capture_month(absolute_path),
+                    "file_fingerprint": compute_file_fingerprint(absolute_path),
+                    "live_photo_mov_path": find_live_photo_mov(absolute_path),
+                }
+            )
+            with _progress_lock:
+                _progress_ready += 1
+
+        # scanned_with_retries 源：直接从 DB 构造重试候选
+        for row in retry_rows:
+            source_id = int(row[0])
+            absolute_path = Path(str(row[1]))
+            if not absolute_path.exists() or not absolute_path.is_file():
+                with _progress_lock:
+                    _progress_ready += 1
+                continue
+            discovered.append(
+                {
+                    "source_id": source_id,
+                    "source_path": retry_source_paths[source_id],
+                    "absolute_path": str(row[1]),
+                    "file_name": str(row[2]),
+                    "file_extension": str(row[3]),
+                    "capture_month": str(row[4]),
+                    "file_fingerprint": str(row[5]),
+                    "live_photo_mov_path": row[6],
+                }
+            )
+            with _progress_lock:
+                _progress_ready += 1
 
         return sorted(
             discovered,

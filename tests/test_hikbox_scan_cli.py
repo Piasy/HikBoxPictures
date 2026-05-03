@@ -2084,6 +2084,54 @@ def _write_named_source_copies(source_dir: Path, file_names: list[str]) -> None:
         (source_dir / file_name).write_bytes(sample_bytes)
 
 
+def test_discover_candidates_progress_shows_ready_and_total(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    fixture_path = FIXTURE_DIR / "pg_001_single_alex_01.jpg"
+    for i in range(5):
+        shutil.copy(fixture_path, source_dir / f"img_{i:02d}.jpg")
+
+    monkeypatch.setattr(scan_module, "_SCAN_PROGRESS_INTERVAL_SECONDS", 0.01, raising=False)
+
+    _original_fingerprint = scan_module.compute_file_fingerprint
+
+    def _slow_fingerprint(path: Path) -> str:
+        time.sleep(0.02)
+        return _original_fingerprint(path)
+
+    monkeypatch.setattr(scan_module, "compute_file_fingerprint", _slow_fingerprint)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    workspace_context = WorkspaceContext(
+        workspace_path=tmp_path,
+        external_root_path=tmp_path,
+        library_db_path=tmp_path / "library.db",
+        embedding_db_path=tmp_path / "embedding.db",
+        model_root_path=tmp_path,
+    )
+
+    active_sources = [
+        {"id": 1, "path": str(source_dir), "label": "test", "scan_state": "pending"}
+    ]
+
+    scan_module._discover_candidates(active_sources, workspace_context)
+
+    progress_lines = _scan_progress_lines(capsys.readouterr().err)
+    candidate_lines = [line for line in progress_lines if "阶段=候选发现" in line]
+
+    assert len(candidate_lines) > 0
+    lines_with_total = [line for line in candidate_lines if "/5" in line]
+    assert len(lines_with_total) > 0
+    for line in candidate_lines:
+        if "已准备好" in line:
+            assert "/5" in line
+
+
 def _prepare_discover_counter(tmp_path: Path) -> tuple[Path, Path]:
     """生成用于子进程的文件系统调用计数模块。
 
