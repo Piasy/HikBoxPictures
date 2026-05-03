@@ -2,7 +2,8 @@
 
 ## Agent 必读
 
-- 本文件是仓库工作约束；涉及语言、执行、spec/测试计划、Playwright 调试或测试 fixture 时，必须遵循对应章节的详细要求；测试运行细则见 `README.md` 的「运行测试」。
+- 本文件是仓库工作约束；涉及语言、执行、spec/测试计划、Playwright 调试、测试 fixture 时，必须先阅读并遵循对应章节的详细要求。
+- 测试运行策略特别强调：必须遵循本文档里的要求，严禁参考 README.md，严禁使用 `scripts/run_tests.sh`。
 - 写新需求 spec 或测试前，优先确认是否能复用 `people_gallery_scan/` 的已扫描图库基线；默认使用 `scanned_workspace` 或 `copy_scanned_workspace(tmp_path)`，避免重复执行耗时的 `init -> source add -> scan start`。
 
 ## 语言要求
@@ -18,6 +19,15 @@
 - 常用安装、测试和 CLI 命令说明查看 `README.md`。
 - 任何涉及数据库 schema 的修改，都必须遵循 `docs/db_schema.md` 的「DB Migration 机制」，并同步更新该文档，保证文档与最新 migration 链一致。
 - 所有临时测试文件、调试产物、截图、JSON 报告、临时 runner、临时日志等，一律放到仓库根目录 `.tmp/` 下，按任务创建子目录，不要散落在根目录其他位置；如果工具支持输出目录参数，统一显式指向 `.tmp/<task-name>/`。
+
+## 测试运行策略
+
+- 运行测试时默认采用“逐文件”策略：优先一次只运行一个测试文件，例如 `.venv/bin/python -m pytest tests/path/test_xxx.py`；不要为了省事一次性批量运行多个测试文件、整个目录或全量测试套件。
+- 如果需要验证多个测试文件，按风险和相关性排序后逐个运行，并在每个文件完成后根据结果决定是否继续，不要无差别批量执行。
+- 单个测试文件运行超过 10 分钟仍未完成时，不要继续等待；应停止当前测试进程，记录最后输出和可能卡住的阶段，然后改为更细粒度运行该文件中的单个测试用例、测试类或参数化用例，例如 `.venv/bin/python -m pytest tests/path/test_xxx.py::test_case_name`。
+- 拆分单个文件内用例前，可先使用 `.venv/bin/python -m pytest --collect-only tests/path/test_xxx.py` 查看可运行的 nodeid，再按 nodeid 逐个或少量运行。
+- WebUI / Playwright 测试同样遵循逐文件、再逐用例的策略；除非用户明确要求完整回归，不要一次运行多个 `tests/people_gallery/test_webui_*_playwright.py` 文件。
+- 即便用户明确要求全量回归，或修改触及共享基础设施，也应该是逐文件去运行多个测试文件。
 
 ## Spec 与已扫描基线约定
 
