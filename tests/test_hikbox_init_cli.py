@@ -123,12 +123,24 @@ def test_init_creates_workspace_schema_artifacts_and_success_log(tmp_path: Path)
         "config_version": 1,
         "external_root": str(external_root.resolve()),
     }
-    assert _read_schema_version(library_db_path) == "3"
+    assert _read_schema_version(library_db_path) == "1"
     assert _read_schema_version(embedding_db_path) == "1"
 
     library_sources_sql = _read_table_sql(library_db_path, "library_sources")
     assert "path TEXT NOT NULL UNIQUE" in library_sources_sql
     assert "active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))" in library_sources_sql
+    assert "scan_state TEXT NOT NULL DEFAULT 'pending'" in library_sources_sql
+
+    assets_sql = _read_table_sql(library_db_path, "assets")
+    assert "scan_retry_count INTEGER NOT NULL DEFAULT 0" in assets_sql
+
+    scan_sessions_sql = _read_table_sql(library_db_path, "scan_sessions")
+    assert "plan_fingerprint" not in scan_sessions_sql
+
+    assert _read_table_sql(library_db_path, "export_plan") != ""
+
+    export_delivery_sql = _read_table_sql(library_db_path, "export_delivery")
+    assert "plan_id INTEGER REFERENCES export_plan(id)" in export_delivery_sql
 
     log_files = _log_files(logs_dir)
     assert len(log_files) == 1

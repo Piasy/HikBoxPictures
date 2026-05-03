@@ -10,7 +10,7 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LATEST_LIBRARY_VERSION = 3
+LATEST_LIBRARY_VERSION = 1
 LATEST_EMBEDDING_VERSION = 1  # No embedding_v2.sql yet; embedding stays at v1
 
 
@@ -114,7 +114,7 @@ def _read_sources(db_path: Path) -> list[dict[str, object]]:
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute(
-            "SELECT id, path, label, active, created_at FROM library_sources ORDER BY id ASC"
+            "SELECT id, path, label, active, scan_state, created_at FROM library_sources ORDER BY id ASC"
         ).fetchall()
     finally:
         conn.close()
@@ -213,7 +213,7 @@ def test_init_creates_workspace_with_latest_schema_version(tmp_path: Path) -> No
     assert _table_exists(embedding_db, "face_embeddings")
 
 
-def test_init_schema_version_matches_latest_even_with_v2_placeholder(tmp_path: Path) -> None:
+def test_init_schema_version_matches_latest(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     external_root = tmp_path / "external-root"
 
@@ -598,3 +598,15 @@ def test_migrate_to_latest_raises_on_invalid_schema_version(tmp_path: Path) -> N
         raise AssertionError("Expected MigrationError")
     except MigrationError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Feature Slice 1 (incremental scan spec) AC-2: v2.sql and v3.sql removed
+# ---------------------------------------------------------------------------
+
+def test_migration_sql_files_only_v1_remain() -> None:
+    sql_dir = REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql"
+    assert (sql_dir / "library_v1.sql").is_file()
+    assert (sql_dir / "embedding_v1.sql").is_file()
+    assert not (sql_dir / "library_v2.sql").exists()
+    assert not (sql_dir / "library_v3.sql").exists()

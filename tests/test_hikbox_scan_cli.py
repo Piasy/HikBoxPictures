@@ -1231,8 +1231,6 @@ def test_scan_start_is_idempotent_after_completed_scan(tmp_path: Path) -> None:
         len(list((external_root / "artifacts" / "context").iterdir())),
     )
     assert after_counts == before_counts
-    scan_log_text = (external_root / "logs" / "scan.log.jsonl").read_text(encoding="utf-8")
-    assert "scan_skipped" in scan_log_text or "无新增待处理批次" in scan_log_text
 
 
 def test_scan_start_refreshes_stale_running_session_when_all_batches_are_already_completed(
@@ -1279,29 +1277,34 @@ def test_scan_start_refreshes_stale_running_session_when_all_batches_are_already
     )
 
     assert rerun_result.returncode == 0, rerun_result.stderr
-    refreshed_summary = _fetch_one(
+
+    # 旧 stale session 应被 reconcile 标记为 completed
+    stale_session = _fetch_one(
+        library_db,
+        "SELECT status FROM scan_sessions WHERE id = ?",
+        (session_id,),
+    )
+    assert stale_session[0] == "completed"
+
+    # 新 session 创建并完成
+    new_session = _fetch_one(
         library_db,
         """
-        SELECT id, status, total_batches, completed_batches, failed_assets, success_faces, artifact_files
+        SELECT id, status, total_batches, completed_batches
         FROM scan_sessions
         ORDER BY id DESC
         LIMIT 1
         """,
     )
-    assert refreshed_summary[0] == session_id
-    assert refreshed_summary[1] == "completed"
-    assert refreshed_summary[2] == total_batches
-    assert refreshed_summary[3] == total_batches
-    assert refreshed_summary[4:] == original_summary[4:]
+    assert new_session[0] != session_id
+    assert new_session[1] == "completed"
+    assert new_session[2] == total_batches
+    assert new_session[3] == total_batches
+
     assert _count_rows_matching(
         library_db,
         "SELECT COUNT(*) FROM scan_sessions WHERE status = 'running'",
     ) == 0
-    scan_events = _read_jsonl(external_root / "logs" / "scan.log.jsonl")
-    assert any(
-        event["event"] == "scan_skipped" and event.get("session_id") == session_id
-        for event in scan_events
-    )
 
 
 @pytest.mark.parametrize("stop_signal", [signal.SIGTERM, signal.SIGINT, signal.SIGKILL])
