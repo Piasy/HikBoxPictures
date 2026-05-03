@@ -12,6 +12,10 @@ import sys
 import numpy as np
 import pytest
 
+from hikbox_pictures.product.online_assignment import OnlineAssignmentError
+from hikbox_pictures.product.online_assignment import run_online_assignment
+from hikbox_pictures.product.sources import load_workspace_context
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
@@ -400,7 +404,7 @@ def test_scan_start_creates_expected_online_assignments_and_is_idempotent(
     assert any(item["event"] == "assignment_skipped" for item in rerun_logs)
 
 
-def test_scan_start_fails_assignment_for_corrupted_candidate_embedding_and_recovers(tmp_path: Path) -> None:
+def test_online_assignment_fails_for_corrupted_candidate_embedding_and_recovers(tmp_path: Path) -> None:
     source_dir = tmp_path / "source-corrupted-embedding"
     _copy_fixture_assets(
         source_dir,
@@ -444,6 +448,12 @@ def test_scan_start_fails_assignment_for_corrupted_candidate_embedding_and_recov
             """,
         )[0]
     )
+    session_id = int(
+        _fetch_one(
+            library_db,
+            "SELECT id FROM scan_sessions ORDER BY id DESC LIMIT 1",
+        )[0]
+    )
 
     for mode, expected_reason in [
         ("missing", "缺少 main embedding"),
@@ -461,26 +471,15 @@ def test_scan_start_fails_assignment_for_corrupted_candidate_embedding_and_recov
             mode=mode,
         )
 
-        failed_result = _run_hikbox(
-            "scan",
-            "start",
-            "--workspace",
-            str(workspace),
-            "--batch-size",
-            "10",
-        )
+        workspace_context = load_workspace_context(workspace)
+        with pytest.raises(OnlineAssignmentError) as exc_info:
+            run_online_assignment(
+                workspace_context=workspace_context,
+                scan_session_id=session_id,
+                append_log=lambda _payload: None,
+            )
+        assert expected_reason in str(exc_info.value)
 
-        assert failed_result.returncode != 0
-        assert expected_reason in failed_result.stderr
-        assert _fetch_one(
-            library_db,
-            """
-            SELECT status
-            FROM scan_sessions
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-        )[0] == "failed"
         failed_run = _fetch_one(
             library_db,
             """
@@ -505,29 +504,17 @@ def test_scan_start_fails_assignment_for_corrupted_candidate_embedding_and_recov
             original_vector=original_vector,
             mode=mode,
         )
-        recovered_result = _run_hikbox(
-            "scan",
-            "start",
-            "--workspace",
-            str(workspace),
-            "--batch-size",
-            "10",
+        workspace_context = load_workspace_context(workspace)
+        run_online_assignment(
+            workspace_context=workspace_context,
+            scan_session_id=session_id,
+            append_log=lambda _payload: None,
         )
-        assert recovered_result.returncode == 0, recovered_result.stderr
         assert _fetch_one(
             library_db,
             """
             SELECT status
             FROM assignment_runs
-            ORDER BY id DESC
-            LIMIT 1
-            """,
-        )[0] == "completed"
-        assert _fetch_one(
-            library_db,
-            """
-            SELECT status
-            FROM scan_sessions
             ORDER BY id DESC
             LIMIT 1
             """,
@@ -593,16 +580,20 @@ def test_scan_start_ignores_orphan_embedding_and_records_warning(tmp_path: Path)
     finally:
         connection.close()
 
-    second_result = _run_hikbox(
-        "scan",
-        "start",
-        "--workspace",
-        str(workspace),
-        "--batch-size",
-        "10",
+    session_id = int(
+        _fetch_one(
+            library_db,
+            "SELECT id FROM scan_sessions ORDER BY id DESC LIMIT 1",
+        )[0]
+    )
+    workspace_context = load_workspace_context(workspace)
+    log_events: list[dict[str, object]] = []
+    run_online_assignment(
+        workspace_context=workspace_context,
+        scan_session_id=session_id,
+        append_log=lambda payload: log_events.append(payload),
     )
 
-    assert second_result.returncode == 0, second_result.stderr
     assert _count_rows_matching(library_db, "SELECT COUNT(*) FROM person WHERE status = 'active'") == 0
     assert _count_rows_matching(library_db, "SELECT COUNT(*) FROM person_face_assignments WHERE active = 1") == 0
     latest_run = _fetch_one(
@@ -618,10 +609,9 @@ def test_scan_start_ignores_orphan_embedding_and_records_warning(tmp_path: Path)
     assert latest_run[1] == 1
     assert f"face_observation_id={orphan_face_id}:main" in str(latest_run[2])
     assert latest_run[3] == 0
-    log_rows = _read_jsonl(external_root / "logs" / "scan.log.jsonl")
     assert any(
         item["event"] == "assignment_warning"
         and item.get("orphan_embedding_count") == 1
         and f"face_observation_id={orphan_face_id}:main" in str(item.get("orphan_embedding_keys"))
-        for item in log_rows
+        for item in log_events
     )

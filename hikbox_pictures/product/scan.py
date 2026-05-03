@@ -75,7 +75,7 @@ def start_scan(
                 total_batches = int(session["total_batches"])
                 effective_batch_size = int(session["batch_size"])
             else:
-                candidates = _discover_candidates(active_sources)
+                candidates = _discover_candidates(active_sources, workspace_context)
                 if not candidates:
                     raise ScanStartError("没有可扫描照片。")
 
@@ -121,6 +121,10 @@ def start_scan(
                     session_id=session_id,
                     final_status="completed",
                 )
+                _refresh_source_scan_states(
+                    workspace_context=workspace_context,
+                    session_id=session_id,
+                )
                 _append_scan_log(
                     workspace_context=workspace_context,
                     payload={
@@ -154,6 +158,10 @@ def start_scan(
                 workspace_context=workspace_context,
                 session_id=session_id,
                 final_status="completed",
+            )
+            _refresh_source_scan_states(
+                workspace_context=workspace_context,
+                session_id=session_id,
             )
             _append_scan_log(
                 workspace_context=workspace_context,
@@ -341,7 +349,7 @@ def _load_active_sources(workspace_context: WorkspaceContext) -> list[dict[str, 
     try:
         rows = connection.execute(
             """
-            SELECT id, path, label
+            SELECT id, path, label, scan_state
             FROM library_sources
             WHERE active = 1
             ORDER BY id ASC
@@ -368,17 +376,21 @@ def _load_active_sources(workspace_context: WorkspaceContext) -> list[dict[str, 
                 "id": int(row["id"]),
                 "path": str(source_path.resolve()),
                 "label": str(row["label"]),
+                "scan_state": str(row["scan_state"]),
             }
         )
     return sources
 
 
-def _discover_candidates(active_sources: list[dict[str, object]]) -> list[dict[str, object]]:
+def _discover_candidates(
+    active_sources: list[dict[str, object]],
+    workspace_context: WorkspaceContext,
+) -> list[dict[str, object]]:
     stop_discover_progress = threading.Event()
 
     def _log_discover_progress() -> None:
         while not stop_discover_progress.is_set():
-            print("scan 进度: 阶段=文件发现，正在扫描文件系统...", file=sys.stderr, flush=True)
+            print("scan 进度: 阶段=候选发现，正在准备处理队列...", file=sys.stderr, flush=True)
             stop_discover_progress.wait(timeout=_SCAN_PROGRESS_INTERVAL_SECONDS)
 
     progress_thread = threading.Thread(target=_log_discover_progress, daemon=True)
@@ -386,7 +398,23 @@ def _discover_candidates(active_sources: list[dict[str, object]]) -> list[dict[s
 
     try:
         discovered: list[dict[str, object]] = []
+        pending_sources: list[dict[str, object]] = []
+        retry_source_ids: list[int] = []
+        retry_source_paths: dict[int, str] = {}
+
         for source in active_sources:
+            scan_state = str(source.get("scan_state", "pending"))
+            if scan_state == "scanned_clean":
+                continue
+            elif scan_state == "scanned_with_retries":
+                source_id = int(source["id"])
+                retry_source_ids.append(source_id)
+                retry_source_paths[source_id] = str(source["path"])
+            else:
+                pending_sources.append(source)
+
+        # pending 源：遍历目录，计算指纹/EXIF/mov
+        for source in pending_sources:
             source_id = int(source["id"])
             source_path = Path(str(source["path"]))
             for child in sorted(source_path.iterdir(), key=lambda path: (path.name.casefold(), path.name)):
@@ -407,6 +435,43 @@ def _discover_candidates(active_sources: list[dict[str, object]]) -> list[dict[s
                         "live_photo_mov_path": find_live_photo_mov(absolute_path),
                     }
                 )
+
+        # scanned_with_retries 源：直接从 DB 构造重试候选
+        if retry_source_ids:
+            connection = sqlite3.connect(workspace_context.library_db_path)
+            try:
+                placeholders = ", ".join("?" for _ in retry_source_ids)
+                rows = connection.execute(
+                    f"""
+                    SELECT source_id, absolute_path, file_name, file_extension,
+                           capture_month, file_fingerprint, live_photo_mov_path
+                    FROM assets
+                    WHERE source_id IN ({placeholders})
+                      AND processing_status = 'failed'
+                      AND scan_retry_count < 3
+                    """,
+                    retry_source_ids,
+                ).fetchall()
+                for row in rows:
+                    source_id = int(row[0])
+                    absolute_path = Path(str(row[1]))
+                    if not absolute_path.exists() or not absolute_path.is_file():
+                        continue
+                    discovered.append(
+                        {
+                            "source_id": source_id,
+                            "source_path": retry_source_paths[source_id],
+                            "absolute_path": str(row[1]),
+                            "file_name": str(row[2]),
+                            "file_extension": str(row[3]),
+                            "capture_month": str(row[4]),
+                            "file_fingerprint": str(row[5]),
+                            "live_photo_mov_path": row[6],
+                        }
+                    )
+            finally:
+                connection.close()
+
         return sorted(
             discovered,
             key=lambda item: (str(item["absolute_path"]).casefold(), str(item["absolute_path"])),
@@ -1224,7 +1289,11 @@ def _upsert_asset(connection: sqlite3.Connection, *, candidate: dict[str, object
           live_photo_mov_path = excluded.live_photo_mov_path,
           processing_status = excluded.processing_status,
           failure_reason = excluded.failure_reason,
-          updated_at = excluded.updated_at
+          updated_at = excluded.updated_at,
+          scan_retry_count = CASE
+            WHEN excluded.processing_status = 'failed' THEN scan_retry_count + 1
+            ELSE excluded.scan_retry_count
+          END
         """,
         (
             int(candidate["source_id"]),
@@ -1714,6 +1783,48 @@ def _refresh_session_summary(
         }
     except sqlite3.Error as exc:
         raise ScanStartError("scan summary 更新失败。") from exc
+    finally:
+        connection.close()
+
+
+def _refresh_source_scan_states(
+    *,
+    workspace_context: WorkspaceContext,
+    session_id: int,
+) -> None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        with connection:
+            source_rows = connection.execute(
+                """
+                SELECT DISTINCT source_id
+                FROM scan_batch_items
+                WHERE batch_id IN (
+                  SELECT id FROM scan_batches WHERE session_id = ?
+                )
+                """,
+                (session_id,),
+            ).fetchall()
+            for row in source_rows:
+                source_id = int(row[0])
+                has_retry = connection.execute(
+                    """
+                    SELECT 1
+                    FROM assets
+                    WHERE source_id = ?
+                      AND processing_status = 'failed'
+                      AND scan_retry_count < 3
+                    LIMIT 1
+                    """,
+                    (source_id,),
+                ).fetchone() is not None
+                new_state = "scanned_with_retries" if has_retry else "scanned_clean"
+                connection.execute(
+                    "UPDATE library_sources SET scan_state = ? WHERE id = ?",
+                    (new_state, source_id),
+                )
+    except sqlite3.Error as exc:
+        raise ScanStartError("source scan_state 更新失败。") from exc
     finally:
         connection.close()
 

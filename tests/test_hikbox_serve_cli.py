@@ -1414,7 +1414,7 @@ def test_serve_undo_rejects_after_scan_invalidation_deletes_winner_assignment(
     try:
         with connection:
             connection.execute(
-                "UPDATE library_sources SET path = ? WHERE id = 1",
+                "UPDATE library_sources SET path = ?, scan_state = 'pending' WHERE id = 1",
                 (str(source_dir.resolve()),),
             )
     finally:

@@ -49,8 +49,8 @@ def add_source(
         with connection:
             connection.execute(
                 """
-                INSERT INTO library_sources (path, label, active, created_at)
-                VALUES (?, ?, 1, ?)
+                INSERT INTO library_sources (path, label, active, scan_state, created_at)
+                VALUES (?, ?, 1, 'pending', ?)
                 """,
                 (str(source_dir_path), label, created_at),
             )

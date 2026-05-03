@@ -25,6 +25,7 @@ from tests.conftest import copy_scanned_workspace
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
+FIXTURE_DIR_2 = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan_2"
 MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
 SUPPORTED_SCAN_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 OLD_SLICE_A_LIBRARY_SQL = """
@@ -1076,6 +1077,14 @@ def test_scan_start_failed_rescan_keeps_previously_committed_artifacts(tmp_path:
     face_count_before = _count_rows(library_db, "face_observations")
     embedding_count_before = _count_rows(embedding_db, "face_embeddings")
 
+    # 重置 source scan_state 为 pending，确保全量重扫以触发 artifact move
+    conn = sqlite3.connect(library_db)
+    try:
+        with conn:
+            conn.execute("UPDATE library_sources SET scan_state = 'pending'")
+    finally:
+        conn.close()
+
     spy_dir, spy_log_path = _prepare_faceanalysis_spy(tmp_path / "spy-rescan-move-failure")
     second_result = _run_hikbox(
         "scan",
@@ -1143,6 +1152,14 @@ def test_scan_start_keeps_committed_new_artifacts_when_old_cleanup_fails_after_c
     assert original_crop.is_file()
     assert original_context.is_file()
 
+    # 重置 source scan_state 为 pending，确保全量重扫以触发旧 artifact 清理路径
+    conn = sqlite3.connect(library_db)
+    try:
+        with conn:
+            conn.execute("UPDATE library_sources SET scan_state = 'pending'")
+    finally:
+        conn.close()
+
     spy_dir, spy_log_path = _prepare_faceanalysis_spy(tmp_path / "spy-old-cleanup-failure")
     second_result = _run_hikbox(
         "scan",
@@ -1206,6 +1223,14 @@ def test_scan_start_keeps_committed_new_artifacts_when_old_cleanup_fails_after_c
 def test_scan_start_is_idempotent_after_completed_scan(tmp_path: Path) -> None:
     workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
     embedding_db = workspace / ".hikbox" / "embedding.db"
+
+    corrupt_retry_before = int(
+        _fetch_one(
+            library_db,
+            "SELECT scan_retry_count FROM assets WHERE file_name = 'pg_902_corrupt.jpg'",
+        )[0]
+    )
+
     before_counts = (
         _count_rows(library_db, "assets"),
         _count_rows(library_db, "face_observations"),
@@ -1214,6 +1239,8 @@ def test_scan_start_is_idempotent_after_completed_scan(tmp_path: Path) -> None:
         len(list((external_root / "artifacts" / "context").iterdir())),
     )
 
+    counter_dir, count_file = _prepare_discover_counter(tmp_path)
+
     second_result = _run_hikbox(
         "scan",
         "start",
@@ -1221,8 +1248,15 @@ def test_scan_start_is_idempotent_after_completed_scan(tmp_path: Path) -> None:
         str(workspace),
         "--batch-size",
         "10",
+        env_updates={"HIKBOX_TEST_DISCOVER_COUNT_FILE": str(count_file)},
+        pythonpath_prepend=[counter_dir],
     )
     assert second_result.returncode == 0, second_result.stderr
+
+    counts = json.loads(count_file.read_text(encoding="utf-8"))
+    assert counts["iterdir"] == 0, f"预期零 iterdir 调用，实际 {counts['iterdir']}"
+    assert counts["scandir"] == 0, f"预期零 scandir 调用，实际 {counts['scandir']}"
+
     after_counts = (
         _count_rows(library_db, "assets"),
         _count_rows(library_db, "face_observations"),
@@ -1231,6 +1265,292 @@ def test_scan_start_is_idempotent_after_completed_scan(tmp_path: Path) -> None:
         len(list((external_root / "artifacts" / "context").iterdir())),
     )
     assert after_counts == before_counts
+
+    latest_session = _fetch_one(
+        library_db,
+        """
+        SELECT id, total_batches, completed_batches, failed_assets
+        FROM scan_sessions
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+    )
+    assert latest_session[1] == 1
+    assert latest_session[2] == 1
+    assert latest_session[3] == 1
+
+    batch_items = _fetch_all(
+        library_db,
+        """
+        SELECT absolute_path
+        FROM scan_batch_items
+        WHERE batch_id IN (
+            SELECT id FROM scan_batches WHERE session_id = ?
+        )
+        """,
+        (int(latest_session[0]),),
+    )
+    assert len(batch_items) == 1
+    assert "pg_902_corrupt.jpg" in str(batch_items[0][0])
+
+    corrupt_retry_after = int(
+        _fetch_one(
+            library_db,
+            "SELECT scan_retry_count FROM assets WHERE file_name = 'pg_902_corrupt.jpg'",
+        )[0]
+    )
+    assert corrupt_retry_after == corrupt_retry_before + 1
+
+    source_state = _fetch_one(
+        library_db,
+        "SELECT scan_state FROM library_sources LIMIT 1",
+    )[0]
+    assert source_state == "scanned_with_retries"
+
+
+def test_scan_start_includes_new_pending_source_and_retries_old_source(tmp_path: Path) -> None:
+    workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
+    embedding_db = workspace / ".hikbox" / "embedding.db"
+
+    old_source_path = str(FIXTURE_DIR.resolve())
+    old_source_id = int(
+        _fetch_one(
+            library_db,
+            "SELECT id FROM library_sources WHERE path = ?",
+            (old_source_path,),
+        )[0]
+    )
+
+    before_old_faces = _count_rows_matching(
+        library_db,
+        """
+        SELECT COUNT(*)
+        FROM face_observations
+        WHERE asset_id IN (
+            SELECT id FROM assets WHERE source_id = ?
+        )
+        """,
+        params=(old_source_id,),
+    )
+    before_old_face_ids = [
+        int(row[0])
+        for row in _fetch_all(
+            library_db,
+            """
+            SELECT id FROM face_observations
+            WHERE asset_id IN (
+                SELECT id FROM assets WHERE source_id = ?
+            )
+            """,
+            (old_source_id,),
+        )
+    ]
+    before_old_embeddings = _count_rows_matching(
+        embedding_db,
+        f"""
+        SELECT COUNT(*)
+        FROM face_embeddings
+        WHERE face_observation_id IN (
+            {', '.join(str(fid) for fid in before_old_face_ids)}
+        )
+        """ if before_old_face_ids else "SELECT 0",
+    )
+    before_assets = _count_rows(library_db, "assets")
+
+    add_result = _add_source(workspace, FIXTURE_DIR_2)
+    assert add_result.returncode == 0, add_result.stderr
+
+    result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert result.returncode == 0, result.stderr
+
+    latest_session = _fetch_one(
+        library_db,
+        """
+        SELECT id, total_batches, completed_batches, failed_assets
+        FROM scan_sessions
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+    )
+    assert latest_session[1] == 2
+    assert latest_session[2] == 2
+
+    old_source_items = _fetch_all(
+        library_db,
+        """
+        SELECT sbi.absolute_path
+        FROM scan_batch_items sbi
+        INNER JOIN scan_batches sb ON sb.id = sbi.batch_id
+        INNER JOIN library_sources ls ON ls.id = sbi.source_id
+        WHERE sb.session_id = ? AND ls.path = ?
+        """,
+        (int(latest_session[0]), old_source_path),
+    )
+    assert len(old_source_items) == 1
+    assert "pg_902_corrupt.jpg" in str(old_source_items[0][0])
+
+    new_source_path = str(FIXTURE_DIR_2.resolve())
+    new_source_items = _fetch_all(
+        library_db,
+        """
+        SELECT sbi.absolute_path
+        FROM scan_batch_items sbi
+        INNER JOIN scan_batches sb ON sb.id = sbi.batch_id
+        INNER JOIN library_sources ls ON ls.id = sbi.source_id
+        WHERE sb.session_id = ? AND ls.path = ?
+        """,
+        (int(latest_session[0]), new_source_path),
+    )
+    assert len(new_source_items) == 15
+
+    states = {
+        str(row[1]): str(row[0])
+        for row in _fetch_all(
+            library_db,
+            "SELECT scan_state, path FROM library_sources",
+        )
+    }
+    assert states[old_source_path] == "scanned_with_retries"
+    assert states[new_source_path] == "scanned_clean"
+
+    after_old_faces = _count_rows_matching(
+        library_db,
+        """
+        SELECT COUNT(*)
+        FROM face_observations
+        WHERE asset_id IN (
+            SELECT id FROM assets WHERE source_id = ?
+        )
+        """,
+        params=(old_source_id,),
+    )
+    after_old_face_ids = [
+        int(row[0])
+        for row in _fetch_all(
+            library_db,
+            """
+            SELECT id FROM face_observations
+            WHERE asset_id IN (
+                SELECT id FROM assets WHERE source_id = ?
+            )
+            """,
+            (old_source_id,),
+        )
+    ]
+    after_old_embeddings = _count_rows_matching(
+        embedding_db,
+        f"""
+        SELECT COUNT(*)
+        FROM face_embeddings
+        WHERE face_observation_id IN (
+            {', '.join(str(fid) for fid in after_old_face_ids)}
+        )
+        """ if after_old_face_ids else "SELECT 0",
+    )
+    assert after_old_faces == before_old_faces
+    assert after_old_embeddings == before_old_embeddings
+    assert _count_rows(library_db, "assets") == before_assets + 15
+
+
+def test_scan_start_retries_exhausted_after_three_failures(tmp_path: Path) -> None:
+    workspace, external_root, library_db, manifest, _ = copy_scanned_workspace(tmp_path)
+
+    corrupt_retry_count = int(
+        _fetch_one(
+            library_db,
+            "SELECT scan_retry_count FROM assets WHERE file_name = 'pg_902_corrupt.jpg'",
+        )[0]
+    )
+
+    while corrupt_retry_count < 3:
+        result = _run_hikbox(
+            "scan",
+            "start",
+            "--workspace",
+            str(workspace),
+            "--batch-size",
+            "10",
+        )
+        assert result.returncode == 0, result.stderr
+        corrupt_retry_count = int(
+            _fetch_one(
+                library_db,
+                "SELECT scan_retry_count FROM assets WHERE file_name = 'pg_902_corrupt.jpg'",
+            )[0]
+        )
+
+    result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert result.returncode != 0
+    assert "没有可扫描照片" in result.stderr
+
+    source_state = _fetch_one(
+        library_db,
+        "SELECT scan_state FROM library_sources LIMIT 1",
+    )[0]
+    assert source_state == "scanned_clean"
+
+
+def test_scan_start_skips_scanned_clean_source_with_zero_filesystem_operations(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+
+    init_result = _init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+
+    add_result = _add_source(workspace, FIXTURE_DIR_2)
+    assert add_result.returncode == 0
+
+    first_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+    )
+    assert first_result.returncode == 0, first_result.stderr
+
+    library_db = workspace / ".hikbox" / "library.db"
+    source_state = _fetch_one(
+        library_db,
+        "SELECT scan_state FROM library_sources LIMIT 1",
+    )[0]
+    assert source_state == "scanned_clean"
+
+    counter_dir, count_file = _prepare_discover_counter(tmp_path)
+
+    second_result = _run_hikbox(
+        "scan",
+        "start",
+        "--workspace",
+        str(workspace),
+        "--batch-size",
+        "10",
+        env_updates={"HIKBOX_TEST_DISCOVER_COUNT_FILE": str(count_file)},
+        pythonpath_prepend=[counter_dir],
+    )
+    assert second_result.returncode != 0
+    assert "没有可扫描照片" in second_result.stderr
+
+    counts = json.loads(count_file.read_text(encoding="utf-8"))
+    assert counts["iterdir"] == 0, f"预期零 iterdir 调用，实际 {counts['iterdir']}"
+    assert counts["scandir"] == 0, f"预期零 scandir 调用，实际 {counts['scandir']}"
+
+    assert _count_rows(library_db, "scan_sessions") == 1
 
 
 def test_scan_start_refreshes_stale_running_session_when_all_batches_are_already_completed(
@@ -1287,6 +1607,7 @@ def test_scan_start_refreshes_stale_running_session_when_all_batches_are_already
     assert stale_session[0] == "completed"
 
     # 新 session 创建并完成
+    # 由于旧源已是 scanned_with_retries，新 session 只包含 1 个重试候选
     new_session = _fetch_one(
         library_db,
         """
@@ -1298,8 +1619,8 @@ def test_scan_start_refreshes_stale_running_session_when_all_batches_are_already
     )
     assert new_session[0] != session_id
     assert new_session[1] == "completed"
-    assert new_session[2] == total_batches
-    assert new_session[3] == total_batches
+    assert new_session[2] == 1
+    assert new_session[3] == 1
 
     assert _count_rows_matching(
         library_db,
@@ -1761,3 +2082,60 @@ def _write_named_source_copies(source_dir: Path, file_names: list[str]) -> None:
     sample_bytes = (FIXTURE_DIR / "pg_001_single_alex_01.jpg").read_bytes()
     for file_name in file_names:
         (source_dir / file_name).write_bytes(sample_bytes)
+
+
+def _prepare_discover_counter(tmp_path: Path) -> tuple[Path, Path]:
+    """生成用于子进程的文件系统调用计数模块。
+
+    返回 (counter_dir, count_file)。counter_dir 应通过 pythonpath_prepend
+    传入 _run_hikbox，count_file 用于读取最终计数结果。
+    """
+    counter_dir = tmp_path / "discover_counter"
+    counter_dir.mkdir()
+    count_file = counter_dir / "counts.json"
+    sitecustomize = counter_dir / "sitecustomize.py"
+    sitecustomize.write_text(
+        f"""
+import atexit
+import inspect
+import json
+import os
+from pathlib import Path
+
+_iterdir_count = 0
+_scandir_count = 0
+
+def _is_inside_discover_candidates():
+    for frame_info in inspect.stack():
+        if frame_info.function == "_discover_candidates":
+            return True
+    return False
+
+_original_iterdir = Path.iterdir
+def _patched_iterdir(self):
+    if _is_inside_discover_candidates():
+        global _iterdir_count
+        _iterdir_count += 1
+    return _original_iterdir(self)
+
+_original_scandir = os.scandir
+def _patched_scandir(path):
+    if _is_inside_discover_candidates():
+        global _scandir_count
+        _scandir_count += 1
+    return _original_scandir(path)
+
+Path.iterdir = _patched_iterdir
+os.scandir = _patched_scandir
+
+_count_file = {str(count_file)!r}
+
+def _write_counts():
+    with open(_count_file, "w", encoding="utf-8") as f:
+        json.dump({{"iterdir": _iterdir_count, "scandir": _scandir_count}}, f)
+
+atexit.register(_write_counts)
+""",
+        encoding="utf-8",
+    )
+    return counter_dir, count_file
