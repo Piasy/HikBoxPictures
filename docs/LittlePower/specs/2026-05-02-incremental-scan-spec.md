@@ -14,7 +14,13 @@
 
 ## Feature Slice 1: 清理 migration 历史债务并扩展 schema
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
+
+**Review Concerns（非阻塞，已记录）：**
+- Source: Spec reviewer + Code-quality reviewer
+- TDD 证据缺失：本 slice 以 schema 重构和 DDL 合并为主，接手前已完成大部分生产代码改动，未保留 RED/GREEN 过程记录。
+- `test_db_migration.py` 中 auto-migration 测试语义降级：`LATEST_LIBRARY_VERSION` 从 3 降为 1 后，旧测试实际验证的是"已是目标版本、零开销跳过"路径，而非真实 v1->v3 migration 路径。这些测试属于旧 export-plan spec，不是当前 incremental-scan spec 的 AC。
+- `test_db_migration.py:216` 测试命名残留旧概念（`even_with_v2_placeholder`）：已在 code-quality review 后修复。
 
 ### Behavior
 
