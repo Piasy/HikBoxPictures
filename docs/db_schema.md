@@ -27,7 +27,6 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 
 示例：
 - `library_v1.sql` — library.db 初始全量建表（schema_version = 1）
-- `library_v2.sql` — 将 library.db 从 v1 升级到 v2 的增量 DDL
 - `embedding_v1.sql` — embedding.db 初始全量建表（schema_version = 1）
 
 ### 0.3 Migration 变更摘要
@@ -35,12 +34,8 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 #### `library.db`
 
 - `library_v1.sql`
-  建立 `library.db` 初始基线 schema，包括：
-  `schema_meta`、`library_sources`、`assets`、`scan_sessions`、`scan_batches`、`scan_batch_items`、`face_observations`、`person`、`person_name_events`、`assignment_runs`、`person_face_assignments`、`person_face_exclusions`、`person_merge_operations`、`person_merge_operation_assignments`、`export_template`、`export_template_person`、`export_run`、`export_delivery` 及对应索引。
-- `library_v2.sql`
-  当前为 no-op placeholder，不引入 schema 变更。
-- `library_v3.sql`
-  新增 `export_plan` 表及索引 `idx_export_plan_template_bucket_month`，并为 `export_delivery` 新增可空外键列 `plan_id`，用于把导出交付记录关联回持久化导出计划。
+  建立 `library.db` 完整初始基线 schema，包括：
+  `schema_meta`、`library_sources`（含 `scan_state` 列）、`assets`（含 `scan_retry_count` 列）、`scan_sessions`、`scan_batches`、`scan_batch_items`、`face_observations`、`person`、`person_name_events`、`assignment_runs`、`person_face_assignments`、`person_face_exclusions`、`person_merge_operations`、`person_merge_operation_assignments`、`export_template`、`export_template_person`、`export_run`、`export_plan`、`export_delivery`（含 `plan_id` 列）及对应索引。
 
 #### `embedding.db`
 
@@ -51,7 +46,7 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 
 **`init` 命令**：
 - 若 workspace 已存在（`.hikbox/` 目录或 `config.json`/`library.db`/`embedding.db` 任一存在），直接报错退出，不升级 DB
-- 若 workspace 不存在，创建新 workspace 时先执行 v1 全量建表 SQL，再依次执行后续 migration SQL 升级至最新版本
+- 若 workspace 不存在，创建新 workspace 时执行 v1 全量建表 SQL（当前 library.db 和 embedding.db 各自只有 v1）
 
 **`init` 以外的所有命令**（`source add`、`source list`、`scan start`、`serve`）：
 - 打开 DB 连接后、执行业务逻辑前，自动执行 migration
@@ -63,7 +58,7 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 
 | 数据库 | 文件 | 当前版本 |
 |--------|------|----------|
-| `library.db` | `library_v3.sql` | 3 |
+| `library.db` | `library_v1.sql` | 1 |
 | `embedding.db` | `embedding_v1.sql` | 1 |
 
 ### 0.6 新增 Migration 约定
@@ -128,6 +123,7 @@ CREATE TABLE library_sources (
   path TEXT NOT NULL UNIQUE,
   label TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  scan_state TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL
 );
 ```
@@ -137,6 +133,7 @@ CREATE TABLE library_sources (
 - `path`：照片源目录绝对路径。
 - `label`：用户可读标签；当前由 `hikbox-pictures source add` 自动取源目录的目录名。
 - `active`：`1` 表示 active，`0` 表示 inactive。
+- `scan_state`：源级别的扫描状态；`pending`（未扫描）、`scanned_clean`（无待重试）、`scanned_with_retries`（有待重试）。`source add` 时默认为 `pending`，每次 scan session 完成后根据该源下失败 asset 情况重算。
 - `created_at`：带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
 
 ### 2.3 `assets`
@@ -153,6 +150,7 @@ CREATE TABLE assets (
   live_photo_mov_path TEXT,
   processing_status TEXT NOT NULL CHECK (processing_status IN ('pending', 'succeeded', 'failed')),
   failure_reason TEXT,
+  scan_retry_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -179,6 +177,7 @@ CREATE INDEX idx_assets_processing_status ON assets(processing_status);
   - `succeeded`：该 asset 已成功完成读取、检测和人脸结果入库
   - `failed`：该 asset 读取失败或解码失败
 - `failure_reason`：`processing_status='failed'` 时保存可读失败原因。
+- `scan_retry_count`：该 asset 的扫描失败重试计数；每次扫描失败时递增，最大重试次数硬编码为 3，达到上限后不再被后续 scan 选中。
 - `created_at` / `updated_at`：带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
 
 运行时语义：
@@ -193,7 +192,6 @@ CREATE INDEX idx_assets_processing_status ON assets(processing_status);
 ```sql
 CREATE TABLE scan_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  plan_fingerprint TEXT NOT NULL UNIQUE,
   batch_size INTEGER NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
   command TEXT NOT NULL,
@@ -209,7 +207,6 @@ CREATE TABLE scan_sessions (
 
 字段语义：
 
-- `plan_fingerprint`：由本次 discover 结果和 `batch_size` 计算的稳定指纹；同一文件集合和同一批次大小会命中同一 session。
 - `batch_size`：本次命令使用的批次大小。
 - `status`：
   - `running`：存在未完成批次
@@ -226,7 +223,7 @@ CREATE TABLE scan_sessions (
 运行时语义：
 
 - 成功恢复时复用已有 `scan_sessions` 记录，并基于 `scan_batches.status` 判断哪些批次可跳过。
-- 同一 `plan_fingerprint` 下，`completed_batches == total_batches` 时再次执行会直接跳过，不会新建第二个 session。
+- 每次 `scan start` 都会创建新 session，不依赖指纹去重。
 - 即使 discover/批次阶段没有新增待处理批次，同一个 `scan start` 也会继续执行 assignment 阶段；只有 assignment 也成功完成后，session 才会保持 `completed`。
 - CLI 执行 `hikbox-pictures scan start` 时默认每 10 秒向 `stderr` 打印一次进度，固定格式为“阶段、已完成批次数/总批次数、已完成照片数/总照片数”；批处理阶段的照片进度来自 worker stdout 的 `batch_progress` 事件，在线归属阶段由主进程在 assignment 阶段切换时输出。
 

@@ -77,7 +77,6 @@ CREATE TABLE assets (
 
 CREATE TABLE scan_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  plan_fingerprint TEXT NOT NULL UNIQUE,
   batch_size INTEGER NOT NULL,
   status TEXT NOT NULL,
   command TEXT NOT NULL,
@@ -225,7 +224,6 @@ CREATE TABLE assets (
 
 CREATE TABLE scan_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  plan_fingerprint TEXT NOT NULL UNIQUE,
   batch_size INTEGER NOT NULL,
   status TEXT NOT NULL,
   command TEXT NOT NULL,

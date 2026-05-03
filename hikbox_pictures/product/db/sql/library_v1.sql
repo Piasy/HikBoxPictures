@@ -1,3 +1,6 @@
+-- library v1: 完整初始建表 DDL
+-- 包含所有 library.db 表、索引及字段（schema_version = 1）
+
 CREATE TABLE schema_meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -10,6 +13,7 @@ CREATE TABLE library_sources (
   path TEXT NOT NULL UNIQUE,
   label TEXT NOT NULL,
   active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+  scan_state TEXT NOT NULL DEFAULT 'pending',
   created_at TEXT NOT NULL
 );
 
@@ -24,6 +28,7 @@ CREATE TABLE assets (
   live_photo_mov_path TEXT,
   processing_status TEXT NOT NULL CHECK (processing_status IN ('pending', 'succeeded', 'failed')),
   failure_reason TEXT,
+  scan_retry_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -33,7 +38,6 @@ CREATE INDEX idx_assets_processing_status ON assets(processing_status);
 
 CREATE TABLE scan_sessions (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  plan_fingerprint TEXT NOT NULL UNIQUE,
   batch_size INTEGER NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
   command TEXT NOT NULL,
@@ -240,13 +244,30 @@ CREATE TABLE export_run (
 CREATE INDEX idx_export_run_template_id ON export_run(template_id, run_id);
 CREATE INDEX idx_export_run_status ON export_run(status);
 
+CREATE TABLE export_plan (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  bucket TEXT NOT NULL,
+  month TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  mov_file_name TEXT,
+  source_label TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(template_id, asset_id)
+);
+
+CREATE INDEX idx_export_plan_template_bucket_month
+  ON export_plan(template_id, bucket, month, file_name);
+
 CREATE TABLE export_delivery (
   delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
   run_id INTEGER NOT NULL REFERENCES export_run(run_id),
   asset_id INTEGER NOT NULL REFERENCES assets(id),
   target_path TEXT NOT NULL,
   result TEXT NOT NULL CHECK (result IN ('copied', 'skipped_exists')),
-  mov_result TEXT NOT NULL CHECK (mov_result IN ('copied', 'skipped_missing', 'not_applicable'))
+  mov_result TEXT NOT NULL CHECK (mov_result IN ('copied', 'skipped_missing', 'not_applicable')),
+  plan_id INTEGER REFERENCES export_plan(id)
 );
 
 CREATE INDEX idx_export_delivery_run_id ON export_delivery(run_id, asset_id);

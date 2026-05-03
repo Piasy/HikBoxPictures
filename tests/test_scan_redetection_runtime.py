@@ -50,16 +50,14 @@ def _insert_session_batch_item(
             session_cursor = connection.execute(
                 """
                 INSERT INTO scan_sessions (
-                  plan_fingerprint,
                   batch_size,
                   status,
                   command,
                   total_batches,
                   started_at
                 )
-                VALUES (?, 1, 'running', 'hikbox-pictures scan start --workspace test', 1, '2026-04-25T00:00:00Z')
-                """,
-                (f"plan-{batch_index}",),
+                VALUES (1, 'running', 'hikbox-pictures scan start --workspace test', 1, '2026-04-25T00:00:00Z')
+                """
             )
             session_id = int(session_cursor.lastrowid)
             batch_cursor = connection.execute(

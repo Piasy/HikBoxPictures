@@ -31,33 +31,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _apply_all_library_migrations(db_path: Path) -> None:
-    """创建完整的 library DB schema（v1 + v2 + v3 migration）。"""
-    from hikbox_pictures.product.db.migration import _apply_migration
-
+    """创建完整的 library DB schema（v1 全量建表）。"""
     conn = sqlite3.connect(db_path)
     try:
         library_v1_sql = (REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql" / "library_v1.sql").read_text(
             encoding="utf-8"
         )
         conn.executescript(library_v1_sql)
-        conn.execute("UPDATE schema_meta SET value = '1' WHERE key = 'schema_version'")
-        conn.commit()
-    finally:
-        conn.close()
-
-    # Apply v2 (placeholder)
-    v2_path = REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql" / "library_v2.sql"
-    conn = sqlite3.connect(db_path)
-    try:
-        _apply_migration(conn, version=2, sql_path=v2_path)
-    finally:
-        conn.close()
-
-    # Apply v3 (export_plan)
-    v3_path = REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql" / "library_v3.sql"
-    conn = sqlite3.connect(db_path)
-    try:
-        _apply_migration(conn, version=3, sql_path=v3_path)
     finally:
         conn.close()
 

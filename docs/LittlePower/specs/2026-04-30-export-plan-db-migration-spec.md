@@ -9,7 +9,7 @@
 - 核心行为必须通过公共入口验证；mock/stub/no-op 路径不得满足验收。
 - 任何数据库 schema 修改都必须同步更新 `docs/db_schema.md`。
 - 新增 DB 表或字段时必须走 migration SQL 文件，不得直接修改 v1 全量建表脚本。
-- `library_v1.sql` 和 `embedding_v1.sql` 为不可变基线，始终保持初始建表 DDL。
+- `library_v1.sql` 和 `embedding_v1.sql` 为完整初始建表 DDL（含 `export_plan` 等所有表）。
 - `export_plan` 记录仅追加（upsert），永不删除；模板 invalid 后 plan 记录保留。
 - 冲突消解不使用 source_label 以外的文件属性（如 EXIF、文件哈希）。
 - 模板保存后不可编辑的约束不变。
@@ -23,9 +23,9 @@
 **Concern 1: DDL auto-commit limitation in migration transaction**
 - Source: Code-quality reviewer
 - Slice/AC: Feature Slice 1, migration mechanism
-- Summary: SQLite inherently auto-commits DDL statements regardless of explicit `BEGIN`/`COMMIT`. If a future `library_v3.sql` contains two `CREATE TABLE` statements and the second fails, the first table will persist even though `ROLLBACK` executes. The `_apply_migration` docstring documents this limitation but doesn't enforce idempotent DDL patterns.
-- Controller decision: Accept risk. This is inherent SQLite behavior. When Feature Slice 2 adds `library_v3.sql`, migration files should use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` to ensure re-runnability. Not blocking for current slice.
-- Follow-up: Verify DDL idempotency when implementing Feature Slice 2.
+- Summary: SQLite inherently auto-commits DDL statements regardless of explicit `BEGIN`/`COMMIT`. If a future migration SQL contains two `CREATE TABLE` statements and the second fails, the first table will persist even though `ROLLBACK` executes. The `_apply_migration` docstring documents this limitation but doesn't enforce idempotent DDL patterns.
+- Controller decision: Accept risk. This is inherent SQLite behavior. Migration files should use `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` to ensure re-runnability. Not blocking for current slice.
+- Follow-up: Verify DDL idempotency when adding future migrations.
 
 **Concern 2: Naive SQL statement splitter**
 - Source: Code-quality reviewer
@@ -44,7 +44,7 @@
 
 ### Public Interface
 - 公开入口：所有 CLI 命令的启动路径（对用户透明，无新增 CLI 参数或子命令）
-- 新增文件：`hikbox_pictures/product/db/sql/library_v2.sql`（占位迁移，用于验证机制，不含实际 schema 变更；真实 DDL 由 Feature Slice 2 的 `library_v3.sql` 承载）
+- 新增文件：`hikbox_pictures/product/db/sql/library_v2.sql`（占位迁移，用于验证机制，不含实际 schema 变更；现已合并至 `library_v1.sql`）
 - DB：`schema_meta.schema_version` 递增
 - 文档：`AGENTS.md` 和 `docs/db_schema.md` 包含 migration 机制说明
 - 若当前无 embedding schema 变更，则无需创建 `embedding_v2.sql`；迁移机制仅在对应 SQL 文件存在时执行
@@ -58,7 +58,7 @@
 ### Non-goals
 - 不做回滚/downgrade migration
 - 不做跨 DB 联动（两个 DB 各自独立）
-- 不修改 `library_v1.sql` 和 `embedding_v1.sql`（v1 全量建表脚本保持不可变）
+- 不修改 `embedding_v1.sql`（embedding v1 全量建表脚本保持不变）
 
 ### Acceptance Criteria
 
@@ -146,7 +146,7 @@
 - API 不变：现有 `GET /api/export-templates/{template_id}/preview`、`POST /api/export-templates/{template_id}/execute` 等端点行为契约保持不变，内部实现切换为 plan 驱动
 - 新增 DB 表：`export_plan`（字段含 `id`、`template_id`、`asset_id`、`bucket`、`month`、`file_name`、`mov_file_name`、`source_label`、`created_at`；UNIQUE(`template_id`, `asset_id`)）
 - 修改 DB 表：`export_delivery` 新增 `plan_id` 列
-- Schema migration：`library_v3.sql` 包含 `export_plan` 建表 DDL 和 `export_delivery` 新增列 DDL
+- Schema migration：`export_plan` 建表 DDL 和 `export_delivery.plan_id` 列已包含在 `library_v1.sql` 中
 - Web 页面：`/exports` 模板列表页移除"执行"入口按钮
 
 ### Error and Boundary Cases

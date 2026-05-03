@@ -73,7 +73,6 @@ def start_scan(
             if resumable_session is not None:
                 session = resumable_session
                 total_batches = int(session["total_batches"])
-                plan_fingerprint = str(session["plan_fingerprint"])
                 effective_batch_size = int(session["batch_size"])
             else:
                 candidates = _discover_candidates(active_sources)
@@ -81,13 +80,11 @@ def start_scan(
                     raise ScanStartError("没有可扫描照片。")
 
                 total_batches = (len(candidates) + batch_size - 1) // batch_size
-                plan_fingerprint = _compute_plan_fingerprint(candidates=candidates, batch_size=batch_size)
                 session = _ensure_scan_session(
                     workspace_context=workspace_context,
                     candidates=candidates,
                     batch_size=batch_size,
                     total_batches=total_batches,
-                    plan_fingerprint=plan_fingerprint,
                     command=command,
                 )
             session_id = int(session["id"])
@@ -101,7 +98,6 @@ def start_scan(
                     "timestamp": utc_now_text(),
                     "event": "scan_started",
                     "session_id": session_id,
-                    "plan_fingerprint": plan_fingerprint,
                     "batch_size": effective_batch_size,
                     "total_batches": total_batches,
                     "model_root": str(workspace_context.model_root_path),
@@ -420,72 +416,31 @@ def _discover_candidates(active_sources: list[dict[str, object]]) -> list[dict[s
         progress_thread.join()
 
 
-def _compute_plan_fingerprint(*, candidates: list[dict[str, object]], batch_size: int) -> str:
-    payload = {
-        "batch_size": batch_size,
-        "candidates": [
-            {
-                "source_id": item["source_id"],
-                "absolute_path": item["absolute_path"],
-                "file_fingerprint": item["file_fingerprint"],
-                "capture_month": item["capture_month"],
-                "live_photo_mov_path": item["live_photo_mov_path"],
-            }
-            for item in candidates
-        ],
-    }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _ensure_scan_session(
     *,
     workspace_context: WorkspaceContext,
     candidates: list[dict[str, object]],
     batch_size: int,
     total_batches: int,
-    plan_fingerprint: str,
     command: str,
 ) -> dict[str, object]:
     connection = sqlite3.connect(workspace_context.library_db_path)
     connection.row_factory = sqlite3.Row
     try:
-        row = connection.execute(
-            """
-            SELECT id, status, total_batches
-            FROM scan_sessions
-            WHERE plan_fingerprint = ?
-            """,
-            (plan_fingerprint,),
-        ).fetchone()
-        if row is not None:
-            with connection:
-                connection.execute(
-                    """
-                    UPDATE scan_sessions
-                    SET status = 'running',
-                        completed_at = NULL
-                    WHERE id = ?
-                    """,
-                    (int(row["id"]),),
-                )
-            return {"id": int(row["id"]), "status": "running", "total_batches": int(row["total_batches"])}
-
         started_at = utc_now_text()
         with connection:
             cursor = connection.execute(
                 """
                 INSERT INTO scan_sessions (
-                  plan_fingerprint,
                   batch_size,
                   status,
                   command,
                   total_batches,
                   started_at
                 )
-                VALUES (?, ?, 'running', ?, ?, ?)
+                VALUES (?, 'running', ?, ?, ?)
                 """,
-                (plan_fingerprint, batch_size, command, total_batches, started_at),
+                (batch_size, command, total_batches, started_at),
             )
             session_id = int(cursor.lastrowid)
             for batch_index, batch_candidates in enumerate(_chunk_candidates(candidates, batch_size), start=1):
@@ -580,7 +535,7 @@ def _load_resumable_session(workspace_context: WorkspaceContext) -> dict[str, ob
     try:
         row = connection.execute(
             """
-            SELECT id, plan_fingerprint, batch_size, total_batches
+            SELECT id, batch_size, total_batches
             FROM scan_sessions
             WHERE status = 'running'
               AND EXISTS (
