@@ -85,7 +85,13 @@
 
 ## Feature Slice 2: 源级别 scan 状态与增量候选发现
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
+
+**Review Concerns（非阻塞，已记录）：**
+- Source: Code-quality reviewer
+- TDD 证据缺失：未保留行为变更前的 RED 失败命令与预期失败摘要。
+- `_refresh_source_scan_states` 在 scan 异常失败路径（batch/assignment 阶段抛异常后）未被调用。当前三态语义和 session 恢复机制下不会导致功能错误（`scanned_with_retries` 源下次仍会从 DB 取重试候选），但属于状态收敛的语义缺口。若后续扩展更精细的 source 状态机，建议补全 finally-path 的状态刷新。
+- `_discover_candidates` 进度线程消息已中性化（"候选发现，正在准备处理队列..."），避免在 `scanned_with_retries` 纯 DB 查询场景下误导。
 
 ### Behavior
 
