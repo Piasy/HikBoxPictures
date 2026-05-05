@@ -182,7 +182,8 @@ CREATE INDEX idx_assets_processing_status ON assets(processing_status);
 
 运行时语义：
 
-- 扫描只会把支持后缀 `jpg`/`jpeg`/`png`/`heic`/`heif` 的文件 discover 为 candidate asset。
+- 扫描只会把支持后缀 `jpg`/`jpeg`/`png`/`heic`/`heif` 的文件 discover 为 candidate asset；discover 阶段只准备路径和后缀，不读取图片 EXIF，也不查找 Live Photo MOV。
+- `capture_month` 与 `live_photo_mov_path` 在批次加载阶段计算；同一次 `scan start` 中同一目录内的隐藏 MOV 会先建立一次索引，再用于 `heic`/`heif` 配对。
 - 非支持后缀不会写入 `assets`。
 - 损坏图片如果后缀受支持，仍会写入 `assets`，但 `processing_status='failed'`，且不会生成 face、embedding 或产物。
 - 重复扫描相同 `absolute_path` 时会复用同一行并更新状态，不会重复插入第二条 asset。

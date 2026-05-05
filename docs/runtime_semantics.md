@@ -43,7 +43,8 @@
 
 - discover 只扫描 active source 根目录下一层文件，按文件绝对路径稳定排序。
 - 支持后缀：`jpg`、`jpeg`、`png`、`heic`、`heif`，大小写不敏感。
-- 只有 `heic`/`heif` 尝试匹配同目录隐藏 `.MOV/.mov`，并把命中的绝对路径写入 `assets.live_photo_mov_path`。
+- discover 阶段只准备路径和后缀；`capture_month` 与 Live Photo MOV 配对延后到批次加载阶段计算。
+- 只有 `heic`/`heif` 尝试匹配同目录隐藏 `.MOV/.mov`，同一次 `scan start` 中同一目录会先建立一次 MOV 索引，命中后把绝对路径写入 `assets.live_photo_mov_path`。
 - `jpg`/`jpeg`/`png` 不做 live MOV 配对。
 - 扫描 worker 使用 `det_thresh=0.7` 调用 InsightFace `buffalo_l`。
 - 每批调用一个独立 worker 子进程处理真实 InsightFace 检测、embedding 与产物生成。

@@ -17,6 +17,7 @@ from hikbox_pictures.product.online_assignment import OnlineAssignmentError
 from hikbox_pictures.product.online_assignment import RedetectFace
 from hikbox_pictures.product.online_assignment import reconcile_asset_redetection
 from hikbox_pictures.product.online_assignment import run_online_assignment
+from hikbox_pictures.product.scan_shared import HEIF_SUFFIXES
 from hikbox_pictures.product.scan_shared import SUPPORTED_SCAN_SUFFIXES
 from hikbox_pictures.product.scan_shared import compute_capture_month
 from hikbox_pictures.product.scan_shared import find_live_photo_mov
@@ -139,12 +140,14 @@ def start_scan(
                 )
                 return
 
+            live_photo_mov_resolver = _LivePhotoMovResolver()
             for batch in pending_batches:
                 _run_batch(
                     workspace_context=workspace_context,
                     batch=batch,
                     session_id=session_id,
                     progress_state=progress_state,
+                    live_photo_mov_resolver=live_photo_mov_resolver,
                 )
 
             _run_assignment_stage(
@@ -389,29 +392,32 @@ def _discover_candidates(
     _progress_ready = 0
     _progress_total = -1
 
+    def _print_discover_progress_snapshot(ready: int, total: int) -> None:
+        if total < 0:
+            print(
+                "scan 进度: 阶段=候选发现，正在统计文件总数...",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif total == 0:
+            print(
+                "scan 进度: 阶段=候选发现，没有需要处理的文件",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
+            print(
+                f"scan 进度: 阶段=候选发现，已准备好 {ready}/{total} 个文件...",
+                file=sys.stderr,
+                flush=True,
+            )
+
     def _log_discover_progress() -> None:
         while not stop_discover_progress.is_set():
             with _progress_lock:
                 ready = _progress_ready
                 total = _progress_total
-            if total < 0:
-                print(
-                    "scan 进度: 阶段=候选发现，正在统计文件总数...",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            elif total == 0:
-                print(
-                    "scan 进度: 阶段=候选发现，没有需要处理的文件",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            else:
-                print(
-                    f"scan 进度: 阶段=候选发现，已准备好 {ready}/{total} 个文件...",
-                    file=sys.stderr,
-                    flush=True,
-                )
+            _print_discover_progress_snapshot(ready, total)
             stop_discover_progress.wait(timeout=_SCAN_PROGRESS_INTERVAL_SECONDS)
 
     progress_thread = threading.Thread(target=_log_discover_progress, daemon=True)
@@ -439,12 +445,13 @@ def _discover_candidates(
         for source in pending_sources:
             source_id = int(source["id"])
             source_path = Path(str(source["path"]))
+            absolute_source_path = source_path if source_path.is_absolute() else source_path.resolve()
             for child in sorted(source_path.iterdir(), key=lambda path: (path.name.casefold(), path.name)):
                 if not child.is_file():
                     continue
                 if child.suffix.lower() not in SUPPORTED_SCAN_SUFFIXES:
                     continue
-                pending_paths.append((source_id, source_path, child.resolve()))
+                pending_paths.append((source_id, absolute_source_path, absolute_source_path / child.name))
 
         # 查询 scanned_with_retries 源的重试候选
         retry_rows: list[sqlite3.Row] = []
@@ -471,7 +478,7 @@ def _discover_candidates(
         with _progress_lock:
             _progress_total = total_candidates
 
-        # pending 源：逐个计算 EXIF/mov
+        # pending 源：只准备批次所需的路径信息，照片 metadata 延后到批次加载阶段。
         for source_id, source_path, absolute_path in pending_paths:
             discovered.append(
                 {
@@ -480,8 +487,6 @@ def _discover_candidates(
                     "absolute_path": str(absolute_path),
                     "file_name": absolute_path.name,
                     "file_extension": absolute_path.suffix.lower().lstrip("."),
-                    "capture_month": compute_capture_month(absolute_path),
-                    "live_photo_mov_path": find_live_photo_mov(absolute_path),
                 }
             )
             with _progress_lock:
@@ -508,6 +513,11 @@ def _discover_candidates(
             )
             with _progress_lock:
                 _progress_ready += 1
+
+        with _progress_lock:
+            final_ready = _progress_ready
+            final_total = _progress_total
+        _print_discover_progress_snapshot(final_ready, final_total)
 
         return sorted(
             discovered,
@@ -731,10 +741,15 @@ def _run_batch(
     batch: dict[str, object],
     session_id: int,
     progress_state: dict[str, int],
+    live_photo_mov_resolver: _LivePhotoMovResolver | None = None,
 ) -> None:
     batch_id = int(batch["id"])
     batch_index = int(batch["batch_index"])
-    items = _load_batch_candidates(workspace_context, batch_id=batch_id)
+    items = _load_batch_candidates(
+        workspace_context,
+        batch_id=batch_id,
+        live_photo_mov_resolver=live_photo_mov_resolver,
+    )
     _mark_batch_running(workspace_context, batch_id=batch_id)
     staging_dir: Path | None = None
     try:
@@ -902,7 +917,12 @@ def _consume_scan_worker_stderr(stream, stderr_lines: list[str]) -> None:
         stderr_lines.append(raw_line)
 
 
-def _load_batch_candidates(workspace_context: WorkspaceContext, *, batch_id: int) -> list[dict[str, object]]:
+def _load_batch_candidates(
+    workspace_context: WorkspaceContext,
+    *,
+    batch_id: int,
+    live_photo_mov_resolver: _LivePhotoMovResolver | None = None,
+) -> list[dict[str, object]]:
     connection = sqlite3.connect(workspace_context.library_db_path)
     connection.row_factory = sqlite3.Row
     try:
@@ -926,6 +946,8 @@ def _load_batch_candidates(workspace_context: WorkspaceContext, *, batch_id: int
     finally:
         connection.close()
 
+    if live_photo_mov_resolver is None:
+        live_photo_mov_resolver = _LivePhotoMovResolver()
     candidates: list[dict[str, object]] = []
     for row in rows:
         absolute_path = Path(str(row["absolute_path"]))
@@ -939,7 +961,10 @@ def _load_batch_candidates(workspace_context: WorkspaceContext, *, batch_id: int
                 "file_name": absolute_path.name,
                 "file_extension": absolute_path.suffix.lower().lstrip("."),
                 "capture_month": _recoverable_capture_month(absolute_path),
-                "live_photo_mov_path": _recoverable_live_photo_mov(absolute_path),
+                "live_photo_mov_path": _recoverable_live_photo_mov(
+                    absolute_path,
+                    live_photo_mov_resolver=live_photo_mov_resolver,
+                ),
                 "artifact_token": _artifact_token_for_item(
                     scan_batch_item_id=int(row["scan_batch_item_id"]),
                     item_index=int(row["item_index"]),
@@ -1717,6 +1742,33 @@ def _artifact_token_for_candidate(*, candidate: dict[str, object]) -> str:
     )
 
 
+class _LivePhotoMovResolver:
+    def __init__(self) -> None:
+        self._mov_paths_by_parent: dict[Path, list[Path]] = {}
+
+    def find(self, image_path: Path) -> str | None:
+        if image_path.suffix.lower() not in HEIF_SUFFIXES:
+            return None
+        mov_paths = self._mov_paths_for_parent(image_path.parent)
+        prefix = f".{image_path.stem}"
+        for mov_path in mov_paths:
+            if mov_path.name.startswith(prefix):
+                return str(mov_path.resolve())
+        return None
+
+    def _mov_paths_for_parent(self, parent: Path) -> list[Path]:
+        cached = self._mov_paths_by_parent.get(parent)
+        if cached is not None:
+            return cached
+        mov_paths = []
+        for child in parent.iterdir():
+            if child.name.startswith(".") and child.suffix.lower() == ".mov" and child.is_file():
+                mov_paths.append(child)
+        mov_paths = sorted(mov_paths)
+        self._mov_paths_by_parent[parent] = mov_paths
+        return mov_paths
+
+
 def _recoverable_capture_month(absolute_path: Path) -> str:
     try:
         return compute_capture_month(absolute_path)
@@ -1724,8 +1776,14 @@ def _recoverable_capture_month(absolute_path: Path) -> str:
         return utc_now_text()[0:7]
 
 
-def _recoverable_live_photo_mov(absolute_path: Path) -> str | None:
+def _recoverable_live_photo_mov(
+    absolute_path: Path,
+    *,
+    live_photo_mov_resolver: _LivePhotoMovResolver | None = None,
+) -> str | None:
     try:
+        if live_photo_mov_resolver is not None:
+            return live_photo_mov_resolver.find(absolute_path)
         return find_live_photo_mov(absolute_path)
     except OSError:
         return None

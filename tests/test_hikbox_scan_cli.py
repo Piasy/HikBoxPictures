@@ -2162,6 +2162,83 @@ def test_discover_candidates_does_not_compute_file_fingerprint(
     assert "file_fingerprint" not in candidates[0]
 
 
+def test_discover_candidates_defers_photo_metadata_until_batch_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    shutil.copy(FIXTURE_DIR / "pg_001_single_alex_01.jpg", source_dir / "img_01.jpg")
+    shutil.copy(FIXTURE_DIR / "pg_001_single_alex_01.jpg", source_dir / "img_02.heic")
+
+    def _unexpected_capture_month(_path: Path) -> str:
+        raise AssertionError("discover 不应读取图片 EXIF")
+
+    def _unexpected_live_photo_mov(_path: Path) -> str | None:
+        raise AssertionError("discover 不应查找 Live Photo MOV")
+
+    monkeypatch.setattr(scan_module, "compute_capture_month", _unexpected_capture_month)
+    monkeypatch.setattr(scan_module, "find_live_photo_mov", _unexpected_live_photo_mov)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    workspace_context = WorkspaceContext(
+        workspace_path=tmp_path,
+        external_root_path=tmp_path,
+        library_db_path=tmp_path / "library.db",
+        embedding_db_path=tmp_path / "embedding.db",
+        model_root_path=tmp_path,
+    )
+
+    candidates = scan_module._discover_candidates(
+        [{"id": 1, "path": str(source_dir), "label": "test", "scan_state": "pending"}],
+        workspace_context,
+    )
+
+    assert [candidate["file_name"] for candidate in candidates] == ["img_01.jpg", "img_02.heic"]
+    assert all("capture_month" not in candidate for candidate in candidates)
+    assert all("live_photo_mov_path" not in candidate for candidate in candidates)
+
+
+def test_discover_candidates_does_not_resolve_each_candidate_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    for index in range(3):
+        shutil.copy(FIXTURE_DIR / "pg_001_single_alex_01.jpg", source_dir / f"img_{index:02d}.jpg")
+
+    original_resolve = Path.resolve
+    candidate_resolve_count = 0
+
+    def _count_candidate_resolve(path: Path, *args, **kwargs):
+        nonlocal candidate_resolve_count
+        if path.parent == source_dir and path.suffix.lower() in SUPPORTED_SCAN_SUFFIXES:
+            candidate_resolve_count += 1
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _count_candidate_resolve)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    workspace_context = WorkspaceContext(
+        workspace_path=tmp_path,
+        external_root_path=tmp_path,
+        library_db_path=tmp_path / "library.db",
+        embedding_db_path=tmp_path / "embedding.db",
+        model_root_path=tmp_path,
+    )
+
+    candidates = scan_module._discover_candidates(
+        [{"id": 1, "path": str(source_dir), "label": "test", "scan_state": "pending"}],
+        workspace_context,
+    )
+
+    assert candidate_resolve_count == 0
+    assert len(candidates) == 3
+
+
 def test_load_batch_candidates_does_not_compute_file_fingerprint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2170,6 +2247,149 @@ def test_load_batch_candidates_does_not_compute_file_fingerprint(
     source_dir.mkdir()
     image_path = source_dir / "img_01.jpg"
     shutil.copy(FIXTURE_DIR / "pg_001_single_alex_01.jpg", image_path)
+    library_db, batch_ids = _create_scan_batches_for_paths(
+        tmp_path=tmp_path,
+        source_dir=source_dir,
+        batches=[[image_path]],
+    )
+
+    def _unexpected_fingerprint(_path: Path) -> str:
+        raise AssertionError("batch 候选加载不应计算文件指纹")
+
+    monkeypatch.setattr(scan_module, "compute_file_fingerprint", _unexpected_fingerprint, raising=False)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    candidates = scan_module._load_batch_candidates(
+        WorkspaceContext(
+            workspace_path=tmp_path,
+            external_root_path=tmp_path,
+            library_db_path=library_db,
+            embedding_db_path=tmp_path / "embedding.db",
+            model_root_path=tmp_path,
+        ),
+        batch_id=batch_ids[0],
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["artifact_token"] == "item000001"
+    assert "file_fingerprint" not in candidates[0]
+
+
+def test_load_batch_candidates_indexes_live_photo_mov_once_per_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    image_paths = [source_dir / f"IMG_{index:04d}.heic" for index in range(3)]
+    for image_path in image_paths:
+        image_path.write_bytes(b"not real heic")
+    (source_dir / ".IMG_0001.MOV").write_bytes(b"mov")
+
+    library_db, batch_ids = _create_scan_batches_for_paths(
+        tmp_path=tmp_path,
+        source_dir=source_dir,
+        batches=[image_paths],
+    )
+
+    monkeypatch.setattr(scan_module, "compute_capture_month", lambda _path: "2025-01")
+
+    original_iterdir = Path.iterdir
+    source_iterdir_count = 0
+
+    def _count_source_iterdir(path: Path):
+        nonlocal source_iterdir_count
+        if path == source_dir:
+            source_iterdir_count += 1
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", _count_source_iterdir)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    candidates = scan_module._load_batch_candidates(
+        WorkspaceContext(
+            workspace_path=tmp_path,
+            external_root_path=tmp_path,
+            library_db_path=library_db,
+            embedding_db_path=tmp_path / "embedding.db",
+            model_root_path=tmp_path,
+        ),
+        batch_id=batch_ids[0],
+    )
+
+    assert source_iterdir_count == 1
+    assert candidates[0]["live_photo_mov_path"] is None
+    assert candidates[1]["live_photo_mov_path"] == str((source_dir / ".IMG_0001.MOV").resolve())
+    assert candidates[2]["live_photo_mov_path"] is None
+
+
+def test_load_batch_candidates_reuses_live_photo_mov_index_across_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    first_image = source_dir / "IMG_0001.heic"
+    second_image = source_dir / "IMG_0002.heic"
+    first_image.write_bytes(b"not real heic")
+    second_image.write_bytes(b"not real heic")
+    (source_dir / ".IMG_0001.MOV").write_bytes(b"mov")
+    (source_dir / ".IMG_0002.mov").write_bytes(b"mov")
+
+    library_db, batch_ids = _create_scan_batches_for_paths(
+        tmp_path=tmp_path,
+        source_dir=source_dir,
+        batches=[[first_image], [second_image]],
+    )
+
+    monkeypatch.setattr(scan_module, "compute_capture_month", lambda _path: "2025-01")
+
+    original_iterdir = Path.iterdir
+    source_iterdir_count = 0
+
+    def _count_source_iterdir(path: Path):
+        nonlocal source_iterdir_count
+        if path == source_dir:
+            source_iterdir_count += 1
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", _count_source_iterdir)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    workspace_context = WorkspaceContext(
+        workspace_path=tmp_path,
+        external_root_path=tmp_path,
+        library_db_path=library_db,
+        embedding_db_path=tmp_path / "embedding.db",
+        model_root_path=tmp_path,
+    )
+    live_photo_mov_resolver = scan_module._LivePhotoMovResolver()
+
+    first_candidates = scan_module._load_batch_candidates(
+        workspace_context,
+        batch_id=batch_ids[0],
+        live_photo_mov_resolver=live_photo_mov_resolver,
+    )
+    second_candidates = scan_module._load_batch_candidates(
+        workspace_context,
+        batch_id=batch_ids[1],
+        live_photo_mov_resolver=live_photo_mov_resolver,
+    )
+
+    assert source_iterdir_count == 1
+    assert first_candidates[0]["live_photo_mov_path"] == str((source_dir / ".IMG_0001.MOV").resolve())
+    assert second_candidates[0]["live_photo_mov_path"] == str((source_dir / ".IMG_0002.mov").resolve())
+
+
+def _create_scan_batches_for_paths(
+    *,
+    tmp_path: Path,
+    source_dir: Path,
+    batches: list[list[Path]],
+) -> tuple[Path, list[int]]:
     library_db = tmp_path / "library.db"
     library_sql = (REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql" / "library_v1.sql").read_text(
         encoding="utf-8"
@@ -2191,50 +2411,34 @@ def test_load_batch_candidates_does_not_compute_file_fingerprint(
                 connection.execute(
                     """
                     INSERT INTO scan_sessions (batch_size, status, command, total_batches, started_at)
-                    VALUES (1, 'running', 'hikbox-pictures scan start', 1, '2026-05-05T00:00:00Z')
-                    """
-                ).lastrowid
-            )
-            batch_id = int(
-                connection.execute(
-                    """
-                    INSERT INTO scan_batches (session_id, batch_index, status, item_count)
-                    VALUES (?, 1, 'pending', 1)
+                    VALUES (?, 'running', 'hikbox-pictures scan start', ?, '2026-05-05T00:00:00Z')
                     """,
-                    (session_id,),
+                    (max(len(batch) for batch in batches), len(batches)),
                 ).lastrowid
             )
-            connection.execute(
-                """
-                INSERT INTO scan_batch_items (batch_id, item_index, source_id, absolute_path, status)
-                VALUES (?, 1, ?, ?, 'pending')
-                """,
-                (batch_id, source_id, str(image_path.resolve())),
-            )
+            batch_ids = []
+            for batch_index, image_paths in enumerate(batches, start=1):
+                batch_id = int(
+                    connection.execute(
+                        """
+                        INSERT INTO scan_batches (session_id, batch_index, status, item_count)
+                        VALUES (?, ?, 'pending', ?)
+                        """,
+                        (session_id, batch_index, len(image_paths)),
+                    ).lastrowid
+                )
+                batch_ids.append(batch_id)
+                for item_index, image_path in enumerate(image_paths, start=1):
+                    connection.execute(
+                        """
+                        INSERT INTO scan_batch_items (batch_id, item_index, source_id, absolute_path, status)
+                        VALUES (?, ?, ?, ?, 'pending')
+                        """,
+                        (batch_id, item_index, source_id, str(image_path.resolve())),
+                    )
     finally:
         connection.close()
-
-    def _unexpected_fingerprint(_path: Path) -> str:
-        raise AssertionError("batch 候选加载不应计算文件指纹")
-
-    monkeypatch.setattr(scan_module, "compute_file_fingerprint", _unexpected_fingerprint, raising=False)
-
-    from hikbox_pictures.product.sources import WorkspaceContext
-
-    candidates = scan_module._load_batch_candidates(
-        WorkspaceContext(
-            workspace_path=tmp_path,
-            external_root_path=tmp_path,
-            library_db_path=library_db,
-            embedding_db_path=tmp_path / "embedding.db",
-            model_root_path=tmp_path,
-        ),
-        batch_id=batch_id,
-    )
-
-    assert len(candidates) == 1
-    assert candidates[0]["artifact_token"] == "item000001"
-    assert "file_fingerprint" not in candidates[0]
+    return library_db, batch_ids
 
 
 def _prepare_discover_counter(tmp_path: Path) -> tuple[Path, Path]:
