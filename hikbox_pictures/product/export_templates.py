@@ -81,6 +81,7 @@ class PreviewAsset:
 @dataclass(frozen=True)
 class PreviewMonthBucket:
     month: str
+    total_count: int
     only_assets: list[PreviewAsset]
     group_assets: list[PreviewAsset]
 
@@ -647,11 +648,14 @@ def compute_export_preview(
     sorted_months = []
     for month in sorted(months.keys()):
         month_data = months[month]
+        only_sorted = sorted(month_data["only"], key=lambda a: a.file_name)
+        group_sorted = sorted(month_data["group"], key=lambda a: a.file_name)
         sorted_months.append(
             PreviewMonthBucket(
                 month=month,
-                only_assets=sorted(month_data["only"], key=lambda a: a.file_name),
-                group_assets=sorted(month_data["group"], key=lambda a: a.file_name),
+                total_count=len(only_sorted) + len(group_sorted),
+                only_assets=only_sorted,
+                group_assets=group_sorted,
             )
         )
 

@@ -559,6 +559,7 @@ def create_people_gallery_app(
             "months": [
                 {
                     "month": m.month,
+                    "total_count": m.total_count,
                     "only": [
                         {
                             "asset_id": a.asset_id,

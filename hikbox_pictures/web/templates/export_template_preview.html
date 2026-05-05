@@ -21,7 +21,7 @@
     {% for month_bucket in preview.month_buckets %}
       <section class="panel section-block" data-month="{{ month_bucket.month }}">
         <div class="section-head">
-          <h2>{{ month_bucket.month }}</h2>
+          <h2>{{ month_bucket.month }} <span style="font-weight:normal;color:var(--text-muted);font-size:0.85em;">({{ month_bucket.total_count }})</span></h2>
         </div>
 
         {% if month_bucket.only_assets %}
