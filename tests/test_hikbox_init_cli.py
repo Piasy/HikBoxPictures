@@ -123,7 +123,7 @@ def test_init_creates_workspace_schema_artifacts_and_success_log(tmp_path: Path)
         "config_version": 1,
         "external_root": str(external_root.resolve()),
     }
-    assert _read_schema_version(library_db_path) == "1"
+    assert _read_schema_version(library_db_path) == "2"
     assert _read_schema_version(embedding_db_path) == "1"
 
     library_sources_sql = _read_table_sql(library_db_path, "library_sources")
@@ -133,6 +133,7 @@ def test_init_creates_workspace_schema_artifacts_and_success_log(tmp_path: Path)
 
     assets_sql = _read_table_sql(library_db_path, "assets")
     assert "scan_retry_count INTEGER NOT NULL DEFAULT 0" in assets_sql
+    assert "file_fingerprint" not in assets_sql
 
     scan_sessions_sql = _read_table_sql(library_db_path, "scan_sessions")
     assert "plan_fingerprint" not in scan_sessions_sql

@@ -89,20 +89,18 @@ def _insert_face_record(
                   file_name,
                   file_extension,
                   capture_month,
-                  file_fingerprint,
                   live_photo_mov_path,
                   processing_status,
                   failure_reason,
                   created_at,
                   updated_at
                 )
-                VALUES (?, ?, ?, 'jpg', '2025-01', ?, NULL, 'succeeded', NULL, '2026-04-25T00:00:00Z', '2026-04-25T00:00:00Z')
+                VALUES (?, ?, ?, 'jpg', '2025-01', NULL, 'succeeded', NULL, '2026-04-25T00:00:00Z', '2026-04-25T00:00:00Z')
                 """,
                 (
                     source_id,
                     str((workspace_context.workspace_path / file_name).resolve()),
                     file_name,
-                    f"fingerprint-{file_name}",
                 ),
             )
             asset_id = int(asset_cursor.lastrowid)

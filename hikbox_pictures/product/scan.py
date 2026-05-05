@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,7 +19,6 @@ from hikbox_pictures.product.online_assignment import reconcile_asset_redetectio
 from hikbox_pictures.product.online_assignment import run_online_assignment
 from hikbox_pictures.product.scan_shared import SUPPORTED_SCAN_SUFFIXES
 from hikbox_pictures.product.scan_shared import compute_capture_month
-from hikbox_pictures.product.scan_shared import compute_file_fingerprint
 from hikbox_pictures.product.scan_shared import find_live_photo_mov
 from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
@@ -458,7 +456,7 @@ def _discover_candidates(
                 retry_rows = connection.execute(
                     f"""
                     SELECT source_id, absolute_path, file_name, file_extension,
-                           capture_month, file_fingerprint, live_photo_mov_path
+                           capture_month, live_photo_mov_path
                     FROM assets
                     WHERE source_id IN ({placeholders})
                       AND processing_status = 'failed'
@@ -473,7 +471,7 @@ def _discover_candidates(
         with _progress_lock:
             _progress_total = total_candidates
 
-        # pending 源：逐个计算指纹/EXIF/mov
+        # pending 源：逐个计算 EXIF/mov
         for source_id, source_path, absolute_path in pending_paths:
             discovered.append(
                 {
@@ -483,7 +481,6 @@ def _discover_candidates(
                     "file_name": absolute_path.name,
                     "file_extension": absolute_path.suffix.lower().lstrip("."),
                     "capture_month": compute_capture_month(absolute_path),
-                    "file_fingerprint": compute_file_fingerprint(absolute_path),
                     "live_photo_mov_path": find_live_photo_mov(absolute_path),
                 }
             )
@@ -506,8 +503,7 @@ def _discover_candidates(
                     "file_name": str(row[2]),
                     "file_extension": str(row[3]),
                     "capture_month": str(row[4]),
-                    "file_fingerprint": str(row[5]),
-                    "live_photo_mov_path": row[6],
+                    "live_photo_mov_path": row[5],
                 }
             )
             with _progress_lock:
@@ -943,8 +939,11 @@ def _load_batch_candidates(workspace_context: WorkspaceContext, *, batch_id: int
                 "file_name": absolute_path.name,
                 "file_extension": absolute_path.suffix.lower().lstrip("."),
                 "capture_month": _recoverable_capture_month(absolute_path),
-                "file_fingerprint": _recoverable_file_fingerprint(absolute_path),
                 "live_photo_mov_path": _recoverable_live_photo_mov(absolute_path),
+                "artifact_token": _artifact_token_for_item(
+                    scan_batch_item_id=int(row["scan_batch_item_id"]),
+                    item_index=int(row["item_index"]),
+                ),
             }
         )
     return candidates
@@ -1313,20 +1312,18 @@ def _upsert_asset(connection: sqlite3.Connection, *, candidate: dict[str, object
           file_name,
           file_extension,
           capture_month,
-          file_fingerprint,
           live_photo_mov_path,
           processing_status,
           failure_reason,
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(absolute_path) DO UPDATE SET
           source_id = excluded.source_id,
           file_name = excluded.file_name,
           file_extension = excluded.file_extension,
           capture_month = excluded.capture_month,
-          file_fingerprint = excluded.file_fingerprint,
           live_photo_mov_path = excluded.live_photo_mov_path,
           processing_status = excluded.processing_status,
           failure_reason = excluded.failure_reason,
@@ -1342,7 +1339,6 @@ def _upsert_asset(connection: sqlite3.Connection, *, candidate: dict[str, object
             str(candidate["file_name"]),
             str(candidate["file_extension"]),
             str(candidate["capture_month"]),
-            str(candidate["file_fingerprint"]),
             candidate["live_photo_mov_path"],
             "failed" if str(result["status"]) == "failed" else "succeeded",
             str(result.get("failure_reason")) if str(result["status"]) == "failed" else None,
@@ -1703,16 +1699,22 @@ def _cleanup_old_artifacts_after_commit(
     return None
 
 
-def _artifact_token_for_candidate(*, candidate: dict[str, object]) -> str:
-    scan_batch_item_id = candidate.get("scan_batch_item_id")
-    item_index = candidate.get("item_index")
+def _artifact_token_for_item(*, scan_batch_item_id: object, item_index: object) -> str:
     if isinstance(scan_batch_item_id, int):
-        unique_token = f"item{scan_batch_item_id:06d}"
-    elif isinstance(item_index, int):
-        unique_token = f"index{item_index:04d}"
-    else:
-        unique_token = "item000000"
-    return f"{unique_token}_{candidate['file_fingerprint']}"
+        return f"item{scan_batch_item_id:06d}"
+    if isinstance(item_index, int):
+        return f"index{item_index:04d}"
+    return "item000000"
+
+
+def _artifact_token_for_candidate(*, candidate: dict[str, object]) -> str:
+    token = candidate.get("artifact_token")
+    if isinstance(token, str) and token:
+        return token
+    return _artifact_token_for_item(
+        scan_batch_item_id=candidate.get("scan_batch_item_id"),
+        item_index=candidate.get("item_index"),
+    )
 
 
 def _recoverable_capture_month(absolute_path: Path) -> str:
@@ -1720,13 +1722,6 @@ def _recoverable_capture_month(absolute_path: Path) -> str:
         return compute_capture_month(absolute_path)
     except OSError:
         return utc_now_text()[0:7]
-
-
-def _recoverable_file_fingerprint(absolute_path: Path) -> str:
-    try:
-        return compute_file_fingerprint(absolute_path)
-    except OSError:
-        return hashlib.sha256(str(absolute_path.resolve()).encode("utf-8")).hexdigest()
 
 
 def _recoverable_live_photo_mov(absolute_path: Path) -> str | None:

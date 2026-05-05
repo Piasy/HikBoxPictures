@@ -186,8 +186,7 @@ def _process_item(
     if not isinstance(item, dict):
         raise FatalWorkerError("worker item 格式错误。")
     image_path = Path(str(item["absolute_path"]))
-    file_fingerprint = str(item["file_fingerprint"])
-    artifact_stem = _artifact_stem_for_item(item=item, file_fingerprint=file_fingerprint)
+    artifact_stem = _artifact_stem_for_item(item=item)
     try:
         image_width, image_height, detections = backend.detect(image_path)
         artifacts = _generate_artifacts(
@@ -283,16 +282,17 @@ def _generate_artifacts(
         image.close()
 
 
-def _artifact_stem_for_item(*, item: dict[str, object], file_fingerprint: str) -> str:
+def _artifact_stem_for_item(*, item: dict[str, object]) -> str:
+    artifact_token = item.get("artifact_token")
+    if isinstance(artifact_token, str) and artifact_token:
+        return artifact_token
     scan_batch_item_id = item.get("scan_batch_item_id")
     item_index = item.get("item_index")
     if isinstance(scan_batch_item_id, int):
-        unique_token = f"item{scan_batch_item_id:06d}"
-    elif isinstance(item_index, int):
-        unique_token = f"index{item_index:04d}"
-    else:
-        unique_token = "item000000"
-    return f"{unique_token}_{file_fingerprint}"
+        return f"item{scan_batch_item_id:06d}"
+    if isinstance(item_index, int):
+        return f"index{item_index:04d}"
+    return "item000000"
 
 
 if __name__ == "__main__":

@@ -36,6 +36,8 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 - `library_v1.sql`
   建立 `library.db` 完整初始基线 schema，包括：
   `schema_meta`、`library_sources`（含 `scan_state` 列）、`assets`（含 `scan_retry_count` 列）、`scan_sessions`、`scan_batches`、`scan_batch_items`、`face_observations`、`person`、`person_name_events`、`assignment_runs`、`person_face_assignments`、`person_face_exclusions`、`person_merge_operations`、`person_merge_operation_assignments`、`export_template`、`export_template_person`、`export_run`、`export_plan`、`export_delivery`（含 `plan_id` 列）及对应索引。
+- `library_v2.sql`
+  移除 `assets.file_fingerprint` 列，保留既有 asset 数据与索引。
 
 #### `embedding.db`
 
@@ -46,7 +48,7 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 
 **`init` 命令**：
 - 若 workspace 已存在（`.hikbox/` 目录或 `config.json`/`library.db`/`embedding.db` 任一存在），直接报错退出，不升级 DB
-- 若 workspace 不存在，创建新 workspace 时执行 v1 全量建表 SQL（当前 library.db 和 embedding.db 各自只有 v1）
+- 若 workspace 不存在，创建新 workspace 时先执行 v1 全量建表 SQL，再执行后续 migration 升级到当前版本
 
 **`init` 以外的所有命令**（`source add`、`source list`、`scan start`、`serve`）：
 - 打开 DB 连接后、执行业务逻辑前，自动执行 migration
@@ -58,7 +60,7 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 
 | 数据库 | 文件 | 当前版本 |
 |--------|------|----------|
-| `library.db` | `library_v1.sql` | 1 |
+| `library.db` | `library_v2.sql` | 2 |
 | `embedding.db` | `embedding_v1.sql` | 1 |
 
 ### 0.6 新增 Migration 约定
@@ -146,7 +148,6 @@ CREATE TABLE assets (
   file_name TEXT NOT NULL,
   file_extension TEXT NOT NULL,
   capture_month TEXT NOT NULL,
-  file_fingerprint TEXT NOT NULL,
   live_photo_mov_path TEXT,
   processing_status TEXT NOT NULL CHECK (processing_status IN ('pending', 'succeeded', 'failed')),
   failure_reason TEXT,
@@ -170,7 +171,6 @@ CREATE INDEX idx_assets_processing_status ON assets(processing_status);
 - `file_name`：文件名，不含目录。
 - `file_extension`：小写后缀，不带点，例如 `jpg`、`heif`。
 - `capture_month`：`YYYY-MM`。优先来自 EXIF 日期，缺失时回退到文件修改时间月份。
-- `file_fingerprint`：优先使用文件内容 SHA-256；若源文件在 metadata 阶段不可读，则回退为基于绝对路径、文件大小、修改时间和 inode 的等价幂等键。
 - `live_photo_mov_path`：仅对 `heic`/`heif` 尝试配对隐藏 MOV；匹配成功时写入 MOV 绝对路径，否则为 `NULL`。
 - `processing_status`：当前值域为：
   - `pending`：schema 保留值；扫描完成后最终会落为 `succeeded` 或 `failed`
@@ -223,7 +223,7 @@ CREATE TABLE scan_sessions (
 运行时语义：
 
 - 成功恢复时复用已有 `scan_sessions` 记录，并基于 `scan_batches.status` 判断哪些批次可跳过。
-- 每次 `scan start` 都会创建新 session，不依赖指纹去重。
+- 每次 `scan start` 都会创建新 session，不做文件内容指纹去重。
 - 即使 discover/批次阶段没有新增待处理批次，同一个 `scan start` 也会继续执行 assignment 阶段；只有 assignment 也成功完成后，session 才会保持 `completed`。
 - CLI 执行 `hikbox-pictures scan start` 时默认每 10 秒向 `stderr` 打印一次进度，固定格式为“阶段、已完成批次数/总批次数、已完成照片数/总照片数”；批处理阶段的照片进度来自 worker stdout 的 `batch_progress` 事件，在线归属阶段由主进程在 assignment 阶段切换时输出。
 

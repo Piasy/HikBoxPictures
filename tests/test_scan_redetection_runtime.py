@@ -94,7 +94,6 @@ def _insert_session_batch_item(
                     "file_name": absolute_path.name,
                     "file_extension": absolute_path.suffix.lower().lstrip("."),
                     "capture_month": "2025-01",
-                    "file_fingerprint": f"fingerprint-{batch_index}",
                     "live_photo_mov_path": None,
                 }
             ]

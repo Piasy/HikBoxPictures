@@ -21,6 +21,7 @@ import threading
 
 import pytest
 
+from hikbox_pictures.product.db.migration import migrate_to_latest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -31,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _apply_all_library_migrations(db_path: Path) -> None:
-    """创建完整的 library DB schema（v1 全量建表）。"""
+    """创建完整的 library DB 最新 schema。"""
     conn = sqlite3.connect(db_path)
     try:
         library_v1_sql = (REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql" / "library_v1.sql").read_text(
@@ -40,6 +41,7 @@ def _apply_all_library_migrations(db_path: Path) -> None:
         conn.executescript(library_v1_sql)
     finally:
         conn.close()
+    migrate_to_latest(db_path=db_path, db_name="library")
 
 
 def _create_source_image(tmp_path: Path, name: str, content: bytes = b"fake image") -> Path:
@@ -128,15 +130,14 @@ def _setup_test_db(
                 conn.execute(
                     """INSERT INTO assets
                     (source_id, absolute_path, file_name, file_extension, capture_month,
-                     file_fingerprint, live_photo_mov_path, processing_status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'succeeded', '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z')""",
+                     live_photo_mov_path, processing_status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'succeeded', '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z')""",
                     (
                         source_id,
                         str(asset.get("absolute_path", tmp_path / "source" / file_name)),
                         file_name,
                         file_ext,
                         asset.get("capture_month", "2025-01"),
-                        f"fp-{file_name}",
                         str(asset["live_photo_mov_path"]) if asset.get("live_photo_mov_path") else None,
                     ),
                 )
@@ -519,8 +520,8 @@ class TestPreviewAppendOnly:
             conn.execute(
                 """INSERT INTO assets
                 (source_id, absolute_path, file_name, file_extension, capture_month,
-                 file_fingerprint, processing_status, created_at, updated_at)
-                VALUES (1, ?, 'IMG_0002.jpg', 'jpg', '2025-02', 'fp-2', 'succeeded', '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z')""",
+                 processing_status, created_at, updated_at)
+                VALUES (1, ?, 'IMG_0002.jpg', 'jpg', '2025-02', 'succeeded', '2026-04-30T00:00:00Z', '2026-04-30T00:00:00Z')""",
                 (str(src2),),
             )
             asset_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]

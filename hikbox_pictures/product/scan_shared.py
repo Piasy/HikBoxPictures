@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-import hashlib
 from pathlib import Path
 from typing import Final
 
@@ -53,30 +52,6 @@ def compute_capture_month(image_path: Path) -> str:
             return month
     modified_at = datetime.fromtimestamp(_safe_stat(image_path).st_mtime, tz=UTC)
     return modified_at.strftime("%Y-%m")
-
-
-def compute_file_sha256(path: Path) -> str:
-    with path.open("rb") as handle:
-        digest = hashlib.sha256()
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-        return digest.hexdigest()
-    
-
-def compute_file_fingerprint(path: Path) -> str:
-    try:
-        return compute_file_sha256(path)
-    except OSError:
-        stat_result = _safe_stat(path)
-        payload = "|".join(
-            [
-                str(path.resolve()),
-                str(stat_result.st_size),
-                str(stat_result.st_mtime_ns),
-                str(getattr(stat_result, "st_ino", 0)),
-            ]
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
 
 
 def find_live_photo_mov(image_path: Path) -> str | None:

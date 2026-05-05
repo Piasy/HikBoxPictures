@@ -10,7 +10,7 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LATEST_LIBRARY_VERSION = 1
+LATEST_LIBRARY_VERSION = 2
 LATEST_EMBEDDING_VERSION = 1  # No embedding_v2.sql yet; embedding stays at v1
 
 
@@ -107,6 +107,15 @@ def _read_table_sql(db_path: Path, table_name: str) -> str:
         conn.close()
     assert row is not None
     return " ".join(str(row[0]).split())
+
+
+def _read_table_columns(db_path: Path, table_name: str) -> list[str]:
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    finally:
+        conn.close()
+    return [str(row[1]) for row in rows]
 
 
 def _read_sources(db_path: Path) -> list[dict[str, object]]:
@@ -209,6 +218,7 @@ def test_init_creates_workspace_with_latest_schema_version(tmp_path: Path) -> No
     assert _table_exists(library_db, "library_sources")
     assert _table_exists(library_db, "assets")
     assert _index_exists(library_db, "idx_assets_source_id")
+    assert "file_fingerprint" not in _read_table_columns(library_db, "assets")
     assert _table_exists(embedding_db, "schema_meta")
     assert _table_exists(embedding_db, "face_embeddings")
 
@@ -224,6 +234,71 @@ def test_init_schema_version_matches_latest(tmp_path: Path) -> None:
     library_db = workspace / ".hikbox" / "library.db"
     assert _read_schema_version(library_db) == str(LATEST_LIBRARY_VERSION)
     assert _read_table_sql(library_db, "library_sources") != ""
+    assert "file_fingerprint" not in _read_table_columns(library_db, "assets")
+
+
+def test_library_v2_migration_drops_asset_file_fingerprint_and_preserves_rows(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    source_dir = tmp_path / "photos"
+    image_path = source_dir / "image.jpg"
+    source_dir.mkdir()
+    image_path.write_bytes(b"fake image bytes")
+
+    _create_v1_workspace(workspace, external_root, source_dir=source_dir)
+    library_db = workspace / ".hikbox" / "library.db"
+    connection = sqlite3.connect(library_db)
+    try:
+        with connection:
+            source_id = int(connection.execute("SELECT id FROM library_sources").fetchone()[0])
+            connection.execute(
+                """
+                INSERT INTO assets (
+                  source_id,
+                  absolute_path,
+                  file_name,
+                  file_extension,
+                  capture_month,
+                  file_fingerprint,
+                  live_photo_mov_path,
+                  processing_status,
+                  failure_reason,
+                  scan_retry_count,
+                  created_at,
+                  updated_at
+                )
+                VALUES (?, ?, 'image.jpg', 'jpg', '2026-05', 'old-fingerprint', NULL, 'failed', 'bad image', 2, '2026-05-05T00:00:00Z', '2026-05-05T00:00:00Z')
+                """,
+                (source_id, str(image_path.resolve())),
+            )
+    finally:
+        connection.close()
+
+    result = _run_hikbox("source", "list", "--workspace", str(workspace))
+
+    assert result.returncode == 0
+    assert _read_schema_version(library_db) == str(LATEST_LIBRARY_VERSION)
+    assert "file_fingerprint" not in _read_table_columns(library_db, "assets")
+    conn = sqlite3.connect(library_db)
+    try:
+        row = conn.execute(
+            """
+            SELECT absolute_path, file_name, file_extension, capture_month,
+                   processing_status, failure_reason, scan_retry_count
+            FROM assets
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == (
+        str(image_path.resolve()),
+        "image.jpg",
+        "jpg",
+        "2026-05",
+        "failed",
+        "bad image",
+        2,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -601,12 +676,13 @@ def test_migrate_to_latest_raises_on_invalid_schema_version(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# Feature Slice 1 (incremental scan spec) AC-2: v2.sql and v3.sql removed
+# 当前 migration 文件清单
 # ---------------------------------------------------------------------------
 
-def test_migration_sql_files_only_v1_remain() -> None:
+def test_migration_sql_files_match_current_versions() -> None:
     sql_dir = REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql"
     assert (sql_dir / "library_v1.sql").is_file()
+    assert (sql_dir / "library_v2.sql").is_file()
     assert (sql_dir / "embedding_v1.sql").is_file()
-    assert not (sql_dir / "library_v2.sql").exists()
     assert not (sql_dir / "library_v3.sql").exists()
+    assert not (sql_dir / "embedding_v2.sql").exists()

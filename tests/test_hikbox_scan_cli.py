@@ -736,12 +736,10 @@ def test_scan_worker_emits_batch_progress_events(tmp_path: Path, monkeypatch: py
                 "items": [
                     {
                         "absolute_path": str((tmp_path / "photo-1.jpg").resolve()),
-                        "file_fingerprint": "fingerprint-1",
                         "item_index": 1,
                     },
                     {
                         "absolute_path": str((tmp_path / "photo-2.jpg").resolve()),
-                        "file_fingerprint": "fingerprint-2",
                         "item_index": 2,
                     },
                 ],
@@ -2097,13 +2095,13 @@ def test_discover_candidates_progress_shows_ready_and_total(
 
     monkeypatch.setattr(scan_module, "_SCAN_PROGRESS_INTERVAL_SECONDS", 0.01, raising=False)
 
-    _original_fingerprint = scan_module.compute_file_fingerprint
+    _original_capture_month = scan_module.compute_capture_month
 
-    def _slow_fingerprint(path: Path) -> str:
+    def _slow_capture_month(path: Path) -> str:
         time.sleep(0.02)
-        return _original_fingerprint(path)
+        return _original_capture_month(path)
 
-    monkeypatch.setattr(scan_module, "compute_file_fingerprint", _slow_fingerprint)
+    monkeypatch.setattr(scan_module, "compute_capture_month", _slow_capture_month)
 
     from hikbox_pictures.product.sources import WorkspaceContext
 
@@ -2130,6 +2128,113 @@ def test_discover_candidates_progress_shows_ready_and_total(
     for line in candidate_lines:
         if "已准备好" in line:
             assert "/5" in line
+
+
+def test_discover_candidates_does_not_compute_file_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    shutil.copy(FIXTURE_DIR / "pg_001_single_alex_01.jpg", source_dir / "img_01.jpg")
+
+    def _unexpected_fingerprint(_path: Path) -> str:
+        raise AssertionError("discover 不应计算文件指纹")
+
+    monkeypatch.setattr(scan_module, "compute_file_fingerprint", _unexpected_fingerprint, raising=False)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    workspace_context = WorkspaceContext(
+        workspace_path=tmp_path,
+        external_root_path=tmp_path,
+        library_db_path=tmp_path / "library.db",
+        embedding_db_path=tmp_path / "embedding.db",
+        model_root_path=tmp_path,
+    )
+
+    candidates = scan_module._discover_candidates(
+        [{"id": 1, "path": str(source_dir), "label": "test", "scan_state": "pending"}],
+        workspace_context,
+    )
+
+    assert len(candidates) == 1
+    assert "file_fingerprint" not in candidates[0]
+
+
+def test_load_batch_candidates_does_not_compute_file_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    image_path = source_dir / "img_01.jpg"
+    shutil.copy(FIXTURE_DIR / "pg_001_single_alex_01.jpg", image_path)
+    library_db = tmp_path / "library.db"
+    library_sql = (REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql" / "library_v1.sql").read_text(
+        encoding="utf-8"
+    )
+    connection = sqlite3.connect(library_db)
+    try:
+        with connection:
+            connection.executescript(library_sql)
+            source_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO library_sources (path, label, active, scan_state, created_at)
+                    VALUES (?, 'test', 1, 'pending', '2026-05-05T00:00:00Z')
+                    """,
+                    (str(source_dir.resolve()),),
+                ).lastrowid
+            )
+            session_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO scan_sessions (batch_size, status, command, total_batches, started_at)
+                    VALUES (1, 'running', 'hikbox-pictures scan start', 1, '2026-05-05T00:00:00Z')
+                    """
+                ).lastrowid
+            )
+            batch_id = int(
+                connection.execute(
+                    """
+                    INSERT INTO scan_batches (session_id, batch_index, status, item_count)
+                    VALUES (?, 1, 'pending', 1)
+                    """,
+                    (session_id,),
+                ).lastrowid
+            )
+            connection.execute(
+                """
+                INSERT INTO scan_batch_items (batch_id, item_index, source_id, absolute_path, status)
+                VALUES (?, 1, ?, ?, 'pending')
+                """,
+                (batch_id, source_id, str(image_path.resolve())),
+            )
+    finally:
+        connection.close()
+
+    def _unexpected_fingerprint(_path: Path) -> str:
+        raise AssertionError("batch 候选加载不应计算文件指纹")
+
+    monkeypatch.setattr(scan_module, "compute_file_fingerprint", _unexpected_fingerprint, raising=False)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    candidates = scan_module._load_batch_candidates(
+        WorkspaceContext(
+            workspace_path=tmp_path,
+            external_root_path=tmp_path,
+            library_db_path=library_db,
+            embedding_db_path=tmp_path / "embedding.db",
+            model_root_path=tmp_path,
+        ),
+        batch_id=batch_id,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["artifact_token"] == "item000001"
+    assert "file_fingerprint" not in candidates[0]
 
 
 def _prepare_discover_counter(tmp_path: Path) -> tuple[Path, Path]:
