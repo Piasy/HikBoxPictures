@@ -2,12 +2,9 @@ from __future__ import annotations
 
 from collections import Counter
 import json
-import os
 from pathlib import Path
 import shutil
 import sqlite3
-import subprocess
-import sys
 
 import numpy as np
 import pytest
@@ -16,77 +13,25 @@ from hikbox_pictures.product.online_assignment import OnlineAssignmentError
 from hikbox_pictures.product.online_assignment import run_online_assignment
 from hikbox_pictures.product.sources import load_workspace_context
 
+from tests.helpers import (
+    REPO_ROOT,
+    FIXTURE_DIR,
+    MANIFEST_PATH,
+    add_source,
+    fetch_all,
+    find_model_root,
+    init_workspace,
+    load_manifest,
+    prepare_workspace_models,
+    run_hikbox,
+)
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
-MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
+
 SUPPORTED_SCAN_SUFFIXES = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
 
 
-def _run_hikbox(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(REPO_ROOT)]
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    return subprocess.run(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-
-def _init_workspace(workspace: Path, external_root: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox(
-        "init",
-        "--workspace",
-        str(workspace),
-        "--external-root",
-        str(external_root),
-    )
-
-
-def _add_source(workspace: Path, source_dir: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox(
-        "source",
-        "add",
-        "--workspace",
-        str(workspace),
-        str(source_dir),
-    )
-
-
-def _prepare_workspace_models(workspace: Path) -> None:
-    source_root = _find_model_root()
-    target_root = workspace / ".hikbox" / "models" / "insightface"
-    if target_root.exists():
-        shutil.rmtree(target_root)
-    shutil.copytree(source_root, target_root)
-
-
-def _find_model_root() -> Path:
-    candidates = [REPO_ROOT / ".insightface", Path.home() / ".insightface"]
-    candidates.extend(parent / ".insightface" for parent in REPO_ROOT.parents)
-    for candidate in candidates:
-        if (candidate / "models" / "buffalo_l" / "det_10g.onnx").exists():
-            return candidate
-    raise AssertionError("缺少 InsightFace buffalo_l 模型目录，无法执行在线人物归属真实集成测试")
-
-
-def _fetch_all(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
-    connection = sqlite3.connect(db_path)
-    try:
-        return [tuple(row) for row in connection.execute(sql, params).fetchall()]
-    finally:
-        connection.close()
-
-
 def _fetch_one(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> tuple[object, ...]:
-    rows = _fetch_all(db_path, sql, params)
+    rows = fetch_all(db_path, sql, params)
     assert rows
     return rows[0]
 
@@ -107,7 +52,7 @@ def _copy_fixture_assets(target_dir: Path, file_names: list[str]) -> None:
 
 
 def _asset_assignment_rows(library_db: Path) -> dict[str, list[tuple[int, str, str]]]:
-    rows = _fetch_all(
+    rows = fetch_all(
         library_db,
         """
         SELECT
@@ -370,7 +315,7 @@ def test_scan_start_creates_expected_online_assignments_and_is_idempotent(
         mapping,
     )
 
-    second_result = _run_hikbox(
+    second_result = run_hikbox(
         "scan",
         "start",
         "--workspace",
@@ -417,13 +362,13 @@ def test_online_assignment_fails_for_corrupted_candidate_embedding_and_recovers(
     workspace = tmp_path / "workspace-corrupted-embedding"
     external_root = tmp_path / "external-root-corrupted-embedding"
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, source_dir)
+    prepare_workspace_models(workspace)
+    add_result = add_source(workspace, source_dir)
     assert add_result.returncode == 0
 
-    first_result = _run_hikbox(
+    first_result = run_hikbox(
         "scan",
         "start",
         "--workspace",
@@ -536,13 +481,13 @@ def test_scan_start_ignores_orphan_embedding_and_records_warning(tmp_path: Path)
     workspace = tmp_path / "workspace-orphan-embedding"
     external_root = tmp_path / "external-root-orphan-embedding"
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
-    _prepare_workspace_models(workspace)
-    add_result = _add_source(workspace, source_dir)
+    prepare_workspace_models(workspace)
+    add_result = add_source(workspace, source_dir)
     assert add_result.returncode == 0
 
-    first_result = _run_hikbox(
+    first_result = run_hikbox(
         "scan",
         "start",
         "--workspace",

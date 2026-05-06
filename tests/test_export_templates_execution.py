@@ -4,151 +4,32 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
-import socket
 import sqlite3
-import subprocess
-import sys
-import time
 
 import httpx
 import pytest
 
+from tests.helpers import (
+    spawn_hikbox,
+    find_free_port,
+    wait_for_http_ready,
+    terminate_process,
+    fetch_all,
+    expected_target_mapping,
+    load_manifest,
+    find_model_root,
+    prepare_workspace_models,
+    init_workspace,
+    add_source,
+    run_hikbox,
+    name_person_via_api,
+    merge_people_via_api,
+    create_template_via_api,
+)
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
-MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
-
-
-def _run_hikbox(
-    *args: str,
-    cwd: Path | None = None,
-    env_updates: dict[str, str] | None = None,
-    pythonpath_prepend: list[Path] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(path) for path in (pythonpath_prepend or [])]
-    pythonpath_parts.append(str(REPO_ROOT))
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    if env_updates:
-        env.update(env_updates)
-    return subprocess.run(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-
-def _spawn_hikbox(
-    *args: str,
-    cwd: Path | None = None,
-    env_updates: dict[str, str] | None = None,
-    pythonpath_prepend: list[Path] | None = None,
-) -> subprocess.Popen[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(path) for path in (pythonpath_prepend or [])]
-    pythonpath_parts.append(str(REPO_ROOT))
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    if env_updates:
-        env.update(env_updates)
-    return subprocess.Popen(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-
-def _init_workspace(workspace: Path, external_root: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox(
-        "init",
-        "--workspace",
-        str(workspace),
-        "--external-root",
-        str(external_root),
-    )
-
-
-def _add_source(workspace: Path, source_dir: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox(
-        "source",
-        "add",
-        "--workspace",
-        str(workspace),
-        str(source_dir),
-    )
-
-
-def _prepare_workspace_models(workspace: Path) -> None:
-    source_root = _find_model_root()
-    target_root = workspace / ".hikbox" / "models" / "insightface"
-    if target_root.exists():
-        shutil.rmtree(target_root)
-    shutil.copytree(source_root, target_root)
-
-
-def _find_model_root() -> Path:
-    candidates = [REPO_ROOT / ".insightface", Path.home() / ".insightface"]
-    candidates.extend(parent / ".insightface" for parent in REPO_ROOT.parents)
-    for candidate in candidates:
-        if (candidate / "models" / "buffalo_l" / "det_10g.onnx").exists():
-            return candidate
-    raise AssertionError("缺少 InsightFace buffalo_l 模型目录，无法执行集成测试")
-
-
-def _load_manifest() -> dict[str, object]:
-    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return int(sock.getsockname()[1])
-
-
-def _wait_for_http_ready(base_url: str) -> None:
-    deadline = time.time() + 30
-    last_error: Exception | None = None
-    while time.time() < deadline:
-        try:
-            response = httpx.get(base_url, follow_redirects=True, timeout=1.0)
-            if response.status_code < 500:
-                return
-        except Exception as exc:
-            last_error = exc
-        time.sleep(0.2)
-    raise AssertionError(f"等待服务可用超时: {base_url}; last_error={last_error!r}")
-
-
-def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
-    if process.poll() is None:
-        process.send_signal(signal.SIGTERM)
-    try:
-        stdout_text, stderr_text = process.communicate(timeout=30)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout_text, stderr_text = process.communicate(timeout=30)
-    return stdout_text, stderr_text
-
-
-def _fetch_all(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
-    connection = sqlite3.connect(db_path)
-    try:
-        return [tuple(row) for row in connection.execute(sql, params).fetchall()]
-    finally:
-        connection.close()
 
 
 def _execute_sql(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> None:
@@ -160,83 +41,14 @@ def _execute_sql(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> No
         connection.close()
 
 
-def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> dict[str, str]:
-    rows = _fetch_all(
-        library_db,
-        """
-        SELECT
-          assets.file_name,
-          person_face_assignments.person_id
-        FROM person_face_assignments
-        INNER JOIN face_observations
-          ON face_observations.id = person_face_assignments.face_observation_id
-        INNER JOIN assets
-          ON assets.id = face_observations.asset_id
-        WHERE person_face_assignments.active = 1
-        ORDER BY assets.file_name ASC
-        """,
-    )
-    assignment_rows: dict[str, list[str]] = {}
-    for file_name, person_id in rows:
-        assignment_rows.setdefault(str(file_name), []).append(str(person_id))
-
-    mapping: dict[str, str] = {}
-    for label in manifest["expected_person_groups"]:
-        observed_person_ids: set[str] = set()
-        for asset in manifest["assets"]:
-            if asset["expected_target_people"] != [label]:
-                continue
-            file_name = str(asset["file"])
-            assigned = assignment_rows.get(file_name, [])
-            if not assigned:
-                continue
-            observed_person_ids.update(assigned)
-        assert observed_person_ids, f"{label} 缺少 target assignment"
-        assert len(observed_person_ids) == 1, observed_person_ids
-        mapping[str(label)] = next(iter(observed_person_ids))
-    return mapping
-
-
-
-
-def _name_person_via_api(base_url: str, person_id: str, display_name: str) -> None:
-    response = httpx.post(
-        f"{base_url}/people/{person_id}/name",
-        data={"display_name": display_name},
-        follow_redirects=False,
-        timeout=5.0,
-    )
+def _assert_name_ok(base_url: str, person_id: str, display_name: str) -> None:
+    response = name_person_via_api(base_url, person_id, display_name)
     assert response.status_code in (302, 303)
 
 
-def _merge_people_via_api(base_url: str, person_ids: list[str]) -> None:
-    response = httpx.post(
-        f"{base_url}/people/merge",
-        data={"person_id": person_ids},
-        follow_redirects=False,
-        timeout=5.0,
-    )
+def _assert_merge_ok(base_url: str, person_ids: list[str]) -> None:
+    response = merge_people_via_api(base_url, person_ids)
     assert response.status_code == 303
-
-
-def _create_template_via_api(
-    base_url: str,
-    *,
-    name: str,
-    person_ids: list[str],
-    output_root: str,
-) -> dict[str, object]:
-    response = httpx.post(
-        f"{base_url}/api/export-templates",
-        data={
-            "name": name,
-            "output_root": output_root,
-            "person_id": person_ids,
-        },
-        timeout=5.0,
-    )
-    response.raise_for_status()
-    return response.json()
 
 
 def _get_preview_via_api(base_url: str, template_id: str) -> dict[str, object]:
@@ -274,7 +86,7 @@ def _collect_file_tree(root: Path) -> dict[str, list[str]]:
 
 
 def _db_capture_months(library_db: Path, file_names: list[str]) -> dict[str, str]:
-    rows = _fetch_all(
+    rows = fetch_all(
         library_db,
         "SELECT file_name, capture_month FROM assets WHERE file_name IN ({})".format(
             ",".join("?" for _ in file_names)
@@ -385,16 +197,16 @@ class TestExportTemplatePreview:
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = str(tmp_path / "export-output")
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
             template_id = result["template_id"]
 
             preview = _get_preview_via_api(base_url, template_id)
@@ -419,33 +231,33 @@ class TestExportTemplatePreview:
             assert preview["only_count"] == len(expected_only_files)
             assert preview["group_count"] == len(expected_group_files)
         finally:
-            _terminate_process(process)
+            terminate_process(process)
 
     def test_preview_rejects_invalid_template(self, scanned_workspace, tmp_path: Path) -> None:
         workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = str(tmp_path / "export-output")
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
             template_id = result["template_id"]
 
             # Merge to invalidate template
-            _merge_people_via_api(base_url, [alex_id, blair_id])
+            _assert_merge_ok(base_url, [alex_id, blair_id])
 
             response = httpx.get(f"{base_url}/api/export-templates/{template_id}/preview", timeout=5.0)
             assert response.status_code == 400
             assert "invalid" in response.text.lower() or "失效" in response.text
         finally:
-            _terminate_process(process)
+            terminate_process(process)
 
 
 class TestExportTemplateExecution:
@@ -454,14 +266,14 @@ class TestExportTemplateExecution:
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = tmp_path / "export-output"
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
             # AC-3: Make a multi-person JPG asset appear as HEIC with a MOV pair
             # so the HEIC/HEIF branch in _copy_asset is exercised through the public API.
@@ -474,7 +286,7 @@ class TestExportTemplateExecution:
                 (str(mov_dst), "pg_031_group_alex_blair_01.jpg"),
             )
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
             template_id = result["template_id"]
 
             preview = _get_preview_via_api(base_url, template_id)
@@ -549,23 +361,23 @@ class TestExportTemplateExecution:
                 if not d["target_path"].lower().endswith("pg_031_group_alex_blair_01.jpg"):
                     assert d["mov_result"] == "not_applicable", f"Non-HEIC should have not_applicable mov_result: {d}"
         finally:
-            _terminate_process(process)
+            terminate_process(process)
 
     def test_execute_skips_existing_files(self, scanned_workspace, tmp_path: Path) -> None:
         workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = tmp_path / "export-output"
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
             template_id = result["template_id"]
 
             expected = manifest["expected_exports"]["target_alex_blair"]
@@ -601,50 +413,50 @@ class TestExportTemplateExecution:
             assert other_file.exists()
             assert other_file.read_bytes() != b"placeholder"
         finally:
-            _terminate_process(process)
+            terminate_process(process)
 
     def test_invalid_template_execute_rejected(self, scanned_workspace, tmp_path: Path) -> None:
         workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = str(tmp_path / "export-output")
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
             template_id = result["template_id"]
 
-            _merge_people_via_api(base_url, [alex_id, blair_id])
+            _assert_merge_ok(base_url, [alex_id, blair_id])
 
-            run_count_before = _fetch_all(library_db, "SELECT COUNT(*) FROM export_run")[0][0]
+            run_count_before = fetch_all(library_db, "SELECT COUNT(*) FROM export_run")[0][0]
             response = httpx.post(f"{base_url}/api/export-templates/{template_id}/execute", timeout=5.0)
             assert response.status_code == 400
-            run_count_after = _fetch_all(library_db, "SELECT COUNT(*) FROM export_run")[0][0]
+            run_count_after = fetch_all(library_db, "SELECT COUNT(*) FROM export_run")[0][0]
             assert run_count_after == run_count_before
         finally:
-            _terminate_process(process)
+            terminate_process(process)
 
     def test_history_shows_run_and_deliveries(self, scanned_workspace, tmp_path: Path) -> None:
         workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = str(tmp_path / "export-output")
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
             template_id = result["template_id"]
 
             # Preview first to populate export_plan
@@ -668,26 +480,26 @@ class TestExportTemplateExecution:
                 assert d["result"] in ("copied", "skipped_exists")
                 assert d["mov_result"] in ("copied", "skipped_missing", "not_applicable")
         finally:
-            _terminate_process(process)
+            terminate_process(process)
 
     def test_unwritable_output_root_marks_failed(self, scanned_workspace, tmp_path: Path) -> None:
         workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = tmp_path / "export-output"
         output_root.mkdir()
         # Make directory read-only
         os.chmod(output_root, 0o555)
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
             template_id = result["template_id"]
 
             # Preview first to populate export_plan (preview only writes to DB, not filesystem)
@@ -695,12 +507,12 @@ class TestExportTemplateExecution:
             response = httpx.post(f"{base_url}/api/export-templates/{template_id}/execute", timeout=5.0)
             assert response.status_code == 500
 
-            run_rows = _fetch_all(library_db, "SELECT run_id, status FROM export_run WHERE template_id = ?", (template_id,))
+            run_rows = fetch_all(library_db, "SELECT run_id, status FROM export_run WHERE template_id = ?", (template_id,))
             assert len(run_rows) == 1
             assert run_rows[0][1] == "failed"
         finally:
             os.chmod(output_root, 0o755)
-            _terminate_process(process)
+            terminate_process(process)
 
     def test_export_preserves_exif_and_timestamps(self, scanned_workspace, tmp_path: Path) -> None:
         from PIL import Image
@@ -709,16 +521,16 @@ class TestExportTemplateExecution:
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         output_root = tmp_path / "export-output"
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=str(output_root))
             template_id = result["template_id"]
 
             # Preview first to populate export_plan
@@ -742,7 +554,7 @@ class TestExportTemplateExecution:
             if hasattr(src_stat, "st_birthtime"):
                 assert abs(src_stat.st_birthtime - dst_stat.st_birthtime) < 2, "birthtime mismatch"
         finally:
-            _terminate_process(process)
+            terminate_process(process)
 
     def test_execute_ignores_later_asset_changes(self, scanned_workspace, tmp_path: Path) -> None:
         # AC-7: export should use snapshot from start time.
@@ -753,12 +565,12 @@ class TestExportTemplateExecution:
         alex_id = target_person_ids["target_alex"]
         blair_id = target_person_ids["target_blair"]
 
-        port = _find_free_port()
+        port = find_free_port()
         hook_module_dir = tmp_path / "hook_module"
         hook_config_path = tmp_path / "hook_config.json"
         _write_per_file_copy_hook_module(hook_module_dir, hook_config_path)
 
-        process = _spawn_hikbox(
+        process = spawn_hikbox(
             "serve",
             "--workspace", str(workspace),
             "--port", str(port),
@@ -768,11 +580,11 @@ class TestExportTemplateExecution:
         base_url = f"http://127.0.0.1:{port}"
         output_root = str(tmp_path / "export-output")
         try:
-            _wait_for_http_ready(f"{base_url}/")
-            _name_person_via_api(base_url, alex_id, "Alex Chen")
-            _name_person_via_api(base_url, blair_id, "Blair Lin")
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
 
-            result = _create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
+            result = create_template_via_api(base_url, name="Alex & Blair", person_ids=[alex_id, blair_id], output_root=output_root)
             template_id = result["template_id"]
 
             preview = _get_preview_via_api(base_url, template_id)
@@ -787,7 +599,7 @@ class TestExportTemplateExecution:
             # Pick a future asset not in the snapshot that has an unassigned face
             # (so we can inject a new assignment without violating the unique active
             # face constraint). pg_039_non_target_01.jpg has an unassigned face.
-            future_asset_rows = _fetch_all(
+            future_asset_rows = fetch_all(
                 library_db,
                 """
                 SELECT a.id
@@ -838,4 +650,4 @@ class TestExportTemplateExecution:
                 f"File tree count {len(all_files)} should match snapshot {snapshot_total}"
             )
         finally:
-            _terminate_process(process)
+            terminate_process(process)

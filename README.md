@@ -144,7 +144,7 @@ WebUI 同时提供 JSON API 端点：
 
 `--scope backend` 会排除 `test_webui_*_playwright.py`，`--scope frontend` 只运行 `test_webui_*_playwright.py`；scope 和文件路径可以组合，也可以传入多个文件路径。
 
-最新一轮逐文件全量运行总耗时约 15 分钟，其中 `tests/test_hikbox_scan_cli.py` 约 6 分钟、`tests/people_gallery/test_webui_people_gallery_playwright.py` 约 4 分钟、`tests/test_hikbox_serve_cli.py` 约 2 分钟，是主要耗时来源；其余多数文件在 30 秒内完成。日常修改优先运行受影响文件，收尾或跨模块改动再运行 `--scope backend`、`--scope frontend` 或全量。
+最新一轮逐文件全量运行 194 用例 0 失败，总耗时约 13 分钟。单个测试文件耗时均在 2 分钟以内（最长的 `test_hikbox_scan_cli_recovery_kill.py` 约 97 秒、`test_hikbox_scan_cli_rescan.py` 约 74 秒）。日常修改优先运行受影响文件，收尾或跨模块改动再运行 `--scope backend`、`--scope frontend` 或全量。
 
 已扫描图库基线已经抽到 `tests/conftest.py`：全量 fixture 的 `init -> source add -> scan start` 以 session 级金色工作区懒加载执行一次；新增测试只要需要“已完成主基线扫描的图库”，必须复用 `scanned_workspace` 或 `copy_scanned_workspace(tmp_path)`，不要重新内联完整 init/scan helper。
 

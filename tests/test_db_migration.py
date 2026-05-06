@@ -8,35 +8,10 @@ import sqlite3
 import subprocess
 import sys
 
+from tests.helpers import REPO_ROOT, run_hikbox
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
 LATEST_LIBRARY_VERSION = 2
 LATEST_EMBEDDING_VERSION = 1  # No embedding_v2.sql yet; embedding stays at v1
-
-
-def _run_hikbox(
-    *args: str,
-    cwd: Path | None = None,
-    env_updates: dict[str, str] | None = None,
-    timeout: int | None = 60,
-) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(REPO_ROOT)]
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    if env_updates:
-        env.update(env_updates)
-    return subprocess.run(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
-    )
 
 
 def _run_hikbox_with_inline_python(
@@ -131,12 +106,9 @@ def _read_sources(db_path: Path) -> list[dict[str, object]]:
 
 
 def _init_workspace(workspace: Path, external_root: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox(
-        "init",
-        "--workspace",
-        str(workspace),
-        "--external-root",
-        str(external_root),
+    return run_hikbox(
+        "init", "--workspace", str(workspace), "--external-root", str(external_root),
+        timeout=60,
     )
 
 
@@ -274,7 +246,7 @@ def test_library_v2_migration_drops_asset_file_fingerprint_and_preserves_rows(tm
     finally:
         connection.close()
 
-    result = _run_hikbox("source", "list", "--workspace", str(workspace))
+    result = run_hikbox("source", "list", "--workspace", str(workspace), timeout=60)
 
     assert result.returncode == 0
     assert _read_schema_version(library_db) == str(LATEST_LIBRARY_VERSION)
@@ -315,12 +287,13 @@ def test_source_add_auto_migrates_old_workspace(tmp_path: Path) -> None:
 
     assert _read_schema_version(workspace / ".hikbox" / "library.db") == "1"
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "source",
         "add",
         "--workspace",
         str(workspace),
         str(source_dir),
+        timeout=60,
     )
 
     assert result.returncode == 0
@@ -340,11 +313,12 @@ def test_source_list_auto_migrates_old_workspace(tmp_path: Path) -> None:
 
     assert _read_schema_version(workspace / ".hikbox" / "library.db") == "1"
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "source",
         "list",
         "--workspace",
         str(workspace),
+        timeout=60,
     )
 
     assert result.returncode == 0
@@ -365,11 +339,12 @@ def test_scan_start_auto_migrates_old_workspace(tmp_path: Path) -> None:
 
     assert _read_schema_version(workspace / ".hikbox" / "library.db") == "1"
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "scan",
         "start",
         "--workspace",
         str(workspace),
+        timeout=60,
     )
 
     # Command may fail for other reasons (no models, etc.) but migration should succeed
@@ -393,12 +368,13 @@ def test_serve_auto_migrates_old_workspace(tmp_path: Path) -> None:
     blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     blocker.bind(("127.0.0.1", 18765))
     try:
-        result = _run_hikbox(
+        result = run_hikbox(
             "serve",
             "--workspace",
             str(workspace),
             "--port",
             "18765",
+            timeout=60,
         )
     finally:
         blocker.close()
@@ -574,12 +550,13 @@ def test_serve_on_already_latest_workspace_does_not_change_schema_version(tmp_pa
     finally:
         conn.close()
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "serve",
         "--workspace",
         str(workspace),
         "--port",
         "18767",
+        timeout=60,
     )
 
     # Serve should fail because of missing table, but schema_version unchanged
@@ -599,11 +576,12 @@ def test_source_list_on_latest_workspace_does_not_change_schema_version(tmp_path
     embedding_db = workspace / ".hikbox" / "embedding.db"
     assert _read_schema_version(library_db) == str(LATEST_LIBRARY_VERSION)
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "source",
         "list",
         "--workspace",
         str(workspace),
+        timeout=60,
     )
 
     assert result.returncode == 0

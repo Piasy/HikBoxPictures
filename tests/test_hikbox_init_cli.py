@@ -7,28 +7,7 @@ import sqlite3
 import subprocess
 import sys
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _run_hikbox(
-    *args: str,
-    cwd: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(REPO_ROOT)]
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    return subprocess.run(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
+from tests.helpers import REPO_ROOT, run_hikbox
 
 
 def _run_hikbox_with_inline_python(
@@ -91,7 +70,7 @@ def test_init_creates_workspace_schema_artifacts_and_success_log(tmp_path: Path)
     workspace = tmp_path / "workspace"
     external_root = tmp_path / "external-root"
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "init",
         "--workspace",
         str(workspace),
@@ -158,7 +137,7 @@ def test_init_resolves_relative_workspace_and_external_root_to_absolute_paths(
     runner_dir = tmp_path / "runner"
     runner_dir.mkdir()
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "init",
         "--workspace",
         "workspace",
@@ -180,7 +159,7 @@ def test_repeated_init_fails_without_overwriting_existing_files_or_logs(tmp_path
     workspace = tmp_path / "workspace"
     external_root = tmp_path / "external-root"
 
-    first_result = _run_hikbox(
+    first_result = run_hikbox(
         "init",
         "--workspace",
         str(workspace),
@@ -200,7 +179,7 @@ def test_repeated_init_fails_without_overwriting_existing_files_or_logs(tmp_path
     original_embedding_db = embedding_db_path.read_bytes()
     original_log = log_path.read_bytes()
 
-    second_result = _run_hikbox(
+    second_result = run_hikbox(
         "init",
         "--workspace",
         str(workspace),
@@ -217,12 +196,12 @@ def test_repeated_init_fails_without_overwriting_existing_files_or_logs(tmp_path
 
 
 def test_init_requires_workspace_and_external_root_arguments(tmp_path: Path) -> None:
-    missing_workspace = _run_hikbox(
+    missing_workspace = run_hikbox(
         "init",
         "--external-root",
         str(tmp_path / "external-root"),
     )
-    missing_external_root = _run_hikbox(
+    missing_external_root = run_hikbox(
         "init",
         "--workspace",
         str(tmp_path / "workspace"),
@@ -240,7 +219,7 @@ def test_init_rolls_back_when_external_root_cannot_be_created(tmp_path: Path) ->
     external_root_parent.write_text("not-a-directory", encoding="utf-8")
     external_root = external_root_parent / "external-root"
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "init",
         "--workspace",
         str(workspace),
@@ -259,7 +238,7 @@ def test_init_fails_cleanly_when_external_root_is_existing_file(tmp_path: Path) 
     external_root = tmp_path / "existing-file"
     external_root.write_text("occupied", encoding="utf-8")
 
-    result = _run_hikbox(
+    result = run_hikbox(
         "init",
         "--workspace",
         str(workspace),

@@ -13,15 +13,9 @@
 from __future__ import annotations
 
 import concurrent.futures
-import json
-import os
 from pathlib import Path
-import shutil
-import signal
-import socket
 import sqlite3
 import subprocess
-import sys
 import threading
 import time
 
@@ -29,135 +23,27 @@ import httpx
 import pytest
 
 from tests.conftest import copy_scanned_workspace
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "people_gallery_scan"
-MANIFEST_PATH = FIXTURE_DIR / "manifest.json"
+from tests.helpers import (
+    add_source,
+    expected_target_mapping,
+    fetch_all,
+    find_free_port,
+    find_model_root,
+    init_workspace,
+    load_manifest,
+    merge_people_via_api,
+    name_person_via_api,
+    prepare_workspace_models,
+    run_hikbox,
+    spawn_hikbox,
+    terminate_process,
+    wait_for_http_ready,
+)
 
 
 # ---------------------------------------------------------------------------
-# helpers (复刻自现有测试文件的模式)
+# 本文件独有 helper
 # ---------------------------------------------------------------------------
-
-
-def _run_hikbox(
-    *args: str,
-    cwd: Path | None = None,
-    env_updates: dict[str, str] | None = None,
-    pythonpath_prepend: list[Path] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(path) for path in (pythonpath_prepend or [])]
-    pythonpath_parts.append(str(REPO_ROOT))
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    if env_updates:
-        env.update(env_updates)
-    return subprocess.run(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-
-def _spawn_hikbox(
-    *args: str,
-    cwd: Path | None = None,
-    env_updates: dict[str, str] | None = None,
-    pythonpath_prepend: list[Path] | None = None,
-) -> subprocess.Popen[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(path) for path in (pythonpath_prepend or [])]
-    pythonpath_parts.append(str(REPO_ROOT))
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    if env_updates:
-        env.update(env_updates)
-    return subprocess.Popen(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-
-def _init_workspace(workspace: Path, external_root: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox("init", "--workspace", str(workspace), "--external-root", str(external_root))
-
-
-def _add_source(workspace: Path, source_dir: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox("source", "add", "--workspace", str(workspace), str(source_dir))
-
-
-def _prepare_workspace_models(workspace: Path) -> None:
-    source_root = _find_model_root()
-    target_root = workspace / ".hikbox" / "models" / "insightface"
-    if target_root.exists():
-        shutil.rmtree(target_root)
-    shutil.copytree(source_root, target_root)
-
-
-def _find_model_root() -> Path:
-    candidates = [REPO_ROOT / ".insightface", Path.home() / ".insightface"]
-    candidates.extend(parent / ".insightface" for parent in REPO_ROOT.parents)
-    for candidate in candidates:
-        if (candidate / "models" / "buffalo_l" / "det_10g.onnx").exists():
-            return candidate
-    raise AssertionError("缺少 InsightFace buffalo_l 模型目录，无法执行集成测试")
-
-
-def _load_manifest() -> dict[str, object]:
-    return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        return int(sock.getsockname()[1])
-
-
-def _wait_for_http_ready(base_url: str) -> None:
-    deadline = time.time() + 30
-    last_error: Exception | None = None
-    while time.time() < deadline:
-        try:
-            response = httpx.get(base_url, follow_redirects=True, timeout=1.0)
-            if response.status_code < 500:
-                return
-        except Exception as exc:
-            last_error = exc
-        time.sleep(0.2)
-    raise AssertionError(f"等待服务可用超时: {base_url}; last_error={last_error!r}")
-
-
-def _terminate_process(process: subprocess.Popen[str]) -> tuple[str, str]:
-    if process.poll() is None:
-        process.send_signal(signal.SIGTERM)
-    try:
-        stdout_text, stderr_text = process.communicate(timeout=30)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout_text, stderr_text = process.communicate(timeout=30)
-    return stdout_text, stderr_text
-
-
-def _fetch_all(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> list[tuple[object, ...]]:
-    connection = sqlite3.connect(db_path)
-    try:
-        return [tuple(row) for row in connection.execute(sql, params).fetchall()]
-    finally:
-        connection.close()
 
 
 def _execute_sql(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> None:
@@ -167,39 +53,6 @@ def _execute_sql(db_path: Path, sql: str, params: tuple[object, ...] = ()) -> No
         connection.commit()
     finally:
         connection.close()
-
-
-def _expected_target_mapping(library_db: Path, manifest: dict[str, object]) -> dict[str, str]:
-    rows = _fetch_all(
-        library_db,
-        """
-        SELECT assets.file_name, person_face_assignments.person_id
-        FROM person_face_assignments
-        INNER JOIN face_observations ON face_observations.id = person_face_assignments.face_observation_id
-        INNER JOIN assets ON assets.id = face_observations.asset_id
-        WHERE person_face_assignments.active = 1
-        ORDER BY assets.file_name ASC
-        """,
-    )
-    assignment_rows: dict[str, list[str]] = {}
-    for file_name, person_id in rows:
-        assignment_rows.setdefault(str(file_name), []).append(str(person_id))
-
-    mapping: dict[str, str] = {}
-    for label in manifest["expected_person_groups"]:
-        observed_person_ids: set[str] = set()
-        for asset in manifest["assets"]:
-            if asset["expected_target_people"] != [label]:
-                continue
-            file_name = str(asset["file"])
-            assigned = assignment_rows.get(file_name, [])
-            if not assigned:
-                continue
-            observed_person_ids.update(assigned)
-        assert observed_person_ids, f"{label} 缺少 target assignment"
-        assert len(observed_person_ids) == 1, observed_person_ids
-        mapping[str(label)] = next(iter(observed_person_ids))
-    return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -282,13 +135,13 @@ class _LockingTestContext:
 
     def setup_serve(self) -> None:
         """启动 serve 进程（不含 blocking hook）。"""
-        port = _find_free_port()
-        process = _spawn_hikbox("serve", "--workspace", str(self.workspace), "--port", str(port))
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(self.workspace), "--port", str(port))
         base_url = f"http://127.0.0.1:{port}"
         self.port = port
         self.base_url = base_url
         self.process = process
-        _wait_for_http_ready(f"{base_url}/")
+        wait_for_http_ready(f"{base_url}/")
 
     def setup_serve_with_blocking_hook(self) -> None:
         """启动带 blocking hook 的 serve 进程。"""
@@ -297,8 +150,8 @@ class _LockingTestContext:
         self.hook_module_dir = self.tmp_path / "hook_module"
         _write_blocking_hook_module(self.hook_module_dir, self.block_file)
 
-        port = _find_free_port()
-        process = _spawn_hikbox(
+        port = find_free_port()
+        process = spawn_hikbox(
             "serve",
             "--workspace", str(self.workspace),
             "--port", str(port),
@@ -309,7 +162,7 @@ class _LockingTestContext:
         self.base_url = base_url
         self.process = process
         self.hook_module_dir = self.hook_module_dir
-        _wait_for_http_ready(f"{base_url}/")
+        wait_for_http_ready(f"{base_url}/")
 
     def unblock_export(self) -> None:
         """移除 block_file，让阻塞的导出继续执行。"""
@@ -318,8 +171,8 @@ class _LockingTestContext:
 
     def name_people(self) -> None:
         """通过真实 API 命名 alex 和 blair。"""
-        _name_person_via_api(self.base_url, self.alex_id, self._name_alex)
-        _name_person_via_api(self.base_url, self.blair_id, self._name_blair)
+        name_person_via_api(self.base_url, self.alex_id, self._name_alex)
+        name_person_via_api(self.base_url, self.blair_id, self._name_blair)
 
     def create_template(self, name: str = "Alex & Blair", *, output_root: str | None = None) -> str:
         """通过真实 API 创建模板，返回 template_id。"""
@@ -382,7 +235,7 @@ class _LockingTestContext:
         deadline = time.time() + 15
         run_id = -1
         while time.time() < deadline:
-            rows = _fetch_all(self.library_db, "SELECT run_id FROM export_run WHERE status = 'running'")
+            rows = fetch_all(self.library_db, "SELECT run_id FROM export_run WHERE status = 'running'")
             if rows:
                 run_id = int(rows[0][0])
                 break
@@ -404,30 +257,12 @@ class _LockingTestContext:
     def teardown(self) -> None:
         self.unblock_export()
         if self.process is not None:
-            _terminate_process(self.process)
+            terminate_process(self.process)
 
 
 # ---------------------------------------------------------------------------
-# API helper wrappers
+# API helper wrappers（本文件独有）
 # ---------------------------------------------------------------------------
-
-
-def _name_person_via_api(base_url: str, person_id: str, display_name: str) -> httpx.Response:
-    return httpx.post(
-        f"{base_url}/people/{person_id}/name",
-        data={"display_name": display_name},
-        follow_redirects=False,
-        timeout=5.0,
-    )
-
-
-def _merge_people_via_api(base_url: str, person_ids: list[str]) -> httpx.Response:
-    return httpx.post(
-        f"{base_url}/people/merge",
-        data={"person_id": person_ids},
-        follow_redirects=False,
-        timeout=5.0,
-    )
 
 
 def _undo_merge_via_api(base_url: str) -> httpx.Response:
@@ -476,34 +311,34 @@ class TestExportLockingNameAPI:
             time.sleep(0.5)
 
             # 验证 DB 中确实有 running 记录
-            running_before = _fetch_all(ctx.library_db, "SELECT run_id, status FROM export_run WHERE status = 'running'")
+            running_before = fetch_all(ctx.library_db, "SELECT run_id, status FROM export_run WHERE status = 'running'")
             assert len(running_before) == 1, f"应该有一条 running 记录: {running_before}"
 
             # 获取 alex 当前 name 状态
-            name_before = _fetch_all(
+            name_before = fetch_all(
                 ctx.library_db,
                 "SELECT display_name, is_named FROM person WHERE id = ?",
                 (ctx.alex_id,),
             )
-            rename_count_before = _fetch_all(
+            rename_count_before = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_name_events",
             )[0][0]
 
             # 发起命名请求
-            response = _name_person_via_api(ctx.base_url, ctx.alex_id, "Should Not Work")
+            response = name_person_via_api(ctx.base_url, ctx.alex_id, "Should Not Work")
             assert response.status_code == 423, (
                 f"期望 423 Locked，实际 {response.status_code}: {response.text[:200]}"
             )
             assert "导出进行中" in response.text, f"响应应包含可读错误: {response.text[:200]}"
 
             # DB 不变
-            name_after = _fetch_all(
+            name_after = fetch_all(
                 ctx.library_db,
                 "SELECT display_name, is_named FROM person WHERE id = ?",
                 (ctx.alex_id,),
             )
-            rename_count_after = _fetch_all(
+            rename_count_after = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_name_events",
             )[0][0]
@@ -537,30 +372,30 @@ class TestExportLockingMergeAPI:
             time.sleep(0.5)
 
             # 记录合并前的状态
-            status_before = _fetch_all(
+            status_before = fetch_all(
                 ctx.library_db,
                 "SELECT id, status FROM person WHERE id IN (?, ?)",
                 (ctx.alex_id, casey_id),
             )
-            merge_count_before = _fetch_all(
+            merge_count_before = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_merge_operations",
             )[0][0]
 
             # 发起合并请求
-            response = _merge_people_via_api(ctx.base_url, [ctx.alex_id, casey_id])
+            response = merge_people_via_api(ctx.base_url, [ctx.alex_id, casey_id])
             assert response.status_code == 423, (
                 f"期望 423 Locked，实际 {response.status_code}: {response.text[:200]}"
             )
             assert "导出进行中" in response.text, f"响应应包含可读错误: {response.text[:200]}"
 
             # DB 不变
-            status_after = _fetch_all(
+            status_after = fetch_all(
                 ctx.library_db,
                 "SELECT id, status FROM person WHERE id IN (?, ?)",
                 (ctx.alex_id, casey_id),
             )
-            merge_count_after = _fetch_all(
+            merge_count_after = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_merge_operations",
             )[0][0]
@@ -588,18 +423,18 @@ class TestExportLockingUndoAPI:
             ctx.create_template()
 
             casey_id = ctx.target_ids["target_casey"]
-            merge_resp = _merge_people_via_api(ctx.base_url, [ctx.alex_id, casey_id])
+            merge_resp = merge_people_via_api(ctx.base_url, [ctx.alex_id, casey_id])
             assert merge_resp.status_code == 303, f"merge 应该成功: {merge_resp.status_code}"
 
             # 验证有可撤销的 merge
-            undo_count_before = _fetch_all(
+            undo_count_before = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_merge_operations WHERE undone_at IS NULL",
             )[0][0]
             assert undo_count_before > 0, "应该有可撤销的合并操作"
 
             # 停掉普通 serve，启动带 blocking hook 的 serve
-            _terminate_process(ctx.process)
+            terminate_process(ctx.process)
             ctx.setup_serve_with_blocking_hook()
 
             # 启动导出（将阻塞在 hook）
@@ -607,7 +442,7 @@ class TestExportLockingUndoAPI:
             time.sleep(0.5)
 
             # 记录撤销前的状态
-            merge_rows_before = _fetch_all(
+            merge_rows_before = fetch_all(
                 ctx.library_db,
                 "SELECT id, undone_at FROM person_merge_operations ORDER BY id",
             )
@@ -620,7 +455,7 @@ class TestExportLockingUndoAPI:
             assert "导出进行中" in response.text, f"响应应包含可读错误: {response.text[:200]}"
 
             # DB 不变
-            merge_rows_after = _fetch_all(
+            merge_rows_after = fetch_all(
                 ctx.library_db,
                 "SELECT id, undone_at FROM person_merge_operations ORDER BY id",
             )
@@ -646,7 +481,7 @@ class TestExportLockingExcludeAPI:
             ctx.create_template()
 
             # 获取 alex 的一些 assignment ids
-            assignment_rows = _fetch_all(
+            assignment_rows = fetch_all(
                 ctx.library_db,
                 "SELECT id FROM person_face_assignments WHERE person_id = ? AND active = 1",
                 (ctx.alex_id,),
@@ -659,12 +494,12 @@ class TestExportLockingExcludeAPI:
             time.sleep(0.5)
 
             # 记录排除前的状态
-            active_before = _fetch_all(
+            active_before = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_face_assignments WHERE person_id = ? AND active = 1",
                 (ctx.alex_id,),
             )[0][0]
-            exclusion_count_before = _fetch_all(
+            exclusion_count_before = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_face_exclusions",
             )[0][0]
@@ -677,12 +512,12 @@ class TestExportLockingExcludeAPI:
             assert "导出进行中" in response.text, f"响应应包含可读错误: {response.text[:200]}"
 
             # DB 不变
-            active_after = _fetch_all(
+            active_after = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_face_assignments WHERE person_id = ? AND active = 1",
                 (ctx.alex_id,),
             )[0][0]
-            exclusion_count_after = _fetch_all(
+            exclusion_count_after = fetch_all(
                 ctx.library_db,
                 "SELECT COUNT(*) FROM person_face_exclusions",
             )[0][0]
@@ -714,7 +549,7 @@ class TestExportLockingConcurrentExecute:
             time.sleep(0.5)
 
             # 验证只有一个 running 记录
-            running_count = _fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
+            running_count = fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
             assert running_count == 1
 
             # 创建第二个模板（不同 output_root 避免去重）
@@ -730,11 +565,11 @@ class TestExportLockingConcurrentExecute:
             )
 
             # DB 中仍然只有一个 running 记录
-            running_count_after = _fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
+            running_count_after = fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
             assert running_count_after == 1, f"仍应只有 1 个 running: {running_count_after}"
 
             # 总 export_run 行数不变（没有新 run 产生）
-            total_runs = _fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run")[0][0]
+            total_runs = fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run")[0][0]
             assert total_runs == 1, f"总 export_run 行数应为 1: {total_runs}"
         finally:
             ctx.teardown()
@@ -781,7 +616,7 @@ class TestExportLockingConcurrentExecute:
                 time.sleep(1.0)
 
                 # 验证 DB 中只有 1 个 running 记录
-                running_count = _fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
+                running_count = fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
                 assert running_count == 1, f"应该有恰好 1 个 running: {running_count}"
 
                 # 此时应该有一个请求返回了 423（第二个请求被拦截）
@@ -809,7 +644,7 @@ class TestExportLockingConcurrentExecute:
             )
 
             # DB 中最多 1 个 running 记录
-            running_count = _fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
+            running_count = fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
             assert running_count <= 1, f"running count 应 <= 1: {running_count}"
         finally:
             ctx.teardown()
@@ -836,7 +671,7 @@ class TestExportLockingCompletedRecovery:
             time.sleep(0.5)
 
             # 验证 running 期间命名返回 423
-            response = _name_person_via_api(ctx.base_url, ctx.alex_id, "During Export")
+            response = name_person_via_api(ctx.base_url, ctx.alex_id, "During Export")
             assert response.status_code == 423
 
             # 解除阻塞，等待导出完成
@@ -844,20 +679,20 @@ class TestExportLockingCompletedRecovery:
             time.sleep(2)
 
             # 验证 export_run status 变为 completed
-            run_status = _fetch_all(
+            run_status = fetch_all(
                 ctx.library_db,
                 "SELECT status FROM export_run ORDER BY run_id DESC LIMIT 1",
             )[0][0]
             assert run_status == "completed", f"导出应已完成: {run_status}"
 
             # 现在命名应该成功
-            response2 = _name_person_via_api(ctx.base_url, ctx.alex_id, "Alex Renamed")
+            response2 = name_person_via_api(ctx.base_url, ctx.alex_id, "Alex Renamed")
             assert response2.status_code in (302, 303), (
                 f"导出完成后命名应成功，实际 {response2.status_code}: {response2.text[:200]}"
             )
 
             # DB 应已更新
-            display_name = _fetch_all(
+            display_name = fetch_all(
                 ctx.library_db,
                 "SELECT display_name FROM person WHERE id = ?",
                 (ctx.alex_id,),
@@ -889,17 +724,17 @@ class TestExportLockingCompletedRecovery:
             assert response.status_code == 500, f"导出应失败: {response.status_code}"
 
             # 验证 export_run 为 failed
-            run_status = _fetch_all(
+            run_status = fetch_all(
                 ctx.library_db,
                 "SELECT status FROM export_run ORDER BY run_id DESC LIMIT 1",
             )[0][0]
             assert run_status == "failed", f"导出应标为 failed: {run_status}"
 
             # 验证 failed 后命名 API 恢复正常
-            resp = _name_person_via_api(ctx.base_url, ctx.alex_id, "Alex After Failed")
+            resp = name_person_via_api(ctx.base_url, ctx.alex_id, "Alex After Failed")
             assert resp.status_code in (302, 303), f"导出失败后命名应成功: {resp.status_code}"
 
-            display_name = _fetch_all(
+            display_name = fetch_all(
                 ctx.library_db,
                 "SELECT display_name FROM person WHERE id = ?",
                 (ctx.alex_id,),
@@ -920,7 +755,7 @@ class TestExportLockingCompletedRecovery:
 
             # 先做一次 merge 以便后续有可撤销的 undo
             casey_id = ctx.target_ids["target_casey"]
-            merge_resp = _merge_people_via_api(ctx.base_url, [ctx.alex_id, casey_id])
+            merge_resp = merge_people_via_api(ctx.base_url, [ctx.alex_id, casey_id])
             assert merge_resp.status_code == 303, f"merge 应该成功: {merge_resp.status_code}"
 
             # 启动导出（阻塞）
@@ -928,17 +763,17 @@ class TestExportLockingCompletedRecovery:
             time.sleep(0.5)
 
             # 验证所有 API 都返回 423
-            resp_name = _name_person_via_api(ctx.base_url, ctx.alex_id, "Blocked")
+            resp_name = name_person_via_api(ctx.base_url, ctx.alex_id, "Blocked")
             assert resp_name.status_code == 423
 
-            resp_merge = _merge_people_via_api(ctx.base_url, [ctx.alex_id, ctx.blair_id])
+            resp_merge = merge_people_via_api(ctx.base_url, [ctx.alex_id, ctx.blair_id])
             assert resp_merge.status_code == 423
 
             resp_undo = _undo_merge_via_api(ctx.base_url)
             assert resp_undo.status_code == 423
 
             # 获取 alex 的 assignment ids 用于 exclude 测试
-            assignment_rows = _fetch_all(
+            assignment_rows = fetch_all(
                 ctx.library_db,
                 "SELECT id FROM person_face_assignments WHERE person_id = ? AND active = 1",
                 (ctx.alex_id,),
@@ -952,15 +787,15 @@ class TestExportLockingCompletedRecovery:
             time.sleep(2)
 
             # 验证导出已完成
-            run_status = _fetch_all(ctx.library_db, "SELECT status FROM export_run ORDER BY run_id DESC LIMIT 1")[0][0]
+            run_status = fetch_all(ctx.library_db, "SELECT status FROM export_run ORDER BY run_id DESC LIMIT 1")[0][0]
             assert run_status == "completed"
 
             # 现在命名应成功
-            resp_name2 = _name_person_via_api(ctx.base_url, ctx.alex_id, "New Name")
+            resp_name2 = name_person_via_api(ctx.base_url, ctx.alex_id, "New Name")
             assert resp_name2.status_code in (302, 303)
 
             # 合并应成功（至少不会返回 423）
-            resp_merge2 = _merge_people_via_api(ctx.base_url, [ctx.alex_id, ctx.blair_id])
+            resp_merge2 = merge_people_via_api(ctx.base_url, [ctx.alex_id, ctx.blair_id])
             assert resp_merge2.status_code not in (423,), f"合并不应返回 423: {resp_merge2.status_code}"
 
             # undo 应成功（至少不会返回 423）
@@ -1005,7 +840,7 @@ class TestExportLockingStaleRunningCleanup:
             assert resp.status_code == 200
 
             # 停掉 serve
-            _terminate_process(ctx.process)
+            terminate_process(ctx.process)
 
             # 直接修改 DB 制造一条残留 running 记录（AC-7 允许的降级手段）
             _execute_sql(
@@ -1018,32 +853,32 @@ class TestExportLockingStaleRunningCleanup:
             )
 
             # 验证 DB 中有 running 记录
-            running_before = _fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
+            running_before = fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
             assert running_before == 1, f"重启前应有 running 记录: {running_before}"
 
             # 重启 serve（不带 blocking hook）
-            port = _find_free_port()
-            process2 = _spawn_hikbox("serve", "--workspace", str(ctx.workspace), "--port", str(port))
+            port = find_free_port()
+            process2 = spawn_hikbox("serve", "--workspace", str(ctx.workspace), "--port", str(port))
             base_url2 = f"http://127.0.0.1:{port}"
-            _wait_for_http_ready(f"{base_url2}/")
+            wait_for_http_ready(f"{base_url2}/")
 
             try:
                 # 验证残留 running 已被标为 failed
-                running_after = _fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
+                running_after = fetch_all(ctx.library_db, "SELECT COUNT(*) FROM export_run WHERE status = 'running'")[0][0]
                 assert running_after == 0, f"重启后不应有 running 记录: {running_after}"
 
-                stale_row = _fetch_all(
+                stale_row = fetch_all(
                     ctx.library_db,
                     "SELECT status FROM export_run ORDER BY run_id DESC LIMIT 1",
                 )[0]
                 assert stale_row[0] == "failed", f"残留记录应标为 failed: {stale_row}"
 
                 # 验证锁定已解除 —— 命名 API 可用
-                resp_name = _name_person_via_api(base_url2, ctx.alex_id, "After Cleanup")
+                resp_name = name_person_via_api(base_url2, ctx.alex_id, "After Cleanup")
                 assert resp_name.status_code in (302, 303), (
                     f"残留清理后命名应成功: {resp_name.status_code}"
                 )
             finally:
-                _terminate_process(process2)
+                terminate_process(process2)
         finally:
             ctx.teardown()

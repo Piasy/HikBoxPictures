@@ -8,39 +8,10 @@ import sqlite3
 import subprocess
 import sys
 
+from tests.helpers import REPO_ROOT, init_workspace, run_hikbox
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+
 ISO_8601_UTC_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-
-
-def _run_hikbox(
-    *args: str,
-    cwd: Path | None = None,
-) -> subprocess.CompletedProcess[str]:
-    env = os.environ.copy()
-    pythonpath_parts = [str(REPO_ROOT)]
-    existing_pythonpath = env.get("PYTHONPATH")
-    if existing_pythonpath:
-        pythonpath_parts.append(existing_pythonpath)
-    env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
-    return subprocess.run(
-        [sys.executable, "-m", "hikbox_pictures", *args],
-        cwd=cwd or REPO_ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-
-
-def _init_workspace(workspace: Path, external_root: Path) -> subprocess.CompletedProcess[str]:
-    return _run_hikbox(
-        "init",
-        "--workspace",
-        str(workspace),
-        "--external-root",
-        str(external_root),
-    )
 
 
 def _run_hikbox_with_inline_python(
@@ -96,10 +67,10 @@ def test_source_add_uses_source_directory_name_as_label_and_source_list_returns_
     source_dir = tmp_path / "photos-family"
     source_dir.mkdir()
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
-    add_result = _run_hikbox(
+    add_result = run_hikbox(
         "source",
         "add",
         "--workspace",
@@ -123,7 +94,7 @@ def test_source_add_uses_source_directory_name_as_label_and_source_list_returns_
     }
     assert ISO_8601_UTC_PATTERN.match(created_at)
 
-    list_result = _run_hikbox(
+    list_result = run_hikbox(
         "source",
         "list",
         "--workspace",
@@ -155,10 +126,10 @@ def test_source_list_returns_exact_empty_json_before_any_source_is_added(tmp_pat
     workspace = tmp_path / "workspace"
     external_root = tmp_path / "external-root"
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
-    list_result = _run_hikbox(
+    list_result = run_hikbox(
         "source",
         "list",
         "--workspace",
@@ -177,14 +148,14 @@ def test_source_add_and_list_fail_without_initialized_workspace_and_do_not_creat
     source_dir = tmp_path / "photos"
     source_dir.mkdir()
 
-    add_result = _run_hikbox(
+    add_result = run_hikbox(
         "source",
         "add",
         "--workspace",
         str(workspace),
         str(source_dir),
     )
-    list_result = _run_hikbox(
+    list_result = run_hikbox(
         "source",
         "list",
         "--workspace",
@@ -204,18 +175,18 @@ def test_source_commands_require_workspace_and_source_path_arguments(tmp_path: P
     source_dir = tmp_path / "photos"
     source_dir.mkdir()
 
-    add_missing_workspace_result = _run_hikbox(
+    add_missing_workspace_result = run_hikbox(
         "source",
         "add",
         str(source_dir),
     )
-    add_missing_source_path_result = _run_hikbox(
+    add_missing_source_path_result = run_hikbox(
         "source",
         "add",
         "--workspace",
         str(tmp_path / "workspace"),
     )
-    list_missing_workspace_result = _run_hikbox("source", "list")
+    list_missing_workspace_result = run_hikbox("source", "list")
 
     assert add_missing_workspace_result.returncode != 0
     assert "--workspace" in add_missing_workspace_result.stderr
@@ -233,7 +204,7 @@ def test_source_commands_fail_when_workspace_config_or_database_is_missing(tmp_p
     source_dir = tmp_path / "photos"
     source_dir.mkdir()
 
-    init_missing_config_result = _init_workspace(
+    init_missing_config_result = init_workspace(
         workspace_missing_config,
         external_root_missing_config,
     )
@@ -241,7 +212,7 @@ def test_source_commands_fail_when_workspace_config_or_database_is_missing(tmp_p
 
     config_path = workspace_missing_config / ".hikbox" / "config.json"
     config_path.unlink()
-    add_missing_config_result = _run_hikbox(
+    add_missing_config_result = run_hikbox(
         "source",
         "add",
         "--workspace",
@@ -252,7 +223,7 @@ def test_source_commands_fail_when_workspace_config_or_database_is_missing(tmp_p
     assert add_missing_config_result.returncode != 0
     assert "工作区" in add_missing_config_result.stderr
 
-    init_missing_db_result = _init_workspace(
+    init_missing_db_result = init_workspace(
         workspace_missing_db,
         external_root_missing_db,
     )
@@ -260,7 +231,7 @@ def test_source_commands_fail_when_workspace_config_or_database_is_missing(tmp_p
 
     library_db_path = workspace_missing_db / ".hikbox" / "library.db"
     library_db_path.unlink()
-    list_missing_db_result = _run_hikbox(
+    list_missing_db_result = run_hikbox(
         "source",
         "list",
         "--workspace",
@@ -275,13 +246,13 @@ def test_source_list_fails_cleanly_when_workspace_config_is_invalid_utf8(tmp_pat
     workspace = tmp_path / "workspace-invalid-config"
     external_root = tmp_path / "external-root-invalid-config"
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
     config_path = workspace / ".hikbox" / "config.json"
     config_path.write_bytes(b"\x80not-utf8")
 
-    list_result = _run_hikbox(
+    list_result = run_hikbox(
         "source",
         "list",
         "--workspace",
@@ -299,7 +270,7 @@ def test_source_list_fails_cleanly_when_sqlite_connect_raises_for_library_db(
     workspace = tmp_path / "workspace-list-db-connect-fail"
     external_root = tmp_path / "external-root-list-db-connect-fail"
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
     library_db_path = workspace / ".hikbox" / "library.db"
@@ -347,27 +318,27 @@ def test_source_add_rejects_invalid_paths_without_inserting_rows(
     unreadable_source_dir = tmp_path / "photos-unreadable"
     unreadable_source_dir.mkdir()
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
     unreadable_original_mode = unreadable_source_dir.stat().st_mode
     unreadable_source_dir.chmod(0)
     try:
-        missing_result = _run_hikbox(
+        missing_result = run_hikbox(
             "source",
             "add",
             "--workspace",
             str(workspace),
             str(missing_source_dir),
         )
-        file_result = _run_hikbox(
+        file_result = run_hikbox(
             "source",
             "add",
             "--workspace",
             str(workspace),
             str(file_source_path),
         )
-        unreadable_result = _run_hikbox(
+        unreadable_result = run_hikbox(
             "source",
             "add",
             "--workspace",
@@ -394,7 +365,7 @@ def test_source_add_fails_cleanly_when_sqlite_connect_raises_for_library_db(
     source_dir = tmp_path / "photos-connect-fail"
     source_dir.mkdir()
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
     library_db_path = workspace / ".hikbox" / "library.db"
@@ -441,17 +412,17 @@ def test_source_add_rejects_duplicate_path_without_changing_existing_record(
     source_dir = tmp_path / "photos-family"
     source_dir.mkdir()
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
-    first_add_result = _run_hikbox(
+    first_add_result = run_hikbox(
         "source",
         "add",
         "--workspace",
         str(workspace),
         str(source_dir),
     )
-    duplicate_add_result = _run_hikbox(
+    duplicate_add_result = run_hikbox(
         "source",
         "add",
         "--workspace",
@@ -481,7 +452,7 @@ def test_source_add_fails_cleanly_and_rolls_back_when_success_log_cannot_be_writ
     source_dir = tmp_path / "photos-family"
     source_dir.mkdir()
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
     logs_dir = external_root / "logs"
@@ -490,7 +461,7 @@ def test_source_add_fails_cleanly_and_rolls_back_when_success_log_cannot_be_writ
     logs_dir.rmdir()
     logs_dir.write_text("occupied", encoding="utf-8")
 
-    add_result = _run_hikbox(
+    add_result = run_hikbox(
         "source",
         "add",
         "--workspace",
@@ -512,24 +483,24 @@ def test_source_list_returns_multiple_sources_in_id_order(tmp_path: Path) -> Non
     source_dir_a.mkdir()
     source_dir_b.mkdir()
 
-    init_result = _init_workspace(workspace, external_root)
+    init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
 
-    first_add_result = _run_hikbox(
+    first_add_result = run_hikbox(
         "source",
         "add",
         "--workspace",
         str(workspace),
         str(source_dir_a),
     )
-    second_add_result = _run_hikbox(
+    second_add_result = run_hikbox(
         "source",
         "add",
         "--workspace",
         str(workspace),
         str(source_dir_b),
     )
-    list_result = _run_hikbox(
+    list_result = run_hikbox(
         "source",
         "list",
         "--workspace",
