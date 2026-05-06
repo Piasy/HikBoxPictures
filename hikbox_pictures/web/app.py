@@ -21,12 +21,14 @@ from hikbox_pictures.product.export_templates import execute_export_async
 from hikbox_pictures.product.export_templates import ExportTemplateError
 from hikbox_pictures.product.export_templates import ExportTemplateValidationError
 from hikbox_pictures.product.export_templates import load_eligible_persons_for_template
+from hikbox_pictures.product.export_templates import load_export_preview_asset_detail
 from hikbox_pictures.product.export_templates import load_export_run_detail
 from hikbox_pictures.product.export_templates import load_export_runs_for_template
 from hikbox_pictures.product.export_templates import load_export_template_detail
 from hikbox_pictures.product.export_templates import load_export_templates_list
 from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import load_assignment_context_path
+from hikbox_pictures.product.people_gallery import load_face_crop_path
 from hikbox_pictures.product.people_gallery import load_people_home_page
 from hikbox_pictures.product.people_gallery import load_person_detail_page
 from hikbox_pictures.product.people_gallery import PersonExclusionValidationError
@@ -57,6 +59,13 @@ HOME_FEEDBACK_MESSAGES = {
 }
 EXCLUSION_FEEDBACK_MESSAGES = {
     "exclude_succeeded": {"level": "info", "message": "已排除所选样本。"},
+}
+PREVIEW_EXCLUSION_FEEDBACK_COOKIE = "preview_exclusion_feedback"
+PREVIEW_EXCLUSION_FEEDBACK_MESSAGES = {
+    "exclude_succeeded": {"level": "info", "message": "已排除该人脸。"},
+    "person_removed": {"level": "info", "message": "已排除该人脸，该人物已无剩余样本。"},
+    "export_in_progress": {"level": "error", "message": "导出进行中，无法排除。"},
+    "internal_error": {"level": "error", "message": "排除失败，请稍后重试。"},
 }
 
 
@@ -403,6 +412,19 @@ def create_people_gallery_app(
             raise HTTPException(status_code=404, detail="未找到样本图片。")
         return FileResponse(context_path)
 
+    @app.get("/images/faces/{face_observation_id}/crop")
+    def face_crop_image(face_observation_id: int) -> FileResponse:
+        try:
+            crop_path = load_face_crop_path(
+                workspace_context,
+                face_observation_id=face_observation_id,
+            )
+        except PeopleGalleryError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if crop_path is None or not crop_path.is_file():
+            raise HTTPException(status_code=404, detail="未找到人脸裁切图。")
+        return FileResponse(crop_path)
+
     @app.get("/exports", response_class=HTMLResponse)
     def exports_list(request: Request) -> HTMLResponse:
         try:
@@ -584,6 +606,104 @@ def create_people_gallery_app(
                 for m in preview.month_buckets
             ],
         }
+
+    @app.get("/exports/{template_id}/preview/{asset_id}", response_class=HTMLResponse)
+    def export_preview_asset_detail_page(
+        request: Request, template_id: str, asset_id: int,
+    ) -> Response:
+        try:
+            detail = load_export_preview_asset_detail(
+                workspace_context, template_id=template_id, asset_id=asset_id,
+            )
+        except ExportTemplateValidationError:
+            return RedirectResponse(
+                url=f"/exports/{template_id}/preview", status_code=303,
+            )
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        if detail is None:
+            return RedirectResponse(
+                url=f"/exports/{template_id}/preview", status_code=303,
+            )
+
+        feedback = None
+        cookie_val = request.cookies.get(PREVIEW_EXCLUSION_FEEDBACK_COOKIE)
+        if cookie_val:
+            if cookie_val in PREVIEW_EXCLUSION_FEEDBACK_MESSAGES:
+                feedback = PREVIEW_EXCLUSION_FEEDBACK_MESSAGES[cookie_val]
+            elif cookie_val.startswith("validation_error:"):
+                feedback = {"level": "error", "message": "排除操作校验失败，请刷新页面后重试。"}
+
+        response = templates.TemplateResponse(
+            request=request,
+            name="export_preview_asset_detail.html",
+            context={
+                "page_title": f"{detail.file_name} - 照片人物详情",
+                "detail": detail,
+                "feedback": feedback,
+            },
+        )
+        if cookie_val:
+            response.delete_cookie(PREVIEW_EXCLUSION_FEEDBACK_COOKIE, path="/")
+        return response
+
+    @app.post("/exports/{template_id}/preview/{asset_id}/exclude")
+    async def export_preview_asset_exclude(
+        request: Request, template_id: str, asset_id: int,
+    ) -> Response:
+        body = await request.body()
+        form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        person_id = form_data.get("person_id", [""])[0]
+        assignment_ids = form_data.get("assignment_id", [])
+
+        redirect_url = f"/exports/{template_id}/preview/{asset_id}"
+
+        try:
+            result = submit_person_exclusions(
+                workspace_context,
+                person_id=person_id,
+                assignment_ids=[str(aid) for aid in assignment_ids],
+            )
+        except ExportTemplateValidationError as exc:
+            if exc.code == "export_in_progress":
+                response = RedirectResponse(url=redirect_url, status_code=303)
+                response.set_cookie(
+                    PREVIEW_EXCLUSION_FEEDBACK_COOKIE,
+                    "export_in_progress",
+                    httponly=True, samesite="lax", path="/",
+                )
+                return response
+            raise
+        except PersonExclusionValidationError as exc:
+            response = RedirectResponse(url=redirect_url, status_code=303)
+            response.set_cookie(
+                PREVIEW_EXCLUSION_FEEDBACK_COOKIE,
+                f"validation_error:{exc.code}",
+                httponly=True, samesite="lax", path="/",
+            )
+            return response
+        except PeopleGalleryError:
+            response = RedirectResponse(url=redirect_url, status_code=303)
+            response.set_cookie(
+                PREVIEW_EXCLUSION_FEEDBACK_COOKIE,
+                "internal_error",
+                httponly=True, samesite="lax", path="/",
+            )
+            return response
+
+        if result.remaining_sample_count > 0:
+            feedback_code = "exclude_succeeded"
+        else:
+            feedback_code = "person_removed"
+
+        response = RedirectResponse(url=redirect_url, status_code=303)
+        response.set_cookie(
+            PREVIEW_EXCLUSION_FEEDBACK_COOKIE,
+            feedback_code,
+            httponly=True, samesite="lax", path="/",
+        )
+        return response
 
     @app.get("/exports/{template_id}/execute", response_class=HTMLResponse)
     def export_template_execute_page(request: Request, template_id: str) -> HTMLResponse:

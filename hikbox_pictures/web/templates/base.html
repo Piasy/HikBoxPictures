@@ -353,6 +353,51 @@
         padding: 26px;
       }
 
+      .face-row {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 14px 0;
+        border-bottom: 1px solid rgba(74, 52, 35, 0.08);
+      }
+
+      .face-row:last-child {
+        border-bottom: none;
+      }
+
+      .face-crop {
+        width: 80px;
+        height: 80px;
+        object-fit: cover;
+        border-radius: 12px;
+      }
+
+      .face-context {
+        width: 160px;
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        border-radius: 14px;
+      }
+
+      .face-row form {
+        flex: 0 0 auto;
+      }
+
+      .face-row button {
+        padding: 10px 16px;
+        border: 1px solid rgba(165, 72, 47, 0.3);
+        border-radius: 12px;
+        background: rgba(165, 72, 47, 0.06);
+        color: var(--accent);
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      .face-row button:hover {
+        background: rgba(165, 72, 47, 0.12);
+      }
+
       .sr-only {
         position: absolute;
         width: 1px;
@@ -392,6 +437,14 @@
 
         .name-form-row {
           flex-direction: column;
+        }
+
+        .face-row {
+          flex-wrap: wrap;
+        }
+
+        .face-context {
+          width: 120px;
         }
       }
     </style>

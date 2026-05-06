@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="detail-head">
+    <div>
+      <a class="back-link" href="/exports/{{ detail.template_id }}/preview">返回预览页</a>
+      <h1>{{ detail.file_name }}</h1>
+      <p>模板：{{ detail.template_name }}</p>
+    </div>
+  </div>
+
+  {% if feedback %}
+    <p
+      class="feedback-banner{% if feedback.level == 'error' %} is-error{% endif %}"
+      {% if feedback.level == 'error' %}
+        role="alert"
+      {% else %}
+        role="status"
+      {% endif %}
+    >
+      {{ feedback.message }}
+    </p>
+  {% endif %}
+
+  {% for group in detail.person_groups %}
+    <section class="panel section-block">
+      <div class="section-head">
+        <h2>{{ group.display_name }}</h2>
+      </div>
+      {% if group.faces %}
+        {% for face in group.faces %}
+          <div class="face-row">
+            <img src="{{ face.crop_url }}" alt="人脸裁切" class="face-crop">
+            <img src="{{ face.context_url }}" alt="context 图" class="face-context">
+            <form method="post" action="/exports/{{ detail.template_id }}/preview/{{ detail.asset_id }}/exclude">
+              <input type="hidden" name="person_id" value="{{ face.person_id }}">
+              <input type="hidden" name="assignment_id" value="{{ face.assignment_id }}">
+              <button type="submit">排除此人脸</button>
+            </form>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p class="section-empty">该人物在此照片中无命中人脸。</p>
+      {% endif %}
+    </section>
+  {% endfor %}
+{% endblock %}

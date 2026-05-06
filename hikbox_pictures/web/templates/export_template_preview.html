@@ -29,9 +29,11 @@
           <div class="sample-grid" data-preview-grid data-bucket="only" data-month="{{ month_bucket.month }}">
             {% for asset in month_bucket.only_assets %}
               <article class="sample-card" data-asset-id="{{ asset.asset_id }}" data-person-id="{{ asset.representative_person_id }}">
-                {% if asset.context_url %}
-                  <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
-                {% endif %}
+                <a href="/exports/{{ template.template_id }}/preview/{{ asset.asset_id }}">
+                  {% if asset.context_url %}
+                    <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
+                  {% endif %}
+                </a>
                 <div class="sample-card-body">
                   <div class="sample-card-meta">
                     <span data-asset-file-name>{{ asset.file_name }}</span>
@@ -50,9 +52,11 @@
           <div class="sample-grid" data-preview-grid data-bucket="group" data-month="{{ month_bucket.month }}">
             {% for asset in month_bucket.group_assets %}
               <article class="sample-card" data-asset-id="{{ asset.asset_id }}" data-person-id="{{ asset.representative_person_id }}">
-                {% if asset.context_url %}
-                  <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
-                {% endif %}
+                <a href="/exports/{{ template.template_id }}/preview/{{ asset.asset_id }}">
+                  {% if asset.context_url %}
+                    <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
+                  {% endif %}
+                </a>
                 <div class="sample-card-body">
                   <div class="sample-card-meta">
                     <span data-asset-file-name>{{ asset.file_name }}</span>

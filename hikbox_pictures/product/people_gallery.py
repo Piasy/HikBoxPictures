@@ -477,6 +477,27 @@ def load_assignment_context_path(
     return Path(str(row[0]))
 
 
+def load_face_crop_path(
+    workspace_context: WorkspaceContext,
+    *,
+    face_observation_id: int,
+) -> Path | None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        row = connection.execute(
+            "SELECT crop_path FROM face_observations WHERE id = ?",
+            (face_observation_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise PeopleGalleryError(f"人脸裁切图路径读取失败：face_observation_id={face_observation_id}") from exc
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+    return Path(str(row[0]))
+
+
 def submit_person_name(
     workspace_context: WorkspaceContext,
     *,

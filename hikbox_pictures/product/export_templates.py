@@ -95,6 +95,32 @@ class PreviewResult:
 
 
 @dataclass(frozen=True)
+class PreviewAssetFace:
+    face_observation_id: int
+    assignment_id: int
+    person_id: str
+    person_display_name: str | None
+    crop_url: str
+    context_url: str
+
+
+@dataclass(frozen=True)
+class PersonFaceGroup:
+    person_id: str
+    display_name: str
+    faces: list[PreviewAssetFace]
+
+
+@dataclass(frozen=True)
+class PreviewAssetDetail:
+    asset_id: int
+    file_name: str
+    template_id: str
+    template_name: str
+    person_groups: list[PersonFaceGroup]
+
+
+@dataclass(frozen=True)
 class ExportRunListItem:
     run_id: int
     template_id: str
@@ -1131,4 +1157,117 @@ def load_export_run_detail(
             )
             for row in delivery_rows
         ],
+    )
+
+
+def load_export_preview_asset_detail(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+    asset_id: int,
+) -> PreviewAssetDetail | None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        template_row = connection.execute(
+            "SELECT template_id, name, status FROM export_template WHERE template_id = ?",
+            (template_id,),
+        ).fetchone()
+        if template_row is None:
+            raise ExportTemplateValidationError("模板不存在。", code="template_not_found")
+        if str(template_row["status"]) != "active":
+            raise ExportTemplateValidationError(
+                "模板已失效，无法查看。", code="template_invalid"
+            )
+        template_name = str(template_row["name"])
+
+        person_rows = connection.execute(
+            "SELECT person_id FROM export_template_person WHERE template_id = ?",
+            (template_id,),
+        ).fetchall()
+        selected_person_ids = [str(r["person_id"]) for r in person_rows]
+
+        asset_row = connection.execute(
+            "SELECT file_name FROM assets WHERE id = ?",
+            (asset_id,),
+        ).fetchone()
+        if asset_row is None:
+            return None
+        file_name = str(asset_row["file_name"])
+
+        person_placeholders = ", ".join("?" for _ in selected_person_ids)
+        face_rows = connection.execute(
+            f"""
+            SELECT
+              fo.id AS face_observation_id,
+              pfa.id AS assignment_id,
+              pfa.person_id,
+              p.display_name,
+              fo.crop_path,
+              fo.context_path
+            FROM face_observations fo
+            INNER JOIN person_face_assignments pfa
+              ON pfa.face_observation_id = fo.id AND pfa.active = 1
+            INNER JOIN person p
+              ON p.id = pfa.person_id AND p.status = 'active'
+            WHERE fo.asset_id = ?
+              AND pfa.person_id IN ({person_placeholders})
+            ORDER BY pfa.person_id ASC, pfa.id ASC
+            """,
+            (asset_id, *selected_person_ids),
+        ).fetchall()
+
+        person_name_rows = connection.execute(
+            f"""
+            SELECT id, display_name
+            FROM person
+            WHERE id IN ({person_placeholders})
+            """,
+            tuple(selected_person_ids),
+        ).fetchall()
+        person_names: dict[str, str | None] = {
+            str(r["id"]): str(r["display_name"]) if r["display_name"] else None
+            for r in person_name_rows
+        }
+
+    except ExportTemplateValidationError:
+        raise
+    except sqlite3.Error as exc:
+        raise ExportTemplateError("照片-人物详情读取失败。") from exc
+    finally:
+        connection.close()
+
+    faces_by_person: dict[str, list[PreviewAssetFace]] = defaultdict(list)
+    for row in face_rows:
+        pid = str(row["person_id"])
+        faces_by_person[pid].append(
+            PreviewAssetFace(
+                face_observation_id=int(row["face_observation_id"]),
+                assignment_id=int(row["assignment_id"]),
+                person_id=pid,
+                person_display_name=str(row["display_name"]) if row["display_name"] else None,
+                crop_url=f"/images/faces/{int(row['face_observation_id'])}/crop",
+                context_url=f"/images/assignments/{int(row['assignment_id'])}/context",
+            )
+        )
+
+    person_groups: list[PersonFaceGroup] = []
+    for pid in selected_person_ids:
+        display_name = person_names.get(pid)
+        if display_name is None:
+            display_name = f"匿名人物 #{pid.replace('-', '')[:8]}"
+        person_groups.append(
+            PersonFaceGroup(
+                person_id=pid,
+                display_name=display_name,
+                faces=faces_by_person.get(pid, []),
+            )
+        )
+
+    return PreviewAssetDetail(
+        asset_id=asset_id,
+        file_name=file_name,
+        template_id=template_id,
+        template_name=template_name,
+        person_groups=person_groups,
     )
