@@ -879,3 +879,81 @@ def _make_full_workspace(
     """创建完整 workspace context，返回 (context, db_path, output_root)。"""
     db_path, output_root = _setup_test_db(tmp_path, assets=assets)
     return _FakeWorkspaceContext(db_path, output_root), db_path, output_root
+
+
+# ---------------------------------------------------------------------------
+# Bug: 排除后 export_plan 未清理，导致被排除照片仍被导出
+# ---------------------------------------------------------------------------
+
+
+class TestExcludedAssetNotExported:
+    def test_excluded_asset_removed_from_plan_after_re_preview(self, tmp_path: Path) -> None:
+        """排除人脸后重新 preview，export_plan 应移除被排除照片的记录，execute 不导出该照片。"""
+        src1 = _create_source_image(tmp_path, "IMG_0001.jpg", b"content1")
+        src2 = _create_source_image(tmp_path, "IMG_0002.jpg", b"content2")
+        workspace_context, db_path, output_root = _make_full_workspace(tmp_path, assets=[
+            {"file_name": "IMG_0001.jpg", "absolute_path": src1, "capture_month": "2025-01", "person_ids": ["person-alex", "person-blair"]},
+            {"file_name": "IMG_0002.jpg", "absolute_path": src2, "capture_month": "2025-01", "person_ids": ["person-alex", "person-blair"]},
+        ])
+
+        from hikbox_pictures.product.export_templates import compute_export_preview, execute_export
+
+        # 第一次 preview，两张照片都命中
+        result1 = compute_export_preview(workspace_context, template_id="template-1")
+        assert result1.total_count == 2
+
+        conn = sqlite3.connect(db_path)
+        try:
+            plan_rows = conn.execute(
+                "SELECT asset_id FROM export_plan WHERE template_id = 'template-1'"
+            ).fetchall()
+            assert len(plan_rows) == 2
+        finally:
+            conn.close()
+
+        # 排除 IMG_0002 中 person-alex 的人脸 assignment（使 pfa.active = 0）
+        conn = sqlite3.connect(db_path)
+        try:
+            # 找到 IMG_0002 对应的 asset_id
+            asset2_row = conn.execute(
+                "SELECT id FROM assets WHERE file_name = 'IMG_0002.jpg'"
+            ).fetchone()
+            asset2_id = asset2_row[0]
+            # 找到该 asset 中 person-alex 的 assignment
+            assignment_row = conn.execute(
+                """
+                SELECT pfa.id
+                FROM person_face_assignments pfa
+                INNER JOIN face_observations fo ON fo.id = pfa.face_observation_id
+                WHERE fo.asset_id = ? AND pfa.person_id = 'person-alex' AND pfa.active = 1
+                """,
+                (asset2_id,),
+            ).fetchone()
+            # 模拟排除：将 assignment 设为 inactive
+            conn.execute(
+                "UPDATE person_face_assignments SET active = 0 WHERE id = ?",
+                (assignment_row[0],),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        # 重新 preview，IMG_0002 不再命中（缺少 alex 的 active assignment）
+        result2 = compute_export_preview(workspace_context, template_id="template-1")
+        assert result2.total_count == 1
+
+        # 验证 export_plan 中 IMG_0002 的记录已被移除
+        conn = sqlite3.connect(db_path)
+        try:
+            plan_rows = conn.execute(
+                "SELECT asset_id, file_name FROM export_plan WHERE template_id = 'template-1'"
+            ).fetchall()
+            assert len(plan_rows) == 1
+            assert plan_rows[0][1] == "IMG_0001.jpg"
+        finally:
+            conn.close()
+
+        # 执行导出，只有 IMG_0001 被复制
+        execute_export(workspace_context, template_id="template-1")
+        assert (output_root / "only" / "2025-01" / "IMG_0001.jpg").exists()
+        assert not (output_root / "only" / "2025-01" / "IMG_0002.jpg").exists()

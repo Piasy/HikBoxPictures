@@ -711,6 +711,7 @@ def _persist_export_plan(
     """将 preview 计算结果持久化到 export_plan 表。
 
     幂等语义：已有记录（按 UNIQUE(template_id, asset_id)）不动，新命中 insert。
+    不再命中的旧记录（如因排除导致 asset 不再匹配）会被删除。
     同名冲突消解：同模板、同 bucket、同 month、同 file_name 的不同 asset_id →
     后续文件在 stem 后追加 __<source_label> 后缀。
     """
@@ -824,6 +825,24 @@ def _persist_export_plan(
                     """,
                     (template_id, asset_id, bucket, month, plan_file_name, mov_file_name, source_label),
                 )
+
+        # 删除不再命中的旧记录（如因排除导致 asset 不再匹配）
+        current_asset_ids: set[int] = set()
+        for assets in bucket_month_assets.values():
+            for asset in assets:
+                current_asset_ids.add(asset["asset_id"])
+
+        if current_asset_ids:
+            placeholders = ", ".join("?" for _ in current_asset_ids)
+            connection.execute(
+                f"DELETE FROM export_plan WHERE template_id = ? AND asset_id NOT IN ({placeholders})",
+                (template_id, *current_asset_ids),
+            )
+        else:
+            connection.execute(
+                "DELETE FROM export_plan WHERE template_id = ?",
+                (template_id,),
+            )
 
         connection.commit()
     except sqlite3.Error as exc:
