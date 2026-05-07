@@ -3,7 +3,7 @@
 {% block content %}
   <section class="hero">
     <div class="section-head">
-      <h1>人物库浏览</h1>
+      <h1>人物库浏览 <small data-total-asset-count>({{ people_page.total_asset_count }} 张照片)</small></h1>
       <a class="back-link" href="/exports">导出模板</a>
     </div>
     <p>只展示当前仍有 active assignment 的人物。点击任意人物卡即可进入详情页查看真实 context 样本。</p>
@@ -56,7 +56,7 @@
 
       <section class="panel section-block" data-people-section="named">
         <div class="section-head">
-          <h2>已命名人物</h2>
+          <h2>已命名人物 <small data-named-people-count>({{ people_page.named_people|length }})</small></h2>
           <p>显示所有 <code>display_name</code> 已生效的人物。</p>
         </div>
         {% if people_page.named_people %}
@@ -93,7 +93,7 @@
 
       <section class="panel section-block" data-people-section="anonymous">
         <div class="section-head">
-          <h2>匿名人物</h2>
+          <h2>匿名人物 <small data-anonymous-people-count>({{ people_page.anonymous_people|length }})</small></h2>
           <p>显示自动形成但尚未命名的人物。</p>
         </div>
         {% if people_page.anonymous_people %}

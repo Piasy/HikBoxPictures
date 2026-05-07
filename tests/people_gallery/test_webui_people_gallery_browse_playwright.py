@@ -282,3 +282,70 @@ def test_people_gallery_browse_via_real_serve_and_real_page(scanned_workspace, t
             browser.close()
     finally:
         terminate_process(process)
+
+
+def test_people_home_section_counts(scanned_workspace, tmp_path: Path) -> None:
+    workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+    expected_people = read_active_people(library_db)
+    named_count = sum(1 for p in expected_people.values() if p["is_named"])
+    anonymous_count = sum(1 for p in expected_people.values() if not p["is_named"])
+    total_asset_count = int(
+        fetch_all(
+            library_db,
+            """
+            SELECT COUNT(DISTINCT assets.id)
+            FROM person_face_assignments
+            INNER JOIN face_observations
+              ON face_observations.id = person_face_assignments.face_observation_id
+            INNER JOIN assets
+              ON assets.id = face_observations.asset_id
+            INNER JOIN person
+              ON person.id = person_face_assignments.person_id
+            WHERE person_face_assignments.active = 1
+              AND person.status = 'active'
+            """,
+        )[0][0]
+    )
+
+    port = find_free_port()
+    process = spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+    )
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        wait_for_http_ready(f"{base_url}/")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch()
+            page = browser.new_page(viewport={"width": 1440, "height": 900})
+
+            page.goto(f"{base_url}/people", wait_until="networkidle")
+
+            # "人物库浏览" 标题旁显示总照片资产数
+            hero_heading = page.locator("h1")
+            expect(hero_heading).to_contain_text("人物库浏览")
+            hero_count = page.locator("[data-total-asset-count]")
+            expect(hero_count).to_be_visible()
+            expect(hero_count).to_contain_text(str(total_asset_count))
+
+            # "已命名人物" 标题旁显示人物数
+            named_heading = page.locator("[data-people-section='named'] h2")
+            expect(named_heading).to_contain_text("已命名人物")
+            named_count_el = page.locator("[data-named-people-count]")
+            expect(named_count_el).to_be_visible()
+            expect(named_count_el).to_contain_text(str(named_count))
+
+            # "匿名人物" 标题旁显示人物数
+            anonymous_heading = page.locator("[data-people-section='anonymous'] h2")
+            expect(anonymous_heading).to_contain_text("匿名人物")
+            anonymous_count_el = page.locator("[data-anonymous-people-count]")
+            expect(anonymous_count_el).to_be_visible()
+            expect(anonymous_count_el).to_contain_text(str(anonymous_count))
+
+            browser.close()
+    finally:
+        terminate_process(process)

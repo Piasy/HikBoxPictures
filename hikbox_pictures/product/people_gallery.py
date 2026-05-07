@@ -147,6 +147,7 @@ class PersonCard:
 class PeopleHomePage:
     named_people: list[PersonCard]
     anonymous_people: list[PersonCard]
+    total_asset_count: int = 0
     can_undo_latest_merge: bool = False
     is_export_running: bool = False
 
@@ -317,6 +318,22 @@ def load_people_home_page(workspace_context: WorkspaceContext) -> PeopleHomePage
             """
         ).fetchall()
         can_undo_latest_merge = _latest_merge_operation_can_be_undone(connection)
+        total_asset_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(DISTINCT assets.id)
+                FROM person_face_assignments
+                INNER JOIN face_observations
+                  ON face_observations.id = person_face_assignments.face_observation_id
+                INNER JOIN assets
+                  ON assets.id = face_observations.asset_id
+                INNER JOIN person
+                  ON person.id = person_face_assignments.person_id
+                WHERE person_face_assignments.active = 1
+                  AND person.status = 'active'
+                """
+            ).fetchone()[0]
+        )
     except sqlite3.Error as exc:
         raise PeopleGalleryError("人物首页数据读取失败。") from exc
     finally:
@@ -345,6 +362,7 @@ def load_people_home_page(workspace_context: WorkspaceContext) -> PeopleHomePage
     return PeopleHomePage(
         named_people=named_people,
         anonymous_people=anonymous_people,
+        total_asset_count=total_asset_count,
         can_undo_latest_merge=can_undo_latest_merge,
         is_export_running=is_export_running(workspace_context),
     )
