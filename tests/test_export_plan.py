@@ -13,10 +13,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+import struct
+import subprocess
 import threading
 
 import pytest
@@ -24,6 +27,8 @@ import pytest
 from hikbox_pictures.product.db.migration import migrate_to_latest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+LIVE_PHOTO_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "live-photo"
+LIVE_PHOTO_FIXTURE_CONTENT_IDENTIFIER = "11111111-2222-4333-8444-555555555555"
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +64,26 @@ def _create_mov_source(tmp_path: Path, name: str, content: bytes = b"fake mov") 
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_bytes(content)
     return src
+
+
+def _read_xattr(path: Path, name: str) -> bytes:
+    result = subprocess.run(
+        ["xattr", "-px", name, str(path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return bytes.fromhex(result.stdout)
+
+
+def _content_identifier(path: Path) -> str:
+    result = subprocess.run(
+        ["exiftool", "-s3", "-ContentIdentifier", str(path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 def _setup_test_db(
@@ -380,6 +405,51 @@ class TestMovSyncRenaming:
         # 第二个 MOV 也同步重命名（冲突导致）
         assert rows[1][1] == "IMG_0001__Android.heic"
         assert rows[1][2] == ".IMG_0001__Android.MOV"
+
+
+class TestLivePhotoExportHelper:
+    def test_execute_exports_real_live_photo_pair_xattrs(self, tmp_path: Path) -> None:
+        """导出 HEIC Live Photo 时，应保留 metadata 并修正海康智存需要的 xattr。"""
+        still_src = LIVE_PHOTO_FIXTURE_DIR / "input2.HEIC"
+        mov_src = LIVE_PHOTO_FIXTURE_DIR / ".input2.MOV"
+        workspace_context, db_path, output_root = _make_full_workspace(tmp_path, assets=[
+            {
+                "file_name": "input2.HEIC",
+                "absolute_path": still_src,
+                "capture_month": "2025-01",
+                "live_photo_mov_path": mov_src,
+                "person_ids": ["person-alex", "person-blair"],
+            },
+        ])
+
+        from hikbox_pictures.product import export_templates as et
+
+        et.compute_export_preview(workspace_context, template_id="template-1")
+        run_id = et.execute_export(workspace_context, template_id="template-1")
+
+        still_dst = output_root / "only" / "2025-01" / "input2.HEIC"
+        mov_dst = output_root / "only" / "2025-01" / ".input2.MOV"
+        assert still_dst.read_bytes() == still_src.read_bytes()
+        assert mov_dst.read_bytes() == mov_src.read_bytes()
+        assert _content_identifier(still_dst) == LIVE_PHOTO_FIXTURE_CONTENT_IDENTIFIER
+        assert _content_identifier(mov_dst) == LIVE_PHOTO_FIXTURE_CONTENT_IDENTIFIER
+        assert _read_xattr(still_dst, "livephoto") == b".input2.MOV\0"
+        assert _read_xattr(still_dst, "fileattr") == b"\x10\x00\x00\x00"
+        assert _read_xattr(mov_dst, "fileattr") == b"\x01\x00\x00\x00"
+        expected_heicsize = struct.pack("<Q", still_dst.stat().st_size)
+        assert _read_xattr(still_dst, "heicsize") == expected_heicsize
+        assert _read_xattr(mov_dst, "heicsize") == expected_heicsize
+        assert _read_xattr(still_dst, "md5") == hashlib.md5(still_dst.read_bytes()).hexdigest().encode()
+
+        conn = sqlite3.connect(db_path)
+        try:
+            delivery = conn.execute(
+                "SELECT result, mov_result FROM export_delivery WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert delivery == ("copied", "copied")
 
 
 # ---------------------------------------------------------------------------

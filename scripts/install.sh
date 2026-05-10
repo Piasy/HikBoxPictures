@@ -22,6 +22,29 @@ fail() {
   exit 1
 }
 
+ensure_exiftool() {
+  if command -v exiftool >/dev/null 2>&1; then
+    log "复用现有 exiftool: $(command -v exiftool)"
+    return
+  fi
+
+  log "未检测到 exiftool，开始安装"
+  [[ "$(uname -s)" == "Darwin" ]] || fail "当前安装脚本只支持在 macOS 上自动安装 exiftool。"
+  command -v brew >/dev/null 2>&1 || fail "macOS 安装 exiftool 需要 Homebrew。"
+  brew install exiftool
+
+  command -v exiftool >/dev/null 2>&1 || fail "exiftool 安装后仍不可用。"
+}
+
+ensure_swift() {
+  if command -v swift >/dev/null 2>&1; then
+    log "复用现有 swift: $(command -v swift)"
+    return
+  fi
+
+  fail "未检测到 swift。请先安装 Xcode 或 Xcode Command Line Tools，并确保 swift 在 PATH 中。"
+}
+
 download_and_install_uv() {
   mkdir -p "${LOCAL_UV_DIR}"
   log "未检测到 uv，安装到 ${LOCAL_UV_DIR}"
@@ -88,6 +111,9 @@ log "目标虚拟环境: ${VENV_DIR}"
 
 mkdir -p "${UV_CACHE_DIR}" "${UV_PYTHON_INSTALL_DIR}"
 
+ensure_exiftool
+ensure_swift
+
 log "确保使用 uv 管理的 Python ${PYTHON_VERSION}"
 "${ACTIVE_UV_BIN}" python install "${PYTHON_VERSION}" --managed-python
 
@@ -121,6 +147,8 @@ cat <<DONE
 当前环境说明：
 - Python 版本固定为 ${PYTHON_VERSION}
 - .venv 由 uv 管理的本地 Python 创建，不依赖系统 Python
+- exiftool 已准备完成
+- Swift/Xcode 命令行环境已准备完成
 - Chromium 浏览器已准备完成
 
 常用命令：

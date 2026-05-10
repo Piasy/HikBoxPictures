@@ -6,6 +6,7 @@ from pathlib import Path
 import logging
 import shutil
 import sqlite3
+import subprocess
 import threading
 import uuid
 
@@ -27,11 +28,41 @@ class ExportTemplateValidationError(ExportTemplateError):
 
 # Test-only hook called after each file copy during export.
 _per_file_copy_hook: callable | None = None
+EXPORT_LIVE_PHOTO_SWIFT_PATH = Path(__file__).resolve().with_name("export_live_photo.swift")
 
 
 def set_per_file_copy_hook(hook: callable | None) -> None:
     global _per_file_copy_hook
     _per_file_copy_hook = hook
+
+
+def _ensure_tool(name: str) -> None:
+    if shutil.which(name) is None:
+        raise RuntimeError(f"找不到依赖工具：{name}")
+
+
+def run_live_photo_export_helper(
+    *,
+    still_src: Path,
+    mov_src: Path,
+    still_dst: Path,
+    mov_dst: Path,
+) -> None:
+    _ensure_tool("swift")
+    if not EXPORT_LIVE_PHOTO_SWIFT_PATH.is_file():
+        raise FileNotFoundError(f"找不到 Live Photo 导出 helper：{EXPORT_LIVE_PHOTO_SWIFT_PATH}")
+    subprocess.run(
+        [
+            "swift",
+            "-suppress-warnings",
+            str(EXPORT_LIVE_PHOTO_SWIFT_PATH),
+            str(still_src),
+            str(mov_src),
+            str(still_dst),
+            str(mov_dst),
+        ],
+        check=True,
+    )
 
 
 @dataclass(frozen=True)
@@ -962,26 +993,36 @@ def _run_export(
                 bucket_dir = output_root / bucket / month
                 src_path = Path(absolute_path)
                 dst_path = bucket_dir / plan_file_name
+                live_photo_pair = (
+                    file_extension in ("heic", "heif")
+                    and live_photo_mov_path
+                    and plan_mov_file_name
+                )
 
                 if dst_path.exists():
                     result = "skipped_exists"
                     mov_result = "not_applicable"
                 else:
                     bucket_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src_path, dst_path)
                     result = "copied"
 
-                    # 处理 MOV 配对文件
                     mov_result = "not_applicable"
-                    if file_extension in ("heic", "heif") and live_photo_mov_path and plan_mov_file_name:
+                    if live_photo_pair:
                         mov_src = Path(str(live_photo_mov_path))
                         mov_dst = bucket_dir / plan_mov_file_name
                         if mov_src.exists():
-                            if not mov_dst.exists():
-                                shutil.copy2(mov_src, mov_dst)
+                            run_live_photo_export_helper(
+                                still_src=src_path,
+                                mov_src=mov_src,
+                                still_dst=dst_path,
+                                mov_dst=mov_dst,
+                            )
                             mov_result = "copied"
                         else:
+                            shutil.copy2(src_path, dst_path)
                             mov_result = "skipped_missing"
+                    else:
+                        shutil.copy2(src_path, dst_path)
 
                 target_path = str(output_root / bucket / month / plan_file_name)
 

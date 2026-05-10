@@ -22,6 +22,7 @@ dependencies = [
   "numpy>=1.26.0",
   "Pillow>=10.0.0",
   "pillow-heif>=0.18.0",
+  "PyExifTool>=0.5.6",
   "uvicorn>=0.35.0",
 ]
 
@@ -39,6 +40,7 @@ hikbox-pictures = "hikbox_pictures.cli:main"
 hikbox_pictures = [
   "web/templates/*.html",
   "web/static/*",
+  "product/*.swift",
   "product/db/sql/*.sql",
 ]
 
