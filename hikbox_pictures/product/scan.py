@@ -17,7 +17,8 @@ from hikbox_pictures.product.online_assignment import OnlineAssignmentError
 from hikbox_pictures.product.online_assignment import RedetectFace
 from hikbox_pictures.product.online_assignment import reconcile_asset_redetection
 from hikbox_pictures.product.online_assignment import run_online_assignment
-from hikbox_pictures.product.scan_shared import HEIF_SUFFIXES
+from hikbox_pictures.product.make_live_photo_pair import convert_jpg_mp4_pairs_in_directory
+from hikbox_pictures.product.scan_shared import LIVE_PHOTO_STILL_SUFFIXES
 from hikbox_pictures.product.scan_shared import SUPPORTED_SCAN_SUFFIXES
 from hikbox_pictures.product.scan_shared import compute_capture_month
 from hikbox_pictures.product.scan_shared import find_live_photo_mov
@@ -446,6 +447,7 @@ def _discover_candidates(
             source_id = int(source["id"])
             source_path = Path(str(source["path"]))
             absolute_source_path = source_path if source_path.is_absolute() else source_path.resolve()
+            convert_jpg_mp4_pairs_in_directory(source_path)
             for child in sorted(source_path.iterdir(), key=lambda path: (path.name.casefold(), path.name)):
                 if not child.is_file():
                     continue
@@ -1747,7 +1749,7 @@ class _LivePhotoMovResolver:
         self._mov_paths_by_parent: dict[Path, list[Path]] = {}
 
     def find(self, image_path: Path) -> str | None:
-        if image_path.suffix.lower() not in HEIF_SUFFIXES:
+        if image_path.suffix.lower() not in LIVE_PHOTO_STILL_SUFFIXES:
             return None
         mov_paths = self._mov_paths_for_parent(image_path.parent)
         prefix = f".{image_path.stem}"

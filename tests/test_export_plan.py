@@ -20,6 +20,7 @@ import shutil
 import sqlite3
 import struct
 import subprocess
+import sys
 import threading
 
 import pytest
@@ -29,6 +30,7 @@ from hikbox_pictures.product.db.migration import migrate_to_latest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LIVE_PHOTO_FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "live-photo"
 LIVE_PHOTO_FIXTURE_CONTENT_IDENTIFIER = "11111111-2222-4333-8444-555555555555"
+MAKE_LIVE_PHOTO_PAIR_SCRIPT = REPO_ROOT / "scripts" / "make_live_photo_pair.py"
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +86,34 @@ def _content_identifier(path: Path) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def _make_real_jpg_live_photo_pair(tmp_path: Path, stem: str) -> tuple[Path, Path]:
+    if sys.platform != "darwin":
+        pytest.skip("JPG/MP4 Live Photo 转换只在 macOS 上运行")
+    if shutil.which("swift") is None or shutil.which("exiftool") is None:
+        pytest.skip("缺少 swift 或 exiftool")
+
+    source_dir = tmp_path / "jpg-live-source"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    raw_jpg = source_dir / f"{stem}_raw.jpg"
+    raw_mp4 = source_dir / f"{stem}_raw.mp4"
+    shutil.copy(LIVE_PHOTO_FIXTURE_DIR / "input.jpg", raw_jpg)
+    shutil.copy(LIVE_PHOTO_FIXTURE_DIR / "input.mp4", raw_mp4)
+    subprocess.run(
+        [
+            sys.executable,
+            str(MAKE_LIVE_PHOTO_PAIR_SCRIPT),
+            str(raw_jpg),
+            str(raw_mp4),
+            "--output-dir",
+            str(source_dir),
+            "--output-stem",
+            stem,
+        ],
+        check=True,
+    )
+    return source_dir / f"{stem}.jpg", source_dir / f".{stem}.MOV"
 
 
 def _setup_test_db(
@@ -450,6 +480,51 @@ class TestLivePhotoExportHelper:
         finally:
             conn.close()
         assert delivery == ("copied", "copied")
+
+    def test_execute_exports_renamed_jpg_live_photo_pair_xattrs(self, tmp_path: Path) -> None:
+        """导出 JPG Live Photo 时，也应复制 MOV 并把 livephoto xattr 改成重命名后的 MOV。"""
+        plain_src = _create_source_image(tmp_path / "iPhone", "IMG_0001.jpg", b"plain-content")
+        still_src, mov_src = _make_real_jpg_live_photo_pair(tmp_path / "Android", "IMG_0001")
+        workspace_context, _db_path = _make_workspace_context_with_sources(
+            tmp_path,
+            sources=[
+                {"path": str(tmp_path / "iPhone"), "label": "iPhone"},
+                {"path": str(tmp_path / "Android"), "label": "Android"},
+            ],
+            assets=[
+                {
+                    "file_name": "IMG_0001.jpg",
+                    "absolute_path": plain_src,
+                    "source_id": 1,
+                    "capture_month": "2025-01",
+                    "person_ids": ["person-alex", "person-blair"],
+                },
+                {
+                    "file_name": "IMG_0001.jpg",
+                    "absolute_path": still_src,
+                    "source_id": 2,
+                    "capture_month": "2025-01",
+                    "live_photo_mov_path": mov_src,
+                    "person_ids": ["person-alex", "person-blair"],
+                },
+            ],
+        )
+
+        from hikbox_pictures.product import export_templates as et
+
+        et.compute_export_preview(workspace_context, template_id="template-1")
+        et.execute_export(workspace_context, template_id="template-1")
+
+        output_root = workspace_context._output_root
+        still_dst = output_root / "only" / "2025-01" / "IMG_0001__Android.jpg"
+        mov_dst = output_root / "only" / "2025-01" / ".IMG_0001__Android.MOV"
+        assert still_dst.read_bytes() == still_src.read_bytes()
+        assert mov_dst.read_bytes() == mov_src.read_bytes()
+        assert _content_identifier(still_dst) == _content_identifier(still_src)
+        assert _content_identifier(mov_dst) == _content_identifier(mov_src)
+        assert _read_xattr(still_dst, "livephoto") == b".IMG_0001__Android.MOV\0"
+        assert _read_xattr(still_dst, "fileattr") == b"\x10\x00\x00\x00"
+        assert _read_xattr(mov_dst, "fileattr") == b"\x01\x00\x00\x00"
 
 
 # ---------------------------------------------------------------------------

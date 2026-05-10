@@ -6,7 +6,9 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import time
+import uuid
 
 import pytest
 
@@ -27,6 +29,29 @@ from tests.scan_cli_helpers import (
     scan_progress_lines,
     write_named_source_copies,
 )
+
+
+LIVE_PHOTO_FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "live-photo"
+
+
+def _read_xattr(path: Path, name: str) -> bytes:
+    result = subprocess.run(
+        ["xattr", "-px", name, str(path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return bytes.fromhex(result.stdout)
+
+
+def _content_identifier(path: Path) -> str:
+    result = subprocess.run(
+        ["exiftool", "-s3", "-ContentIdentifier", str(path)],
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 def test_scan_worker_emits_batch_progress_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -312,6 +337,52 @@ def test_discover_candidates_defers_photo_metadata_until_batch_load(
     assert [candidate["file_name"] for candidate in candidates] == ["img_01.jpg", "img_02.heic"]
     assert all("capture_month" not in candidate for candidate in candidates)
     assert all("live_photo_mov_path" not in candidate for candidate in candidates)
+
+
+def test_discover_candidates_converts_jpg_mp4_pair_to_live_photo_in_place(
+    tmp_path: Path,
+) -> None:
+    if sys.platform != "darwin":
+        pytest.skip("JPG/MP4 Live Photo 转换只在 macOS 上运行")
+    if shutil.which("swift") is None or shutil.which("exiftool") is None:
+        pytest.skip("缺少 swift 或 exiftool")
+
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    still_path = source_dir / "CaseMix.JPG"
+    mp4_path = source_dir / "CaseMix.MP4"
+    shutil.copy(LIVE_PHOTO_FIXTURE_DIR / "input.jpg", still_path)
+    shutil.copy(LIVE_PHOTO_FIXTURE_DIR / "input.mp4", mp4_path)
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    workspace_context = WorkspaceContext(
+        workspace_path=tmp_path,
+        external_root_path=tmp_path,
+        library_db_path=tmp_path / "library.db",
+        embedding_db_path=tmp_path / "embedding.db",
+        model_root_path=tmp_path,
+    )
+
+    candidates = scan_module._discover_candidates(
+        [{"id": 1, "path": str(source_dir), "label": "test", "scan_state": "pending"}],
+        workspace_context,
+    )
+
+    mov_path = source_dir / ".CaseMix.MOV"
+    assert [candidate["file_name"] for candidate in candidates] == ["CaseMix.JPG"]
+    assert still_path.is_file()
+    assert mov_path.is_file()
+    assert not mp4_path.exists()
+    assert scan_module._recoverable_live_photo_mov(still_path) == str(mov_path.resolve())
+    still_content_identifier = _content_identifier(still_path)
+    mov_content_identifier = _content_identifier(mov_path)
+    parsed = uuid.UUID(still_content_identifier)
+    assert still_content_identifier == mov_content_identifier
+    assert parsed.variant == uuid.RFC_4122
+    assert _read_xattr(still_path, "livephoto") == b".CaseMix.MOV\0"
+    assert _read_xattr(still_path, "fileattr") == b"\x10\x00\x00\x00"
+    assert _read_xattr(mov_path, "fileattr") == b"\x01\x00\x00\x00"
 
 
 def test_discover_candidates_does_not_resolve_each_candidate_path(

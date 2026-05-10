@@ -10,7 +10,7 @@ from PIL import ImageOps
 
 
 SUPPORTED_SCAN_SUFFIXES: Final[set[str]] = {".jpg", ".jpeg", ".png", ".heic", ".heif"}
-HEIF_SUFFIXES: Final[set[str]] = {".heic", ".heif"}
+LIVE_PHOTO_STILL_SUFFIXES: Final[set[str]] = {".jpg", ".jpeg", ".heic", ".heif"}
 
 
 def utc_now_text() -> str:
@@ -55,7 +55,7 @@ def compute_capture_month(image_path: Path) -> str:
 
 
 def find_live_photo_mov(image_path: Path) -> str | None:
-    if image_path.suffix.lower() not in HEIF_SUFFIXES:
+    if image_path.suffix.lower() not in LIVE_PHOTO_STILL_SUFFIXES:
         return None
     prefix = f".{image_path.stem}"
     candidates = sorted(

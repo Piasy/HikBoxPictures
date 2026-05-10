@@ -11,13 +11,13 @@ from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FIXTURE_DIR = REPO_ROOT / "tests" / "fixtures" / "live-photo"
-SCRIPT_PATH = REPO_ROOT / "scripts" / "make_live_photo_pair.py"
+PRODUCT_MODULE_PATH = REPO_ROOT / "hikbox_pictures" / "product" / "make_live_photo_pair.py"
 INSTALL_SCRIPT_PATH = REPO_ROOT / "scripts" / "install.sh"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
 
 
 def _load_script_module():
-    spec = importlib.util.spec_from_file_location("make_live_photo_pair", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location("make_live_photo_pair", PRODUCT_MODULE_PATH)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None

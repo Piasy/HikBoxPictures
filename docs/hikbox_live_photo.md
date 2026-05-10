@@ -102,17 +102,24 @@ MOV 侧需要写入 QuickTime Live Photo metadata：
 
 当前职责划分：
 
-- Python 脚本负责复制 JPG、用 ExifTool 写 JPG MakerNote、调用 Swift helper。
+- `hikbox_pictures.product.make_live_photo_pair` 负责复制 JPG、用 ExifTool 写 JPG MakerNote、调用 Swift helper；`scripts/make_live_photo_pair.py` 只是命令行薄入口。
 - Swift helper 负责 MP4 到 MOV 封装、写 QuickTime metadata、写 JPG/MOV xattr。
+
+扫描阶段会在 pending source 的候选发现前检查同目录下同名 JPG/JPEG + MP4（忽略后缀，后缀大小写不敏感）组合，并原地转换：
+
+1. 生成带 Live Photo metadata/xattr 的临时 JPG 和隐藏 `.stem.MOV`。
+2. 用生成后的 JPG 覆盖原 JPG。
+3. 删除原 MP4。
+4. 后续扫描把该 JPG 作为普通图片处理，同时通过隐藏 MOV 写入 `live_photo_mov_path`。
 
 依赖：
 
 - Python 侧使用 `PyExifTool` 调用系统 `exiftool`。
 - macOS 侧需要 `swift` 可执行文件。
 
-### 导出 HEIC/MOV
+### 导出 HEIC/JPG + MOV
 
-导出逻辑必须使用包内 Swift helper 显式处理 xattr，不要依赖 `shutil.copy2`。
+导出逻辑必须使用包内 Swift helper 显式处理 Live Photo xattr，不要依赖 `shutil.copy2`。HEIC/HEIF 和 JPG/JPEG 只要有 `live_photo_mov_path`，都走同一套 Live Photo 导出逻辑。
 
 正确流程：
 
@@ -164,6 +171,6 @@ MOV fileattr = 01 00 00 00
 
 ## 已知非目标
 
-- 不尝试让普通 JPG/PNG 在扫描阶段自动匹配 Live Photo MOV；扫描语义仍以现有产品规则为准。
+- 不尝试让普通 PNG 在扫描阶段自动匹配 Live Photo MOV；扫描语义仍以现有产品规则为准。
 - 不用 ImageIO 写 JPG MakerNote，因为它会重编码 JPG，不满足 scan data 不变的要求。
 - 不依赖 macOS Python 的 `shutil.copy2` 保留 xattr。

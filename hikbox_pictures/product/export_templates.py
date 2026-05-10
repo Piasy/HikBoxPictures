@@ -994,7 +994,7 @@ def _run_export(
                 src_path = Path(absolute_path)
                 dst_path = bucket_dir / plan_file_name
                 live_photo_pair = (
-                    file_extension in ("heic", "heif")
+                    file_extension in ("heic", "heif", "jpg", "jpeg")
                     and live_photo_mov_path
                     and plan_mov_file_name
                 )
