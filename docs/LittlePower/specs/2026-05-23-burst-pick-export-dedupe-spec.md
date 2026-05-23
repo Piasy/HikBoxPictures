@@ -26,9 +26,15 @@
 - Scope: 在 `/exports` 的单个导出模板候选集内识别相似连拍组，提供 WebUI 保留选择和提交入口，写入全局放弃导出标记，并让后续预览、`export_plan` 和执行导出跳过这些 asset。
 - Acceptance summary: 用户从模板列表进入“连拍挑选”，每个相似组至少选择 1 张保留照片后提交；未保留 asset 被持久标记为全局放弃，所有模板后续预览和导出都不再包含它们。
 
+### Child Spec B: 既有导出目录重复文件清理脚本
+
+- [ ] Implementation status: Not done
+- Spec: [2026-05-23-burst-pick-export-dedupe-child-b-export-cleanup-script-spec.md](./2026-05-23-burst-pick-export-dedupe-child-b-export-cleanup-script-spec.md)
+- Scope: 新增默认 dry-run 的维护脚本，只依据全局放弃标记与 `export_delivery`/`export_plan` 精确定位某个既有导出根目录下应清理的静态图和已导出的 Live Photo 配对 MOV，并在显式 `--apply` 时移动到隔离目录。
+- Acceptance summary: 用户对指定导出根目录运行脚本时，dry-run 能展示完整移动计划且不改文件；加 `--apply` 后仅把 DB 精确定位到的 abandoned 导出文件按原相对结构移动到隔离目录，不删除文件、不改 DB、不按文件名猜测。
+
 ## Candidate Future Split Specs
 
-- Child Spec B: 既有导出目录重复文件清理脚本：新增类似 `scripts/fix_live_photo_matches.py` 的 dry-run/apply 脚本，只依据全局放弃标记与 `export_delivery`/`export_plan` 精确定位文件，把静态图和已导出的 Live Photo 配对 MOV 一起移动到隔离目录，并保留导出根目录下的相对结构。
 - 自动推荐保留照片：在相似组内自动推荐最佳保留项，但仍需用户确认后才写入放弃标记。
 - 放弃标记撤销或管理页：提供查看、撤销或批量管理全局放弃标记的入口。
 - 全工作区相似照片整理：脱离导出模板候选集，面向整个 workspace 做相似照片整理。
