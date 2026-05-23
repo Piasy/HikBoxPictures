@@ -451,6 +451,40 @@ def create_export_template(
     return ExportTemplateCreateResult(template_id=template_id)
 
 
+def delete_export_template(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+) -> None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT 1 FROM export_template WHERE template_id = ?",
+            (template_id,),
+        ).fetchone()
+        if row is None:
+            raise ExportTemplateValidationError("模板不存在。", code="template_not_found")
+
+        connection.execute(
+            "DELETE FROM export_template_person WHERE template_id = ?",
+            (template_id,),
+        )
+        connection.execute(
+            "DELETE FROM export_template WHERE template_id = ?",
+            (template_id,),
+        )
+        connection.commit()
+    except ExportTemplateValidationError:
+        connection.rollback()
+        raise
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise ExportTemplateError("导出模板删除失败。") from exc
+    finally:
+        connection.close()
+
+
 def invalidate_templates_for_person(
     connection: sqlite3.Connection,
     *,

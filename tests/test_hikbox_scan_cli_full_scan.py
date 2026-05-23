@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import numpy as np
 from PIL import Image
@@ -26,6 +29,44 @@ from tests.scan_cli_helpers import (
 )
 
 
+def _copy_fixture_with_live_photo_xattrs(tmp_path: Path) -> Path:
+    source_dir = tmp_path / "people_gallery_scan"
+    shutil.copytree(FIXTURE_DIR, source_dir)
+    _write_xattr(
+        source_dir / "pg_047_live_positive_01.HEIC",
+        "livephoto",
+        b".pg_047_live_positive_01.MOV\0",
+    )
+    _write_xattr(
+        source_dir / "pg_048_live_positive_02.heif",
+        "livephoto",
+        b".pg_048_live_positive_02.mov\0",
+    )
+    return source_dir
+
+
+def _write_xattr(path: Path, name: str, value: bytes) -> None:
+    setxattr = getattr(os, "setxattr", None)
+    if setxattr is not None:
+        try:
+            setxattr(path, name, value)
+            return
+        except OSError:
+            pass
+    if shutil.which("xattr") is None:
+        pytest.skip("当前环境不支持写 xattr")
+    try:
+        subprocess.run(
+            ["xattr", "-wx", name, value.hex(), str(path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"当前环境不支持写 xattr: {exc}")
+
+
 def test_scan_start_runs_fixture_pipeline_and_persists_outputs(tmp_path: Path) -> None:
     manifest = load_manifest()
     scan_candidate_assets = [
@@ -33,6 +74,7 @@ def test_scan_start_runs_fixture_pipeline_and_persists_outputs(tmp_path: Path) -
     ]
     workspace = tmp_path / "workspace"
     external_root = tmp_path / "external-root"
+    source_dir = _copy_fixture_with_live_photo_xattrs(tmp_path)
 
     init_result = init_workspace(workspace, external_root)
     assert init_result.returncode == 0
@@ -41,7 +83,7 @@ def test_scan_start_runs_fixture_pipeline_and_persists_outputs(tmp_path: Path) -
     home_without_models.mkdir()
     spy_dir, spy_log_path = prepare_faceanalysis_spy(tmp_path / "spy-success")
 
-    add_result = add_source(workspace, FIXTURE_DIR)
+    add_result = add_source(workspace, source_dir)
     assert add_result.returncode == 0
 
     result = run_hikbox(
@@ -150,8 +192,8 @@ def test_scan_start_runs_fixture_pipeline_and_persists_outputs(tmp_path: Path) -
         """,
     )
     assert positive_pair_rows == [
-        ("pg_047_live_positive_01.HEIC", str((FIXTURE_DIR / ".pg_047_live_positive_01.MOV").resolve())),
-        ("pg_048_live_positive_02.heif", str((FIXTURE_DIR / ".pg_048_live_positive_02.mov").resolve())),
+        ("pg_047_live_positive_01.HEIC", str((source_dir / ".pg_047_live_positive_01.MOV").resolve())),
+        ("pg_048_live_positive_02.heif", str((source_dir / ".pg_048_live_positive_02.mov").resolve())),
     ]
     corrupt_row = fetch_one(
         library_db,

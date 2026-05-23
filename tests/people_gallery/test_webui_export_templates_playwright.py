@@ -83,6 +83,48 @@ class TestExportTemplateWebUI:
         finally:
             terminate_process(process)
 
+    def test_delete_template_from_list(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        alex_id = target_person_ids["target_alex"]
+        blair_id = target_person_ids["target_blair"]
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        output_root = str(tmp_path / "export-output")
+        try:
+            wait_for_http_ready(f"{base_url}/")
+
+            with sync_playwright() as p:
+                browser = p.chromium.launch()
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+
+                httpx.post(f"{base_url}/people/{alex_id}/name", data={"display_name": "Alex Chen"}, follow_redirects=False, timeout=5.0)
+                httpx.post(f"{base_url}/people/{blair_id}/name", data={"display_name": "Blair Lin"}, follow_redirects=False, timeout=5.0)
+
+                page.goto(f"{base_url}/exports/new")
+                page.fill("input#name", "Alex & Blair")
+                page.fill("input#output_root", output_root)
+                page.locator(f"article[data-person-id='{alex_id}'] input[type=checkbox]").check()
+                page.locator(f"article[data-person-id='{blair_id}'] input[type=checkbox]").check()
+                page.locator("button[type=submit]").click()
+                expect(page).to_have_url(f"{base_url}/exports")
+
+                row = page.locator("tr[data-template-id]").first
+                expect(row.locator("[data-template-name]")).to_contain_text("Alex & Blair")
+                row.locator("form[data-template-delete-form] button[type=submit]").click()
+                expect(page).to_have_url(f"{base_url}/exports")
+                expect(page.locator("[role=status]")).to_contain_text("模板已删除")
+                expect(page.locator("tr[data-template-id]")).to_have_count(0)
+                expect(page.locator(".empty-state")).to_contain_text("暂无导出模板")
+
+                browser.close()
+
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_template")[0][0] == 0
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_template_person")[0][0] == 0
+        finally:
+            terminate_process(process)
+
     def test_person_selector_excludes_anonymous_and_inactive(self, scanned_workspace, tmp_path: Path) -> None:
         workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
         alex_id = target_person_ids["target_alex"]

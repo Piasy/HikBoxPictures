@@ -96,6 +96,19 @@ MOV 侧需要写入 QuickTime Live Photo metadata：
 
 当前转换脚本用 Swift/AVFoundation 将 MP4 pass-through 封装为 MOV，并写入这些 metadata。
 
+## 扫描匹配约束
+
+扫描阶段不能只依赖静态图和隐藏 MOV 的同名关系。已发现同一目录下可能同时存在同主文件名的 HEIC 和 JPG，而隐藏 MOV 实际属于其中一张静态图；如果只按文件名前缀匹配，会把 MOV 误挂到另一张静态图上。
+
+当前扫描匹配规则：
+
+- 只考虑 JPG/JPEG/HEIC/HEIF 静态图与同目录隐藏 `.MOV` / `.mov`。
+- 隐藏 MOV 文件名仍需以 `.<静态图主文件名>` 开头。
+- 如果静态图和 MOV 都能读取拍摄日期，则必须是同一天才允许匹配。
+- 如果日期无法完整读取，只在静态图 `livephoto` xattr 明确指向该 MOV 文件名时允许兜底匹配。
+
+这个兜底用于兼容扫描阶段原地转换出的 JPG/MP4 Live Photo，以及缺少可读拍摄日期但已经带海康关联 xattr 的历史文件；一旦双方日期都存在且不同，即使文件名或 xattr 看起来能关联，也必须拒绝匹配。
+
 ## 实现约束
 
 ### 转换 JPG/MP4

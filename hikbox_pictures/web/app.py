@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 
 from hikbox_pictures.product.export_templates import compute_export_preview
 from hikbox_pictures.product.export_templates import create_export_template
+from hikbox_pictures.product.export_templates import delete_export_template
 from hikbox_pictures.product.export_templates import execute_export
 from hikbox_pictures.product.export_templates import execute_export_async
 from hikbox_pictures.product.export_templates import ExportTemplateError
@@ -66,6 +67,11 @@ PREVIEW_EXCLUSION_FEEDBACK_MESSAGES = {
     "person_removed": {"level": "info", "message": "已排除该人脸，该人物已无剩余样本。"},
     "export_in_progress": {"level": "error", "message": "导出进行中，无法排除。"},
     "internal_error": {"level": "error", "message": "排除失败，请稍后重试。"},
+}
+EXPORTS_FEEDBACK_COOKIE = "export_templates_feedback"
+EXPORTS_FEEDBACK_MESSAGES = {
+    "delete_succeeded": {"level": "info", "message": "模板已删除。"},
+    "delete_missing": {"level": "error", "message": "模板不存在。"},
 }
 
 
@@ -431,14 +437,19 @@ def create_people_gallery_app(
             template_list = load_export_templates_list(workspace_context)
         except ExportTemplateError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
-        return templates.TemplateResponse(
+        list_feedback = _get_exports_feedback(request)
+        response = templates.TemplateResponse(
             request=request,
             name="exports_list.html",
             context={
                 "page_title": "导出模板",
                 "templates": template_list,
+                "list_feedback": list_feedback,
             },
         )
+        if list_feedback is not None:
+            response.delete_cookie(EXPORTS_FEEDBACK_COOKIE, path="/")
+        return response
 
     @app.get("/exports/new", response_class=HTMLResponse)
     def exports_new(request: Request) -> HTMLResponse:
@@ -536,6 +547,45 @@ def create_people_gallery_app(
         except ExportTemplateError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"template_id": result.template_id}
+
+    @app.post("/exports/{template_id}/delete")
+    def export_template_delete_action(template_id: str) -> RedirectResponse:
+        response = RedirectResponse(url="/exports", status_code=303)
+        try:
+            delete_export_template(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            if exc.code == "template_not_found":
+                response.set_cookie(
+                    EXPORTS_FEEDBACK_COOKIE,
+                    "delete_missing",
+                    httponly=True,
+                    samesite="lax",
+                    path="/",
+                )
+                return response
+            raise
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        response.set_cookie(
+            EXPORTS_FEEDBACK_COOKIE,
+            "delete_succeeded",
+            httponly=True,
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.delete("/api/export-templates/{template_id}", status_code=204)
+    def api_export_template_delete(template_id: str) -> Response:
+        try:
+            delete_export_template(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            if exc.code == "template_not_found":
+                raise HTTPException(status_code=404, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return Response(status_code=204)
 
     @app.get("/exports/{template_id}/preview", response_class=HTMLResponse)
     def export_template_preview_page(request: Request, template_id: str) -> HTMLResponse:
@@ -879,3 +929,10 @@ def _get_exclusion_feedback(request: Request) -> dict[str, str] | None:
     if feedback_code is None:
         return None
     return EXCLUSION_FEEDBACK_MESSAGES.get(feedback_code)
+
+
+def _get_exports_feedback(request: Request) -> dict[str, str] | None:
+    feedback_code = request.cookies.get(EXPORTS_FEEDBACK_COOKIE)
+    if feedback_code is None:
+        return None
+    return EXPORTS_FEEDBACK_MESSAGES.get(feedback_code)

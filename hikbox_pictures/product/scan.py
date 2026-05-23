@@ -20,8 +20,10 @@ from hikbox_pictures.product.online_assignment import run_online_assignment
 from hikbox_pictures.product.make_live_photo_pair import convert_jpg_mp4_pairs_in_directory
 from hikbox_pictures.product.scan_shared import LIVE_PHOTO_STILL_SUFFIXES
 from hikbox_pictures.product.scan_shared import SUPPORTED_SCAN_SUFFIXES
+from hikbox_pictures.product.scan_shared import capture_day_for_live_photo
 from hikbox_pictures.product.scan_shared import compute_capture_month
 from hikbox_pictures.product.scan_shared import find_live_photo_mov
+from hikbox_pictures.product.scan_shared import live_photo_dates_allow_match
 from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
 from hikbox_pictures.product.sources import WorkspaceAccessError
@@ -1747,14 +1749,24 @@ def _artifact_token_for_candidate(*, candidate: dict[str, object]) -> str:
 class _LivePhotoMovResolver:
     def __init__(self) -> None:
         self._mov_paths_by_parent: dict[Path, list[Path]] = {}
+        self._capture_days_by_path: dict[Path, str | None] = {}
 
     def find(self, image_path: Path) -> str | None:
         if image_path.suffix.lower() not in LIVE_PHOTO_STILL_SUFFIXES:
             return None
         mov_paths = self._mov_paths_for_parent(image_path.parent)
         prefix = f".{image_path.stem}"
-        for mov_path in mov_paths:
-            if mov_path.name.startswith(prefix):
+        candidate_mov_paths = [mov_path for mov_path in mov_paths if mov_path.name.startswith(prefix)]
+        if not candidate_mov_paths:
+            return None
+        image_day = self._capture_day(image_path)
+        for mov_path in candidate_mov_paths:
+            if live_photo_dates_allow_match(
+                image_path,
+                mov_path,
+                image_day=image_day,
+                mov_day=self._capture_day(mov_path),
+            ):
                 return str(mov_path.resolve())
         return None
 
@@ -1769,6 +1781,14 @@ class _LivePhotoMovResolver:
         mov_paths = sorted(mov_paths)
         self._mov_paths_by_parent[parent] = mov_paths
         return mov_paths
+
+    def _capture_day(self, path: Path) -> str | None:
+        cached = self._capture_days_by_path.get(path)
+        if path in self._capture_days_by_path:
+            return cached
+        day = capture_day_for_live_photo(path)
+        self._capture_days_by_path[path] = day
+        return day
 
 
 def _recoverable_capture_month(absolute_path: Path) -> str:

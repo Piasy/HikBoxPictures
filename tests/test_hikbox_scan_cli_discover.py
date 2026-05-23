@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -52,6 +53,40 @@ def _content_identifier(path: Path) -> str:
         text=True,
     )
     return result.stdout.strip()
+
+
+def _patch_live_photo_capture_days(
+    monkeypatch: pytest.MonkeyPatch,
+    values: dict[str, str | None],
+) -> None:
+    monkeypatch.setattr(
+        scan_module,
+        "capture_day_for_live_photo",
+        lambda path: values.get(Path(path).name),
+        raising=False,
+    )
+
+
+def _write_xattr(path: Path, name: str, value: bytes) -> None:
+    setxattr = getattr(os, "setxattr", None)
+    if setxattr is not None:
+        try:
+            setxattr(path, name, value)
+            return
+        except OSError:
+            pass
+    if shutil.which("xattr") is None:
+        pytest.skip("当前环境不支持写 xattr")
+    try:
+        subprocess.run(
+            ["xattr", "-wx", name, value.hex(), str(path)],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f"当前环境不支持写 xattr: {exc}")
 
 
 def test_scan_worker_emits_batch_progress_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
@@ -219,6 +254,70 @@ def test_start_scan_prints_batch_and_assignment_progress(
     progress = scan_progress_lines(capsys.readouterr().err)
     assert "scan 进度: 阶段=批处理，批次 0/2，照片 1/3" in progress
     assert "scan 进度: 阶段=在线归属，批次 2/2，照片 3/3" in progress
+
+
+def test_scan_start_records_jpg_live_photo_match_when_worker_detects_no_faces(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace-jpg-live-no-face"
+    external_root = tmp_path / "external-root-jpg-live-no-face"
+    source_dir = tmp_path / "source-jpg-live-no-face"
+    source_dir.mkdir()
+    image_path = source_dir / "IMG_3910.JPG"
+    mov_path = source_dir / ".IMG_3910_1750508738977975.MOV"
+    image_path.write_bytes(b"not real jpg")
+    mov_path.write_bytes(b"mov")
+    _patch_live_photo_capture_days(
+        monkeypatch,
+        {
+            "IMG_3910.JPG": "2025-06-21",
+            ".IMG_3910_1750508738977975.MOV": "2025-06-21",
+        },
+    )
+
+    init_result = init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+    add_result = add_source(workspace, source_dir)
+    assert add_result.returncode == 0
+
+    def _fake_run_scan_worker(**kwargs) -> dict[str, object]:
+        payload = json.loads(Path(kwargs["input_path"]).read_text(encoding="utf-8"))
+        return {
+            "model_root": str(payload["model_root"]),
+            "processed_at": "2026-05-12T00:00:00Z",
+            "items": [
+                {
+                    "absolute_path": str(item["absolute_path"]),
+                    "status": "succeeded",
+                    "image_width": 320,
+                    "image_height": 240,
+                    "face_count": 0,
+                    "detections": [],
+                    "artifacts": [],
+                }
+                for item in payload["items"]
+            ],
+        }
+
+    monkeypatch.setattr(scan_module, "_run_scan_worker", _fake_run_scan_worker)
+
+    scan_module.start_scan(
+        workspace=workspace,
+        batch_size=10,
+        command_args=["scan", "start", "--workspace", str(workspace), "--batch-size", "10"],
+    )
+
+    library_db = workspace / ".hikbox" / "library.db"
+    assert fetch_one(
+        library_db,
+        """
+        SELECT live_photo_mov_path, processing_status
+        FROM assets
+        WHERE file_name = 'IMG_3910.JPG'
+        """,
+    ) == (str(mov_path.resolve()), "succeeded")
+    assert count_rows(library_db, "face_observations") == 0
 
 
 def test_discover_candidates_progress_shows_ready_and_total(
@@ -471,6 +570,15 @@ def test_load_batch_candidates_indexes_live_photo_mov_once_per_directory(
     for image_path in image_paths:
         image_path.write_bytes(b"not real heic")
     (source_dir / ".IMG_0001.MOV").write_bytes(b"mov")
+    _patch_live_photo_capture_days(
+        monkeypatch,
+        {
+            "IMG_0000.heic": "2025-01-01",
+            "IMG_0001.heic": "2025-01-01",
+            ".IMG_0001.MOV": "2025-01-01",
+            "IMG_0002.heic": "2025-01-01",
+        },
+    )
 
     library_db, batch_ids = create_scan_batches_for_paths(
         tmp_path=tmp_path,
@@ -510,6 +618,91 @@ def test_load_batch_candidates_indexes_live_photo_mov_once_per_directory(
     assert candidates[2]["live_photo_mov_path"] is None
 
 
+def test_load_batch_candidates_rejects_same_stem_mov_from_different_capture_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    image_path = source_dir / "IMG_4721.heic"
+    image_path.write_bytes(b"not real heic")
+    mov_path = source_dir / ".IMG_4721_1744532070331526.MOV"
+    mov_path.write_bytes(b"mov")
+    _write_xattr(image_path, "livephoto", b".IMG_4721_1744532070331526.MOV\0")
+    _patch_live_photo_capture_days(
+        monkeypatch,
+        {
+            "IMG_4721.heic": "2022-12-31",
+            ".IMG_4721_1744532070331526.MOV": "2024-05-02",
+        },
+    )
+
+    library_db, batch_ids = create_scan_batches_for_paths(
+        tmp_path=tmp_path,
+        source_dir=source_dir,
+        batches=[[image_path]],
+    )
+
+    monkeypatch.setattr(scan_module, "compute_capture_month", lambda _path: "2022-12")
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    candidates = scan_module._load_batch_candidates(
+        WorkspaceContext(
+            workspace_path=tmp_path,
+            external_root_path=tmp_path,
+            library_db_path=library_db,
+            embedding_db_path=tmp_path / "embedding.db",
+            model_root_path=tmp_path,
+        ),
+        batch_id=batch_ids[0],
+    )
+
+    assert candidates[0]["live_photo_mov_path"] is None
+
+
+def test_load_batch_candidates_matches_jpg_mov_on_same_capture_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    image_path = source_dir / "IMG_0001.JPG"
+    image_path.write_bytes(b"not real jpg")
+    mov_path = source_dir / ".IMG_0001.MOV"
+    mov_path.write_bytes(b"mov")
+    _patch_live_photo_capture_days(
+        monkeypatch,
+        {
+            "IMG_0001.JPG": "2025-05-17",
+            ".IMG_0001.MOV": "2025-05-17",
+        },
+    )
+
+    library_db, batch_ids = create_scan_batches_for_paths(
+        tmp_path=tmp_path,
+        source_dir=source_dir,
+        batches=[[image_path]],
+    )
+
+    monkeypatch.setattr(scan_module, "compute_capture_month", lambda _path: "2025-05")
+
+    from hikbox_pictures.product.sources import WorkspaceContext
+
+    candidates = scan_module._load_batch_candidates(
+        WorkspaceContext(
+            workspace_path=tmp_path,
+            external_root_path=tmp_path,
+            library_db_path=library_db,
+            embedding_db_path=tmp_path / "embedding.db",
+            model_root_path=tmp_path,
+        ),
+        batch_id=batch_ids[0],
+    )
+
+    assert candidates[0]["live_photo_mov_path"] == str(mov_path.resolve())
+
+
 def test_load_batch_candidates_reuses_live_photo_mov_index_across_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -522,6 +715,15 @@ def test_load_batch_candidates_reuses_live_photo_mov_index_across_batches(
     second_image.write_bytes(b"not real heic")
     (source_dir / ".IMG_0001.MOV").write_bytes(b"mov")
     (source_dir / ".IMG_0002.mov").write_bytes(b"mov")
+    _patch_live_photo_capture_days(
+        monkeypatch,
+        {
+            "IMG_0001.heic": "2025-01-01",
+            ".IMG_0001.MOV": "2025-01-01",
+            "IMG_0002.heic": "2025-01-02",
+            ".IMG_0002.mov": "2025-01-02",
+        },
+    )
 
     library_db, batch_ids = create_scan_batches_for_paths(
         tmp_path=tmp_path,

@@ -315,6 +315,106 @@ class TestExportTemplateCreation:
         finally:
             terminate_process(process)
 
+    def test_delete_template_keeps_preview_plan_and_run_history(self, scanned_workspace, tmp_path: Path) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        alex_id = target_person_ids["target_alex"]
+        blair_id = target_person_ids["target_blair"]
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        output_root = str(tmp_path / "export-output")
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _assert_name_ok(base_url, alex_id, "Alex Chen")
+            _assert_name_ok(base_url, blair_id, "Blair Lin")
+
+            result = create_template_via_api(
+                base_url,
+                name="Alex & Blair",
+                person_ids=[alex_id, blair_id],
+                output_root=output_root,
+            )
+            template_id = str(result["template_id"])
+            preview_response = httpx.get(
+                f"{base_url}/api/export-templates/{template_id}/preview",
+                timeout=30.0,
+            )
+            assert preview_response.status_code == 200
+            execute_response = httpx.post(
+                f"{base_url}/api/export-templates/{template_id}/execute",
+                timeout=30.0,
+            )
+            assert execute_response.status_code == 200
+
+            plan_count_before = fetch_all(
+                library_db,
+                "SELECT COUNT(*) FROM export_plan WHERE template_id = ?",
+                (template_id,),
+            )[0][0]
+            run_count_before = fetch_all(
+                library_db,
+                "SELECT COUNT(*) FROM export_run WHERE template_id = ?",
+                (template_id,),
+            )[0][0]
+            delivery_count_before = fetch_all(
+                library_db,
+                """
+                SELECT COUNT(*)
+                FROM export_delivery
+                INNER JOIN export_run ON export_run.run_id = export_delivery.run_id
+                WHERE export_run.template_id = ?
+                """,
+                (template_id,),
+            )[0][0]
+            assert plan_count_before > 0
+            assert run_count_before == 1
+            assert delivery_count_before > 0
+
+            response = httpx.delete(
+                f"{base_url}/api/export-templates/{template_id}",
+                timeout=5.0,
+            )
+
+            assert response.status_code == 204
+            assert list_templates_via_api(base_url) == []
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_template WHERE template_id = ?", (template_id,))[0][0] == 0
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_template_person WHERE template_id = ?", (template_id,))[0][0] == 0
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_plan WHERE template_id = ?", (template_id,))[0][0] == plan_count_before
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_run WHERE template_id = ?", (template_id,))[0][0] == run_count_before
+            assert fetch_all(
+                library_db,
+                """
+                SELECT COUNT(*)
+                FROM export_delivery
+                INNER JOIN export_run ON export_run.run_id = export_delivery.run_id
+                WHERE export_run.template_id = ?
+                """,
+                (template_id,),
+            )[0][0] == delivery_count_before
+        finally:
+            terminate_process(process)
+
+    def test_delete_missing_template_returns_404(self, scanned_workspace) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+
+            response = httpx.delete(
+                f"{base_url}/api/export-templates/missing-template",
+                timeout=5.0,
+            )
+
+            assert response.status_code == 404
+            assert response.json()["detail"] == "模板不存在。"
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_template")[0][0] == 0
+        finally:
+            terminate_process(process)
+
 
 class TestExportTemplateCascadeInvalidation:
     def test_merge_winner_absorption_keeps_template_active(self, scanned_workspace, tmp_path: Path) -> None:

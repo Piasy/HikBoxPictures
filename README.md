@@ -106,6 +106,7 @@ WebUI 以 FastAPI + uvicorn 提供服务，默认绑定 `127.0.0.1`。
 - **预览**：按月份分桶展示命中照片，区分"仅目标人物"（only）和"含其他人"（group）两个分桶。预览结果自动持久化为导出计划（export plan），支持同名文件冲突消解（自动追加 source label 后缀）。
 - **执行导出**：异步后台复制文件到输出目录，按 `{bucket}/{month}/` 目录结构组织。Live Photo 的 MOV 配对文件会同步复制。已存在的文件自动跳过。
 - **导出历史**：查看每次导出的执行状态、复制/跳过计数和逐文件交付详情。
+- **删除模板**：从模板列表中删除不再需要的模板；已有导出计划和运行历史记录会保留。
 - **运行锁**：同一时刻只能有一个导出在运行；导出进行中，人物命名、合并和排除操作会被锁定。服务重启时自动清理残留的 running 状态记录。
 
 ### REST API
@@ -116,6 +117,7 @@ WebUI 同时提供 JSON API 端点：
 |------|------|------|
 | `/api/export-templates` | GET | 列出所有导出模板 |
 | `/api/export-templates` | POST | 创建导出模板 |
+| `/api/export-templates/{id}` | DELETE | 删除导出模板 |
 | `/api/export-templates/{id}/preview` | GET | 获取导出预览 |
 | `/api/export-templates/{id}/execute` | POST | 执行导出（同步） |
 | `/api/export-templates/{id}/runs` | GET | 获取导出历史 |
