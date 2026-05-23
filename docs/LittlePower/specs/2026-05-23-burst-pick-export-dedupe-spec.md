@@ -21,10 +21,11 @@
 
 ### Child Spec A: 模板连拍挑选与全局放弃标记
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: [2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md)
 - Scope: 在 `/exports` 的单个导出模板候选集内识别相似连拍组，提供 WebUI 保留选择和提交入口，写入全局放弃导出标记，并让后续预览、`export_plan` 和执行导出跳过这些 asset。
 - Acceptance summary: 用户从模板列表进入“连拍挑选”，每个相似组至少选择 1 张保留照片后提交；未保留 asset 被持久标记为全局放弃，所有模板后续预览和导出都不再包含它们。
+- Non-blocking concern: code-quality focused re-review 指出 Web 端 active 模板在运行中导出时返回 423 的路径没有单独 Web 回归测试；API 423 与 DB 原子性测试已覆盖核心竞态，当前实现路径稳定，本轮接受该测试覆盖缺口。后续若调整 Web 错误反馈或导出运行锁语义，应补对应 Web 回归测试。
 
 ### Child Spec B: 既有导出目录重复文件清理脚本
 

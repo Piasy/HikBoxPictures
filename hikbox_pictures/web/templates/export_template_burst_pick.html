@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <div class="detail-head">
+    <div>
+      <a class="back-link" href="/exports">返回模板列表</a>
+      {% if error_message %}
+        <h1>连拍挑选</h1>
+      {% else %}
+        <h1>连拍挑选：{{ template.name }}</h1>
+        <p>只显示当前模板候选集中内容相似的照片组。</p>
+      {% endif %}
+    </div>
+    {% if not error_message %}
+      <a class="back-link" href="/exports/{{ template.template_id }}/preview">预览</a>
+    {% endif %}
+  </div>
+
+  {% if form_feedback %}
+    <p
+      class="feedback-banner{% if form_feedback.level == 'error' %} is-error{% endif %}"
+      {% if form_feedback.level == 'error' %}
+        role="alert"
+      {% else %}
+        role="status"
+      {% endif %}
+    >
+      {{ form_feedback.message }}
+    </p>
+  {% endif %}
+
+  {% if not error_message %}
+    {% if burst_pick.skipped_missing_or_unreadable_count %}
+      <p class="feedback-banner is-error" role="alert">
+        已跳过 {{ burst_pick.skipped_missing_or_unreadable_count }} 个缺失或无法读取的候选文件。
+      </p>
+    {% endif %}
+
+    {% if not burst_pick.groups %}
+      <section class="panel detail-shell">
+        <p class="empty-state">当前模板没有可挑选的相似连拍组。</p>
+      </section>
+    {% else %}
+      <form method="post" action="/exports/{{ template.template_id }}/burst-pick" data-burst-pick-form>
+        {% for group in burst_pick.groups %}
+          <section class="panel section-block" data-burst-group-key="{{ group.group_key }}">
+            <div class="section-head">
+              <h2>相似组 {{ loop.index }}</h2>
+            </div>
+            <input type="hidden" name="group_key" value="{{ group.group_key }}">
+            <div class="sample-grid" data-burst-group-assets>
+              {% for asset in group.assets %}
+                <article class="sample-card" data-asset-id="{{ asset.asset_id }}">
+                  {% if asset.context_url %}
+                    <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
+                  {% endif %}
+                  <div class="sample-card-body">
+                    <label>
+                      <input
+                        type="checkbox"
+                        name="keep_asset_id__{{ group.group_key }}"
+                        value="{{ asset.asset_id }}"
+                      >
+                      保留
+                    </label>
+                    <div class="sample-card-meta">
+                      <span data-asset-file-name>{{ asset.file_name }}</span>
+                      <span>{{ asset.bucket }} / {{ asset.month }}</span>
+                      {% if asset.is_live %}
+                        <span class="live-badge" data-live-badge>Live</span>
+                      {% endif %}
+                    </div>
+                  </div>
+                </article>
+              {% endfor %}
+            </div>
+          </section>
+        {% endfor %}
+
+        <div class="form-actions">
+          <button type="submit">保存连拍挑选</button>
+        </div>
+      </form>
+    {% endif %}
+  {% endif %}
+{% endblock %}

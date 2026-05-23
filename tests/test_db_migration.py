@@ -10,7 +10,7 @@ import sys
 
 from tests.helpers import REPO_ROOT, run_hikbox
 
-LATEST_LIBRARY_VERSION = 2
+LATEST_LIBRARY_VERSION = 3
 LATEST_EMBEDDING_VERSION = 1  # No embedding_v2.sql yet; embedding stays at v1
 
 
@@ -661,6 +661,7 @@ def test_migration_sql_files_match_current_versions() -> None:
     sql_dir = REPO_ROOT / "hikbox_pictures" / "product" / "db" / "sql"
     assert (sql_dir / "library_v1.sql").is_file()
     assert (sql_dir / "library_v2.sql").is_file()
+    assert (sql_dir / "library_v3.sql").is_file()
     assert (sql_dir / "embedding_v1.sql").is_file()
-    assert not (sql_dir / "library_v3.sql").exists()
+    assert not (sql_dir / "library_v4.sql").exists()
     assert not (sql_dir / "embedding_v2.sql").exists()

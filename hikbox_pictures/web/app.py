@@ -22,11 +22,13 @@ from hikbox_pictures.product.export_templates import execute_export_async
 from hikbox_pictures.product.export_templates import ExportTemplateError
 from hikbox_pictures.product.export_templates import ExportTemplateValidationError
 from hikbox_pictures.product.export_templates import load_eligible_persons_for_template
+from hikbox_pictures.product.export_templates import load_export_template_burst_pick
 from hikbox_pictures.product.export_templates import load_export_preview_asset_detail
 from hikbox_pictures.product.export_templates import load_export_run_detail
 from hikbox_pictures.product.export_templates import load_export_runs_for_template
 from hikbox_pictures.product.export_templates import load_export_template_detail
 from hikbox_pictures.product.export_templates import load_export_templates_list
+from hikbox_pictures.product.export_templates import submit_export_template_burst_pick
 from hikbox_pictures.product.people_gallery import PeopleGalleryError
 from hikbox_pictures.product.people_gallery import load_assignment_context_path
 from hikbox_pictures.product.people_gallery import load_face_crop_path
@@ -657,6 +659,128 @@ def create_people_gallery_app(
             ],
         }
 
+    @app.get("/exports/{template_id}/burst-pick", response_class=HTMLResponse)
+    def export_template_burst_pick_page(request: Request, template_id: str) -> HTMLResponse:
+        try:
+            template = load_export_template_detail(workspace_context, template_id=template_id)
+            burst_pick = load_export_template_burst_pick(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            return templates.TemplateResponse(
+                request=request,
+                name="export_template_burst_pick.html",
+                context={
+                    "page_title": "连拍挑选",
+                    "error_message": str(exc),
+                    "form_feedback": {"level": "error", "message": str(exc)},
+                },
+                status_code=400,
+            )
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        feedback_code = request.query_params.get("feedback")
+        feedback = None
+        if feedback_code == "saved":
+            feedback = {"level": "info", "message": "连拍挑选已保存。"}
+        return templates.TemplateResponse(
+            request=request,
+            name="export_template_burst_pick.html",
+            context={
+                "page_title": f"连拍挑选：{template.name}",
+                "template": template,
+                "burst_pick": burst_pick,
+                "form_feedback": feedback,
+            },
+        )
+
+    @app.post("/exports/{template_id}/burst-pick", response_class=HTMLResponse)
+    async def export_template_burst_pick_submit(request: Request, template_id: str) -> Response:
+        body = await request.body()
+        form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+        group_keys = [str(value) for value in form_data.get("group_key", [])]
+        submitted_groups = [
+            {
+                "group_key": group_key,
+                "keep_asset_ids": form_data.get(f"keep_asset_id__{group_key}", []),
+            }
+            for group_key in group_keys
+        ]
+        try:
+            submit_export_template_burst_pick(
+                workspace_context,
+                template_id=template_id,
+                submitted_groups=submitted_groups,
+            )
+        except ExportTemplateValidationError as exc:
+            try:
+                template = load_export_template_detail(workspace_context, template_id=template_id)
+                burst_pick = load_export_template_burst_pick(workspace_context, template_id=template_id)
+            except ExportTemplateValidationError as page_exc:
+                return templates.TemplateResponse(
+                    request=request,
+                    name="export_template_burst_pick.html",
+                    context={
+                        "page_title": "连拍挑选",
+                        "error_message": str(page_exc),
+                        "form_feedback": {"level": "error", "message": str(page_exc)},
+                    },
+                    status_code=400,
+                )
+            except ExportTemplateError as page_exc:
+                raise HTTPException(status_code=500, detail=str(page_exc)) from page_exc
+            return templates.TemplateResponse(
+                request=request,
+                name="export_template_burst_pick.html",
+                context={
+                    "page_title": f"连拍挑选：{template.name}",
+                    "template": template,
+                    "burst_pick": burst_pick,
+                    "form_feedback": {"level": "error", "message": str(exc)},
+                },
+                status_code=423 if exc.code == "export_in_progress" else 400,
+            )
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return RedirectResponse(url=f"/exports/{template_id}/burst-pick?feedback=saved", status_code=303)
+
+    @app.get("/api/export-templates/{template_id}/burst-pick")
+    def api_export_template_burst_pick(template_id: str) -> dict[str, object]:
+        try:
+            burst_pick = load_export_template_burst_pick(workspace_context, template_id=template_id)
+        except ExportTemplateValidationError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return _serialize_burst_pick(template_id, burst_pick)
+
+    @app.post("/api/export-templates/{template_id}/burst-pick")
+    async def api_export_template_burst_pick_submit(template_id: str, request: Request) -> dict[str, object]:
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="请求 JSON 无效。") from exc
+        groups = payload.get("groups") if isinstance(payload, dict) else None
+        if not isinstance(groups, list):
+            raise HTTPException(status_code=400, detail="groups 必须是数组。")
+        try:
+            result = submit_export_template_burst_pick(
+                workspace_context,
+                template_id=template_id,
+                submitted_groups=groups,
+            )
+        except ExportTemplateValidationError as exc:
+            if exc.code == "export_in_progress":
+                raise HTTPException(status_code=423, detail=str(exc)) from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return {
+            "abandoned_asset_ids": result.abandoned_asset_ids,
+            "kept_asset_ids": result.kept_asset_ids,
+            "created_count": result.created_count,
+            "already_abandoned_count": result.already_abandoned_count,
+        }
+
     @app.get("/exports/{template_id}/preview/{asset_id}", response_class=HTMLResponse)
     def export_preview_asset_detail_page(
         request: Request, template_id: str, asset_id: int,
@@ -908,6 +1032,48 @@ def create_people_gallery_app(
         }
 
     return app
+
+
+def _serialize_burst_pick(template_id: str, burst_pick: object) -> dict[str, object]:
+    return {
+        "template_id": template_id,
+        "groups": [
+            {
+                "group_key": group.group_key,
+                "assets": [
+                    {
+                        "asset_id": asset.asset_id,
+                        "file_name": asset.file_name,
+                        "bucket": asset.bucket,
+                        "month": asset.month,
+                        "context_url": asset.context_url,
+                        "is_live": asset.is_live,
+                    }
+                    for asset in group.assets
+                ],
+                "match_evidence": {
+                    "algorithm": "visual_fingerprint_v1",
+                    "edges": [
+                        {
+                            "asset_ids": list(edge.asset_ids),
+                            "threshold": edge.threshold,
+                            "metadata_assisted": edge.metadata_assisted,
+                            "dhash_hamming": edge.dhash_hamming,
+                            "luminance_cosine": edge.luminance_cosine,
+                            "color_histogram_intersection": edge.color_histogram_intersection,
+                            "capture_time_delta_seconds": edge.capture_time_delta_seconds,
+                            "normalized_device_match": edge.normalized_device_match,
+                        }
+                        for edge in group.edges
+                    ],
+                },
+            }
+            for group in burst_pick.groups
+        ],
+        "diagnostics": {
+            "skipped_missing_or_unreadable_count": burst_pick.skipped_missing_or_unreadable_count,
+        },
+    }
 
 
 def _get_name_feedback(request: Request) -> dict[str, str] | None:

@@ -13,7 +13,7 @@
 
 ## Feature Slice 1: 模板候选集相似连拍分组
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

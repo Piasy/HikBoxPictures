@@ -2,13 +2,27 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+import math
+import os
 import logging
 import shutil
 import sqlite3
 import subprocess
 import threading
 import uuid
+
+from PIL import ExifTags
+from PIL import Image
+from PIL import ImageOps
+
+try:
+    import pillow_heif
+
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
 
 from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
@@ -123,6 +137,70 @@ class PreviewResult:
     only_count: int
     group_count: int
     month_buckets: list[PreviewMonthBucket]
+
+
+@dataclass(frozen=True)
+class BurstPickAsset:
+    asset_id: int
+    file_name: str
+    bucket: str
+    month: str
+    context_url: str
+    is_live: bool
+
+
+@dataclass(frozen=True)
+class BurstPickEdge:
+    asset_ids: tuple[int, int]
+    threshold: str
+    metadata_assisted: bool
+    dhash_hamming: int
+    luminance_cosine: float
+    color_histogram_intersection: float
+    capture_time_delta_seconds: float | None
+    normalized_device_match: bool | None
+
+
+@dataclass(frozen=True)
+class BurstPickGroup:
+    group_key: str
+    assets: list[BurstPickAsset]
+    edges: list[BurstPickEdge]
+
+
+@dataclass(frozen=True)
+class BurstPickResult:
+    template_id: str
+    groups: list[BurstPickGroup]
+    skipped_missing_or_unreadable_count: int
+
+
+@dataclass(frozen=True)
+class BurstPickSubmitResult:
+    abandoned_asset_ids: list[int]
+    kept_asset_ids: list[int]
+    created_count: int
+    already_abandoned_count: int
+
+
+@dataclass(frozen=True)
+class _BurstCandidateAsset:
+    asset_id: int
+    file_name: str
+    absolute_path: str
+    bucket: str
+    month: str
+    context_url: str
+    is_live: bool
+
+
+@dataclass(frozen=True)
+class _VisualFingerprint:
+    dhash_bits: tuple[int, ...]
+    luminance_vector: tuple[float, ...]
+    color_histogram: tuple[float, ...]
+    capture_time: datetime | None
+    normalized_device: tuple[str, str] | None
 
 
 @dataclass(frozen=True)
@@ -638,9 +716,11 @@ def compute_export_preview(
               pfa.id AS assignment_id
             FROM asset_has_all aha
             INNER JOIN assets a ON a.id = aha.asset_id
+            LEFT JOIN export_abandoned_asset eaa ON eaa.asset_id = a.id
             INNER JOIN face_observations fo ON fo.asset_id = a.id
             LEFT JOIN person_face_assignments pfa
               ON pfa.face_observation_id = fo.id AND pfa.active = 1
+            WHERE eaa.asset_id IS NULL
             ORDER BY a.id, fo.id
             """,
             (template_id,),
@@ -917,6 +997,484 @@ def _persist_export_plan(
         connection.close()
 
 
+_EXIF_NAME_BY_ID = {value: key for key, value in ExifTags.TAGS.items()}
+
+
+def load_export_template_burst_pick(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+) -> BurstPickResult:
+    candidates = _load_burst_pick_candidates(workspace_context, template_id=template_id)
+    fingerprints: dict[int, _VisualFingerprint] = {}
+    display_assets: dict[int, BurstPickAsset] = {}
+    skipped_count = 0
+
+    for candidate in candidates:
+        try:
+            fingerprint = _compute_visual_fingerprint(Path(candidate.absolute_path))
+        except (OSError, ValueError):
+            skipped_count += 1
+            continue
+        fingerprints[candidate.asset_id] = fingerprint
+        display_assets[candidate.asset_id] = BurstPickAsset(
+            asset_id=candidate.asset_id,
+            file_name=candidate.file_name,
+            bucket=candidate.bucket,
+            month=candidate.month,
+            context_url=candidate.context_url,
+            is_live=candidate.is_live,
+        )
+
+    edges: list[BurstPickEdge] = []
+    asset_ids = sorted(fingerprints)
+    for index, first_id in enumerate(asset_ids):
+        for second_id in asset_ids[index + 1:]:
+            edge = _build_visual_edge(
+                first_id,
+                fingerprints[first_id],
+                second_id,
+                fingerprints[second_id],
+            )
+            if edge is not None:
+                edges.append(edge)
+
+    groups = _connected_burst_groups(
+        display_assets=display_assets,
+        edges=edges,
+    )
+    return BurstPickResult(
+        template_id=template_id,
+        groups=groups,
+        skipped_missing_or_unreadable_count=skipped_count,
+    )
+
+
+def submit_export_template_burst_pick(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+    submitted_groups: list[dict[str, object]],
+) -> BurstPickSubmitResult:
+    current = load_export_template_burst_pick(workspace_context, template_id=template_id)
+    current_by_key = {group.group_key: group for group in current.groups}
+    submitted_by_key: dict[str, set[int]] = {}
+
+    for submitted_group in submitted_groups:
+        if not isinstance(submitted_group, dict):
+            raise ExportTemplateValidationError("连拍组提交格式无效。", code="burst_group_invalid")
+        group_key = str(submitted_group.get("group_key", ""))
+        if not group_key:
+            raise ExportTemplateValidationError("提交包含空的连拍组标识。", code="burst_group_key_blank")
+        if group_key in submitted_by_key:
+            raise ExportTemplateValidationError("提交包含重复的连拍组。", code="burst_group_duplicate")
+        raw_keep_ids = submitted_group.get("keep_asset_ids", [])
+        if not isinstance(raw_keep_ids, list):
+            raise ExportTemplateValidationError("保留照片格式无效。", code="burst_keep_invalid")
+        try:
+            keep_ids = {int(asset_id) for asset_id in raw_keep_ids}
+        except (TypeError, ValueError) as exc:
+            raise ExportTemplateValidationError("保留照片包含无效 asset。", code="burst_keep_invalid") from exc
+        submitted_by_key[group_key] = keep_ids
+
+    if set(submitted_by_key) != set(current_by_key):
+        raise ExportTemplateValidationError("连拍组已变化，请刷新后重试。", code="burst_groups_stale")
+
+    kept_asset_ids: set[int] = set()
+    abandoned_by_asset: dict[int, str] = {}
+    for group_key, group in current_by_key.items():
+        keep_ids = submitted_by_key[group_key]
+        group_asset_ids = {asset.asset_id for asset in group.assets}
+        if not keep_ids:
+            raise ExportTemplateValidationError(
+                "每个相似组至少保留 1 张照片。", code="burst_keep_empty"
+            )
+        if not keep_ids.issubset(group_asset_ids):
+            raise ExportTemplateValidationError("保留照片不属于当前连拍组。", code="burst_keep_outside_group")
+        kept_asset_ids.update(keep_ids)
+        for asset_id in sorted(group_asset_ids - keep_ids):
+            abandoned_by_asset[asset_id] = group_key
+
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        assert_no_running_export(workspace_context, connection=connection)
+        abandoned_asset_ids = sorted(abandoned_by_asset)
+        already_abandoned_count = 0
+        if abandoned_asset_ids:
+            placeholders = ", ".join("?" for _ in abandoned_asset_ids)
+            already_abandoned_count = int(
+                connection.execute(
+                    f"SELECT COUNT(*) FROM export_abandoned_asset WHERE asset_id IN ({placeholders})",
+                    tuple(abandoned_asset_ids),
+                ).fetchone()[0]
+            )
+
+        created_count = 0
+        now = utc_now_text()
+        for asset_id in abandoned_asset_ids:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO export_abandoned_asset
+                  (asset_id, triggered_template_id, group_key, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (asset_id, template_id, abandoned_by_asset[asset_id], now),
+            )
+            created_count += int(cursor.rowcount)
+
+        if abandoned_asset_ids:
+            placeholders = ", ".join("?" for _ in abandoned_asset_ids)
+            connection.execute(
+                f"DELETE FROM export_plan WHERE asset_id IN ({placeholders})",
+                tuple(abandoned_asset_ids),
+            )
+
+        connection.commit()
+    except ExportTemplateValidationError:
+        connection.rollback()
+        raise
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise ExportTemplateError("连拍挑选保存失败。") from exc
+    finally:
+        connection.close()
+
+    return BurstPickSubmitResult(
+        abandoned_asset_ids=sorted(abandoned_by_asset),
+        kept_asset_ids=sorted(kept_asset_ids),
+        created_count=created_count,
+        already_abandoned_count=already_abandoned_count,
+    )
+
+
+def _load_burst_pick_candidates(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+) -> list[_BurstCandidateAsset]:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        template_row = connection.execute(
+            """
+            SELECT template_id, status
+            FROM export_template
+            WHERE template_id = ?
+            """,
+            (template_id,),
+        ).fetchone()
+        if template_row is None:
+            raise ExportTemplateValidationError("模板不存在。", code="template_not_found")
+        if str(template_row["status"]) != "active":
+            raise ExportTemplateValidationError("模板已失效，无法连拍挑选。", code="template_invalid")
+
+        person_rows = connection.execute(
+            "SELECT person_id FROM export_template_person WHERE template_id = ?",
+            (template_id,),
+        ).fetchall()
+        selected_person_ids = [str(r["person_id"]) for r in person_rows]
+        selected_person_set = set(selected_person_ids)
+        if not selected_person_ids:
+            raise ExportTemplateValidationError("模板未关联任何人物。", code="template_empty")
+
+        rows = connection.execute(
+            """
+            WITH selected_persons AS (
+              SELECT person_id FROM export_template_person WHERE template_id = ?
+            ),
+            asset_has_all AS (
+              SELECT fo.asset_id
+              FROM face_observations fo
+              INNER JOIN person_face_assignments pfa
+                ON pfa.face_observation_id = fo.id AND pfa.active = 1
+              INNER JOIN selected_persons sp ON sp.person_id = pfa.person_id
+              GROUP BY fo.asset_id
+              HAVING COUNT(DISTINCT pfa.person_id) = (SELECT COUNT(*) FROM selected_persons)
+            )
+            SELECT
+              a.id AS asset_id,
+              a.file_name,
+              a.capture_month,
+              a.absolute_path,
+              a.live_photo_mov_path,
+              fo.id AS face_id,
+              fo.bbox_x1,
+              fo.bbox_y1,
+              fo.bbox_x2,
+              fo.bbox_y2,
+              pfa.person_id,
+              pfa.id AS assignment_id
+            FROM asset_has_all aha
+            INNER JOIN assets a ON a.id = aha.asset_id
+            LEFT JOIN export_abandoned_asset eaa ON eaa.asset_id = a.id
+            INNER JOIN face_observations fo ON fo.asset_id = a.id
+            LEFT JOIN person_face_assignments pfa
+              ON pfa.face_observation_id = fo.id AND pfa.active = 1
+            WHERE eaa.asset_id IS NULL
+            ORDER BY a.id, fo.id
+            """,
+            (template_id,),
+        ).fetchall()
+    except ExportTemplateValidationError:
+        raise
+    except sqlite3.Error as exc:
+        raise ExportTemplateError("连拍候选读取失败。") from exc
+    finally:
+        connection.close()
+
+    assets_data: dict[int, dict[str, object]] = {}
+    for row in rows:
+        asset_id = int(row["asset_id"])
+        if asset_id not in assets_data:
+            assets_data[asset_id] = {
+                "asset_id": asset_id,
+                "file_name": str(row["file_name"]),
+                "capture_month": str(row["capture_month"]) if row["capture_month"] else "",
+                "absolute_path": str(row["absolute_path"]),
+                "live_photo_mov_path": row["live_photo_mov_path"],
+                "faces": [],
+            }
+        area = float(row["bbox_x2"] - row["bbox_x1"]) * float(row["bbox_y2"] - row["bbox_y1"])
+        assets_data[asset_id]["faces"].append({
+            "area": area,
+            "person_id": str(row["person_id"]) if row["person_id"] is not None else None,
+            "assignment_id": int(row["assignment_id"]) if row["assignment_id"] is not None else None,
+        })
+
+    candidates: list[_BurstCandidateAsset] = []
+    for asset in assets_data.values():
+        faces = asset["faces"]
+        selected_max_areas = {}
+        for person_id in selected_person_ids:
+            areas = [f["area"] for f in faces if f["person_id"] == person_id]
+            if areas:
+                selected_max_areas[person_id] = max(areas)
+        if len(selected_max_areas) != len(selected_person_ids):
+            continue
+
+        selected_min_area = min(selected_max_areas.values())
+        threshold = selected_min_area / 4.0
+        bucket = "only"
+        for face in faces:
+            if face["area"] >= threshold and face["person_id"] not in selected_person_set:
+                bucket = "group"
+                break
+
+        rep_person_id = min(selected_person_ids)
+        rep_assignment_id = None
+        for face in faces:
+            if face["person_id"] == rep_person_id and face["assignment_id"] is not None:
+                rep_assignment_id = face["assignment_id"]
+                break
+
+        month = str(asset["capture_month"]) if asset["capture_month"] else "unknown-date"
+        candidates.append(
+            _BurstCandidateAsset(
+                asset_id=int(asset["asset_id"]),
+                file_name=str(asset["file_name"]),
+                absolute_path=str(asset["absolute_path"]),
+                bucket=bucket,
+                month=month,
+                context_url=f"/images/assignments/{rep_assignment_id}/context" if rep_assignment_id else "",
+                is_live=bool(asset.get("live_photo_mov_path")),
+            )
+        )
+    return sorted(candidates, key=lambda candidate: candidate.asset_id)
+
+
+def _compute_visual_fingerprint(path: Path) -> _VisualFingerprint:
+    if os.environ.get("HIKBOX_TEST_BURST_PICK_FAIL_FEATURES") == "1":
+        raise ExportTemplateError("视觉特征准备失败。")
+    if not path.is_file():
+        raise FileNotFoundError(str(path))
+
+    try:
+        raw_image = Image.open(path)
+        exif = raw_image.getexif()
+        image = ImageOps.exif_transpose(raw_image).convert("RGB")
+    except Exception as exc:
+        raise ValueError(f"图片无法解码：{path}") from exc
+
+    luminance = image.convert("L")
+    horizontal = luminance.resize((9, 8), Image.Resampling.BILINEAR)
+    horizontal_pixels = list(horizontal.getdata())
+    dhash_bits: list[int] = []
+    for y in range(8):
+        row = y * 9
+        for x in range(8):
+            dhash_bits.append(1 if horizontal_pixels[row + x] > horizontal_pixels[row + x + 1] else 0)
+
+    vertical = luminance.resize((8, 9), Image.Resampling.BILINEAR)
+    vertical_pixels = list(vertical.getdata())
+    for y in range(8):
+        for x in range(8):
+            dhash_bits.append(1 if vertical_pixels[y * 8 + x] > vertical_pixels[(y + 1) * 8 + x] else 0)
+
+    thumbnail_pixels = list(luminance.resize((16, 16), Image.Resampling.BILINEAR).getdata())
+    mean_value = sum(thumbnail_pixels) / len(thumbnail_pixels)
+    centered = [float(value) - mean_value for value in thumbnail_pixels]
+    norm = math.sqrt(sum(value * value for value in centered))
+    luminance_vector = tuple(0.0 for _ in centered) if norm == 0 else tuple(value / norm for value in centered)
+
+    histogram = [0 for _ in range(64)]
+    for red, green, blue in image.getdata():
+        histogram[(red // 64) * 16 + (green // 64) * 4 + (blue // 64)] += 1
+    total_pixels = sum(histogram)
+    color_histogram = tuple(value / total_pixels for value in histogram)
+
+    return _VisualFingerprint(
+        dhash_bits=tuple(dhash_bits),
+        luminance_vector=luminance_vector,
+        color_histogram=color_histogram,
+        capture_time=_extract_capture_time(exif),
+        normalized_device=_extract_normalized_device(exif),
+    )
+
+
+def _extract_capture_time(exif: object) -> datetime | None:
+    for tag_name in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
+        tag_id = _EXIF_NAME_BY_ID.get(tag_name)
+        if tag_id is None:
+            continue
+        value = exif.get(tag_id)
+        if not value:
+            continue
+        text = str(value).strip()
+        for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                pass
+    return None
+
+
+def _extract_normalized_device(exif: object) -> tuple[str, str] | None:
+    make_tag = _EXIF_NAME_BY_ID.get("Make")
+    model_tag = _EXIF_NAME_BY_ID.get("Model")
+    if make_tag is None or model_tag is None:
+        return None
+    make = _normalize_device_part(exif.get(make_tag))
+    model = _normalize_device_part(exif.get(model_tag))
+    if not make or not model:
+        return None
+    return (make, model)
+
+
+def _normalize_device_part(value: object) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _build_visual_edge(
+    first_id: int,
+    first: _VisualFingerprint,
+    second_id: int,
+    second: _VisualFingerprint,
+) -> BurstPickEdge | None:
+    dhash_hamming = sum(a != b for a, b in zip(first.dhash_bits, second.dhash_bits))
+    luminance_cosine = _luminance_cosine(first.luminance_vector, second.luminance_vector)
+    color_intersection = sum(min(a, b) for a, b in zip(first.color_histogram, second.color_histogram))
+
+    capture_delta: float | None = None
+    if first.capture_time is not None and second.capture_time is not None:
+        capture_delta = abs((first.capture_time - second.capture_time).total_seconds())
+
+    normalized_device_match: bool | None = None
+    if first.normalized_device is not None and second.normalized_device is not None:
+        normalized_device_match = first.normalized_device == second.normalized_device
+
+    threshold_name: str | None = None
+    metadata_assisted = False
+    if dhash_hamming <= 10 and color_intersection >= 0.88:
+        threshold_name = "strict"
+    elif dhash_hamming <= 18 and luminance_cosine >= 0.96 and color_intersection >= 0.80:
+        threshold_name = "resave_or_light_edit"
+    elif (
+        normalized_device_match is True
+        and capture_delta is not None
+        and capture_delta <= 10
+        and dhash_hamming <= 24
+        and luminance_cosine >= 0.94
+        and color_intersection >= 0.72
+    ):
+        threshold_name = "metadata_assisted"
+        metadata_assisted = True
+
+    if threshold_name is None:
+        return None
+    asset_ids = tuple(sorted((first_id, second_id)))
+    return BurstPickEdge(
+        asset_ids=(int(asset_ids[0]), int(asset_ids[1])),
+        threshold=threshold_name,
+        metadata_assisted=metadata_assisted,
+        dhash_hamming=int(dhash_hamming),
+        luminance_cosine=float(luminance_cosine),
+        color_histogram_intersection=float(color_intersection),
+        capture_time_delta_seconds=capture_delta,
+        normalized_device_match=normalized_device_match,
+    )
+
+
+def _luminance_cosine(first: tuple[float, ...], second: tuple[float, ...]) -> float:
+    first_zero = all(value == 0 for value in first)
+    second_zero = all(value == 0 for value in second)
+    if first_zero and second_zero:
+        return 1.0
+    if first_zero or second_zero:
+        return 0.0
+    return sum(a * b for a, b in zip(first, second))
+
+
+def _connected_burst_groups(
+    *,
+    display_assets: dict[int, BurstPickAsset],
+    edges: list[BurstPickEdge],
+) -> list[BurstPickGroup]:
+    parent = {asset_id: asset_id for asset_id in display_assets}
+
+    def find(asset_id: int) -> int:
+        while parent[asset_id] != asset_id:
+            parent[asset_id] = parent[parent[asset_id]]
+            asset_id = parent[asset_id]
+        return asset_id
+
+    def union(first_id: int, second_id: int) -> None:
+        first_root = find(first_id)
+        second_root = find(second_id)
+        if first_root != second_root:
+            parent[max(first_root, second_root)] = min(first_root, second_root)
+
+    for edge in edges:
+        union(edge.asset_ids[0], edge.asset_ids[1])
+
+    component_assets: dict[int, list[int]] = defaultdict(list)
+    for asset_id in sorted(display_assets):
+        component_assets[find(asset_id)].append(asset_id)
+
+    edges_by_component: dict[int, list[BurstPickEdge]] = defaultdict(list)
+    for edge in edges:
+        edges_by_component[find(edge.asset_ids[0])].append(edge)
+
+    groups: list[BurstPickGroup] = []
+    for asset_ids in component_assets.values():
+        if len(asset_ids) < 2:
+            continue
+        sorted_asset_ids = sorted(asset_ids)
+        group_edges = sorted(
+            edges_by_component[find(sorted_asset_ids[0])],
+            key=lambda edge: (edge.asset_ids[0], edge.asset_ids[1]),
+        )
+        groups.append(
+            BurstPickGroup(
+                group_key="g_" + "_".join(str(asset_id) for asset_id in sorted_asset_ids),
+                assets=[display_assets[asset_id] for asset_id in sorted_asset_ids],
+                edges=group_edges,
+            )
+        )
+    return sorted(groups, key=lambda group: group.assets[0].asset_id)
+
+
 _export_log = logging.getLogger("hikbox_pictures.export")
 
 
@@ -1007,7 +1565,9 @@ def _run_export(
                   a.live_photo_mov_path
                 FROM export_plan ep
                 INNER JOIN assets a ON a.id = ep.asset_id
+                LEFT JOIN export_abandoned_asset eaa ON eaa.asset_id = ep.asset_id
                 WHERE ep.template_id = ?
+                  AND eaa.asset_id IS NULL
                 ORDER BY ep.asset_id
                 """,
                 (template_id,),

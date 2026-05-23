@@ -38,6 +38,8 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
   `schema_meta`、`library_sources`（含 `scan_state` 列）、`assets`（含 `scan_retry_count` 列）、`scan_sessions`、`scan_batches`、`scan_batch_items`、`face_observations`、`person`、`person_name_events`、`assignment_runs`、`person_face_assignments`、`person_face_exclusions`、`person_merge_operations`、`person_merge_operation_assignments`、`export_template`、`export_template_person`、`export_run`、`export_plan`、`export_delivery`（含 `plan_id` 列）及对应索引。
 - `library_v2.sql`
   移除 `assets.file_fingerprint` 列，保留既有 asset 数据与索引。
+- `library_v3.sql`
+  新增 `export_abandoned_asset` 表，记录工作区级全局放弃导出标记；每个 asset 至多一条标记，并记录触发模板、连拍组标识和创建时间。
 
 #### `embedding.db`
 
@@ -60,7 +62,7 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 
 | 数据库 | 文件 | 当前版本 |
 |--------|------|----------|
-| `library.db` | `library_v2.sql` | 2 |
+| `library.db` | `library_v3.sql` | 3 |
 | `embedding.db` | `embedding_v1.sql` | 1 |
 
 ### 0.6 新增 Migration 约定
@@ -765,9 +767,44 @@ CREATE INDEX idx_export_plan_template_bucket_month
 
 - `compute_export_preview` 预览时写入，`(template_id, asset_id)` 唯一约束保证幂等 upsert。
 - 同一模板下不同源目录的同名文件通过 `__<source_label>` 后缀消解冲突；同标签时追加 `-N` 数字后缀。
-- `execute_export` 从 `export_plan` 读取计划，不再重新计算预览。
+- `compute_export_preview` 写入计划前会跳过 `export_abandoned_asset` 中的全局放弃 asset。
+- `execute_export` 从 `export_plan` 读取计划，不再重新计算预览；执行时仍会防御性跳过已经出现在 `export_abandoned_asset` 中的 asset，避免旧计划再次导出已放弃照片。
 
-### 2.19 `export_delivery`
+### 2.19 `export_abandoned_asset`
+
+```sql
+CREATE TABLE export_abandoned_asset (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  triggered_template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  group_key TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(asset_id)
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_abandoned_asset_template
+  ON export_abandoned_asset(triggered_template_id, created_at);
+```
+
+字段语义：
+
+- `id`：放弃标记自增 ID。
+- `asset_id`：被全局放弃导出的 asset；唯一约束保证同一 asset 不会重复标记。
+- `triggered_template_id`：触发该标记的导出模板。
+- `group_key`：提交时对应的连拍相似组标识，用于追溯来源。
+- `created_at`：标记创建时间，带 `Z` 后缀的 ISO-8601 UTC 时间字符串。
+
+运行时语义：
+
+- 标记只影响导出候选、预览、`export_plan` 和实际执行导出；不会删除源文件、`assets`、人脸样本或历史 `export_delivery`。
+- 连拍挑选成功提交后，仅把未保留 asset 写入该表；重复 asset 使用唯一约束保持幂等。
+- 所有模板的后续 preview 和 execute 都必须跳过该表中的 asset。
+
+### 2.20 `export_delivery`
 
 ```sql
 CREATE TABLE export_delivery (
