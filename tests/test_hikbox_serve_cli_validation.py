@@ -89,6 +89,30 @@ def test_serve_uses_204_as_default_person_detail_page_size(
     ]
 
 
+def test_serve_prints_access_url_when_started(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    init_result = init_workspace(workspace, external_root)
+    assert init_result.returncode == 0
+
+    port = find_free_port()
+    process = spawn_hikbox(
+        "serve",
+        "--workspace",
+        str(workspace),
+        "--port",
+        str(port),
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        wait_for_http_ready(f"{base_url}/")
+    finally:
+        stdout_text, stderr_text = terminate_process(process)
+
+    assert f"访问地址: {base_url}" in stdout_text
+    assert "Traceback" not in stderr_text
+
+
 def test_serve_rejects_invalid_person_detail_page_size(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     external_root = tmp_path / "external-root"

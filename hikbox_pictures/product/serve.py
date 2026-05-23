@@ -43,6 +43,7 @@ def serve_workspace(
                 workspace_context=workspace_context,
                 person_detail_page_size=person_detail_page_size,
             )
+            print(f"访问地址: http://127.0.0.1:{port}", flush=True)
             uvicorn.run(
                 app,
                 host="127.0.0.1",
