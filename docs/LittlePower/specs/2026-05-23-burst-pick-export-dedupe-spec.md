@@ -34,8 +34,16 @@
 - Scope: 新增默认 dry-run 的维护脚本，只依据全局放弃标记与 `export_delivery`/`export_plan` 精确定位某个既有导出根目录下应清理的静态图和已导出的 Live Photo 配对 MOV，并在显式 `--apply` 时移动到隔离目录。
 - Acceptance summary: 用户对指定导出根目录运行脚本时，dry-run 能展示完整移动计划且不改文件；加 `--apply` 后仅把 DB 精确定位到的 abandoned 导出文件按原相对结构移动到隔离目录，不删除文件、不改 DB、不按文件名猜测。
 
+### Child Spec C: 模板连拍多特征召回增强
+
+- [ ] Implementation status: Not done
+- Spec: [2026-05-23-burst-pick-export-dedupe-child-c-multifeature-recall-spec.md](./2026-05-23-burst-pick-export-dedupe-child-c-multifeature-recall-spec.md)
+- Scope: 在 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 已交付的模板连拍挑选基础上，把相似分组算法升级为多特征规则召回，覆盖重存、轻编辑、轻裁剪、局部变化和短时间连续拍摄，同时用强边聚类与后验校验控制链式误聚。Child C 交付后，仅替换 Child A 中 `visual_fingerprint_v1` 和 `groups[].match_evidence.edges[]` 相关 API evidence 合同；异步任务、DB 持久化 run/group、原图幻灯片、每组独立提交、全局放弃导出标记、后续 preview/export 跳过等交互和数据生命周期语义继续继承 Child A。
+- Acceptance summary: 用户刷新连拍挑选页后，新算法后台 run 能持久化包含 `global pHash`、`center pHash`、`block pHash` 等证据的 `strong_edges[]` 相似组；明显相似照片更容易被召回，文件名相邻或时间接近但内容不同的照片不会入组，页面仍可按单组提交保留选择。最终 `GET /api/export-templates/{template_id}/burst-pick` evidence schema 以 Child C 为准，不再要求同时满足 Child A 的 v1 `edges[]` schema。
+
 ## Candidate Future Split Specs
 
+- 图像 embedding 召回增强：在多特征规则之后，引入 Vision FeaturePrint 或本地图像 embedding 作为复杂裁剪、构图变化和同场景相似的补充召回入口，并单独定义模型来源、缓存格式、阈值标定、性能预算和误聚控制。
 - 自动推荐保留照片：在相似组内自动推荐最佳保留项，但仍需用户确认后才写入放弃标记。
 - 放弃标记撤销或管理页：提供查看、撤销或批量管理全局放弃标记的入口。
 - 全工作区相似照片整理：脱离导出模板候选集，面向整个 workspace 做相似照片整理。
