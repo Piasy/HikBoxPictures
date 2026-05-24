@@ -21,6 +21,7 @@ from hikbox_pictures.product.export_templates import execute_export
 from hikbox_pictures.product.export_templates import execute_export_async
 from hikbox_pictures.product.export_templates import ExportTemplateError
 from hikbox_pictures.product.export_templates import ExportTemplateValidationError
+from hikbox_pictures.product.export_templates import load_asset_original_path
 from hikbox_pictures.product.export_templates import load_eligible_persons_for_template
 from hikbox_pictures.product.export_templates import load_export_template_burst_pick
 from hikbox_pictures.product.export_templates import load_export_preview_asset_detail
@@ -433,6 +434,19 @@ def create_people_gallery_app(
             raise HTTPException(status_code=404, detail="未找到人脸裁切图。")
         return FileResponse(crop_path)
 
+    @app.get("/images/assets/{asset_id}/original")
+    def asset_original_image(asset_id: int) -> FileResponse:
+        try:
+            original_path = load_asset_original_path(
+                workspace_context,
+                asset_id=asset_id,
+            )
+        except ExportTemplateError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if original_path is None or not original_path.is_file():
+            raise HTTPException(status_code=404, detail="未找到原图。")
+        return FileResponse(original_path, media_type=_image_media_type(original_path))
+
     @app.get("/exports", response_class=HTMLResponse)
     def exports_list(request: Request) -> HTMLResponse:
         try:
@@ -697,13 +711,12 @@ def create_people_gallery_app(
     async def export_template_burst_pick_submit(request: Request, template_id: str) -> Response:
         body = await request.body()
         form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
-        group_keys = [str(value) for value in form_data.get("group_key", [])]
+        group_key = str(form_data.get("group_key", [""])[0])
         submitted_groups = [
             {
                 "group_key": group_key,
                 "keep_asset_ids": form_data.get(f"keep_asset_id__{group_key}", []),
             }
-            for group_key in group_keys
         ]
         try:
             submit_export_template_burst_pick(
@@ -759,9 +772,13 @@ def create_people_gallery_app(
             payload = await request.json()
         except Exception as exc:
             raise HTTPException(status_code=400, detail="请求 JSON 无效。") from exc
-        groups = payload.get("groups") if isinstance(payload, dict) else None
-        if not isinstance(groups, list):
-            raise HTTPException(status_code=400, detail="groups 必须是数组。")
+        groups: list[dict[str, object]]
+        if isinstance(payload, dict) and isinstance(payload.get("groups"), list):
+            groups = payload["groups"]
+        elif isinstance(payload, dict):
+            groups = [payload]
+        else:
+            raise HTTPException(status_code=400, detail="请求体必须是对象。")
         try:
             result = submit_export_template_burst_pick(
                 workspace_context,
@@ -1037,6 +1054,8 @@ def create_people_gallery_app(
 def _serialize_burst_pick(template_id: str, burst_pick: object) -> dict[str, object]:
     return {
         "template_id": template_id,
+        "run_id": burst_pick.run_id,
+        "status": burst_pick.status,
         "groups": [
             {
                 "group_key": group.group_key,
@@ -1047,6 +1066,7 @@ def _serialize_burst_pick(template_id: str, burst_pick: object) -> dict[str, obj
                         "bucket": asset.bucket,
                         "month": asset.month,
                         "context_url": asset.context_url,
+                        "original_url": asset.original_url,
                         "is_live": asset.is_live,
                     }
                     for asset in group.assets
@@ -1073,6 +1093,11 @@ def _serialize_burst_pick(template_id: str, burst_pick: object) -> dict[str, obj
         "diagnostics": {
             "skipped_missing_or_unreadable_count": burst_pick.skipped_missing_or_unreadable_count,
         },
+        "progress": {
+            "total_candidate_count": burst_pick.total_candidate_count,
+            "processed_candidate_count": burst_pick.processed_candidate_count,
+        },
+        "error_message": burst_pick.error_message,
     }
 
 
@@ -1102,3 +1127,12 @@ def _get_exports_feedback(request: Request) -> dict[str, str] | None:
     if feedback_code is None:
         return None
     return EXPORTS_FEEDBACK_MESSAGES.get(feedback_code)
+
+
+def _image_media_type(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix == ".heic":
+        return "image/heic"
+    if suffix == ".heif":
+        return "image/heif"
+    return None

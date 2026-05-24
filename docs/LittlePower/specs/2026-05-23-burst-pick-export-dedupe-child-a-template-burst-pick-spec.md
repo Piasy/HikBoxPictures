@@ -36,20 +36,22 @@
 
 ### Public Interface
 
-- Web 页面：`GET /exports/{template_id}/burst-pick`，展示该模板的相似连拍组。
-- API：`GET /api/export-templates/{template_id}/burst-pick`，返回相同分组数据，至少包含 `template_id`、`groups[]`、每组稳定且 form-safe 的 `group_key`、每张照片的 `asset_id`、`file_name`、`bucket`、`month`、`context_url`、`is_live`、`match_evidence` 和 `diagnostics.skipped_missing_or_unreadable_count`。`group_key` 必须是非空 ASCII 字符串，只使用字母、数字、`-`、`_`，不能包含空白、斜杠、括号、`&`、`=` 或其他会破坏表单字段名的字符。`groups[].match_evidence` 固定为对象：`{"algorithm":"visual_fingerprint_v1","edges":[...]}`。`edges[]` 按 `asset_ids[0]`、`asset_ids[1]` 升序排序；每个 edge 固定包含 `asset_ids`（长度为 2 的升序整数数组）、`threshold`（`strict`、`resave_or_light_edit` 或 `metadata_assisted`）、`metadata_assisted`（布尔值）、`dhash_hamming`（整数）、`luminance_cosine`（数字）、`color_histogram_intersection`（数字）、`capture_time_delta_seconds`（数字或 `null`）和 `normalized_device_match`（布尔值或 `null`）。`edges[]` 必须至少包含足以连通组内所有 asset 的相似边；可以包含额外满足门槛的相似边，但不得包含未满足视觉门槛的 pair。
-- Web 表单提交：`POST /exports/{template_id}/burst-pick`，提交页面当前相似组的保留选择。表单字段固定为：重复隐藏字段 `group_key=<group_key>` 表示页面提交时包含的每个当前相似组；每组被选中保留的照片用重复字段 `keep_asset_id__<group_key>=<asset_id>` 表示。服务端必须重新加载当前分组并校验请求中的组和 asset 都属于当前分组。
-- API 提交：`POST /api/export-templates/{template_id}/burst-pick`，请求体为 JSON：
+- Web 页面：`GET /exports/{template_id}/burst-pick`，如果当前模板还没有连拍挑选任务，则只启动后台处理并立即展示 `running` 进度；用户刷新页面后看到最新进展或已持久化的相似连拍组。
+- API：`GET /api/export-templates/{template_id}/burst-pick`，返回任务状态和分组数据，至少包含 `template_id`、`run_id`、`status`、`progress.total_candidate_count`、`progress.processed_candidate_count`、`groups[]`、每组稳定且 form-safe 的 `group_key`、每张照片的 `asset_id`、`file_name`、`bucket`、`month`、`context_url`、`original_url`、`is_live`、`match_evidence` 和 `diagnostics.skipped_missing_or_unreadable_count`。`status="running"` 时 `groups[]` 可以为空；`status="completed"` 后 `groups[]` 来自 DB 持久化结果，不在 GET 请求内重新计算。`group_key` 必须是非空 ASCII 字符串，只使用字母、数字、`-`、`_`，不能包含空白、斜杠、括号、`&`、`=` 或其他会破坏表单字段名的字符。`groups[].match_evidence` 固定为对象：`{"algorithm":"visual_fingerprint_v1","edges":[...]}`。`edges[]` 按 `asset_ids[0]`、`asset_ids[1]` 升序排序；每个 edge 固定包含 `asset_ids`（长度为 2 的升序整数数组）、`threshold`（`strict`、`resave_or_light_edit` 或 `metadata_assisted`）、`metadata_assisted`（布尔值）、`dhash_hamming`（整数）、`luminance_cosine`（数字）、`color_histogram_intersection`（数字）、`capture_time_delta_seconds`（数字或 `null`）和 `normalized_device_match`（布尔值或 `null`）。`edges[]` 必须至少包含足以连通组内所有 asset 的相似边；可以包含额外满足门槛的相似边，但不得包含未满足视觉门槛的 pair。
+- Web 表单提交：`POST /exports/{template_id}/burst-pick`，每次只提交一个相似组的保留选择。表单字段固定为：单个隐藏字段 `group_key=<group_key>` 表示当前提交的相似组；该组被选中保留的照片用重复字段 `keep_asset_id__<group_key>=<asset_id>` 表示。服务端必须基于 DB 持久化结果校验请求中的组和 asset 都属于当前未提交分组。
+- API 提交：`POST /api/export-templates/{template_id}/burst-pick`，每次只提交一个相似组，请求体为 JSON：
   ```json
   {
-    "groups": [
-      {"group_key": "stable-group-key", "keep_asset_ids": [123, 456]}
-    ]
+    "group_key": "stable-group-key",
+    "keep_asset_ids": [123, 456]
   }
   ```
   成功时返回 JSON，至少包含 `abandoned_asset_ids`、`kept_asset_ids`、`created_count` 和 `already_abandoned_count`；校验失败时返回 `400` 和可读错误。
 - Web 页面入口：`/exports` 列表页每行新增“连拍挑选”链接，指向 `/exports/{template_id}/burst-pick`。
-- DB：允许新增视觉指纹缓存表和全局放弃导出标记表；具体表名由实现确定，但必须表达以下事实：
+- Web 图片展示：连拍挑选使用 `original_url` 原图，不使用 context 图；页面以幻灯片形式每次展示一张原图，并支持左右切换。
+- DB：允许新增视觉指纹缓存表、连拍挑选任务/结果表和全局放弃导出标记表；具体表名由实现确定，但必须表达以下事实：
+  - 连拍挑选任务状态、处理进度、完成/失败结果、相似组成员和视觉匹配边能持久化到 DB；
+  - 连拍挑选持久化任务必须记录算法版本，算法阈值调整后不得继续复用旧版本分组结果；
   - 每个被放弃 asset 至多有一条全局放弃导出标记；
   - 标记记录能追溯到触发它的模板、相似组和创建时间；
   - 视觉指纹缓存如果存在，必须按 asset 维度可复用，且不能改变源图库或人脸归属真相。
@@ -95,10 +97,10 @@
 - 必须可观察：(a) API 返回至少一个相似组，组内包含原 asset 和这些内容相似的新增 asset；`match_evidence.algorithm` 为 `visual_fingerprint_v1`，并至少有一条连接原 asset 与新增内容相似 asset 的 edge，edge 的 `threshold` 为 `strict` 或 `resave_or_light_edit`，且 dHash Hamming、16x16 亮度向量 cosine、颜色直方图交集满足对应门槛。(b) 内容相似但元数据不同的照片仍被挂到对应相似组；没有任何响应字段或页面文案把设备/时间不一致作为拒绝入组原因，且连接该照片的 edge 不能仅依赖 `metadata_assisted` 门槛。
 - 验证手段：服务级集成测试走真实 `source add -> scan start -> GET API`，DB 断言新增 asset 已进入模板候选集，API 断言分组成员集合、`match_evidence.edges[]` schema 和门槛名；测试侧独立参考 helper 对被断言 edge 的源图片重新计算 `visual_fingerprint_v1` 指标，并与 API 指标和阈值做交叉断言；必要时用图像文件 EXIF 差异作为前置断言。
 
-#### AC-3: 连拍挑选只展示当前模板可处理相似组且 GET schema 稳定
+#### AC-3: 连拍挑选异步处理、只展示当前模板可处理相似组且 GET schema 稳定
 
 - 触发：构造一个模板候选集，其中至少包含一个相似组、一个同模板命中但未成组的普通候选 asset；再通过真实提交入口把某个相似组内的部分 asset 标记为全局放弃；随后访问同模板和另一个会命中该 asset 的模板的 `GET /api/export-templates/{template_id}/burst-pick` 与页面。
-- 必须可观察：API 和页面只展示形成相似组的 asset，不展示未成组普通候选；所有展示 asset 都属于该模板当前 preview 候选；已放弃 asset 不参与候选、不参与分组、不在页面展示；如果某个相似组因移除已放弃 asset 后小于成组阈值，该组不再展示；相似组按组内最小 `asset_id` 升序排列，组内照片按 `asset_id` 升序排列；GET API 响应包含并稳定返回 `template_id`、`groups[]`、每组 form-safe `group_key`、每张照片的 `asset_id`、`file_name`、`bucket`、`month`、`context_url`、`is_live`、`groups[].match_evidence.algorithm="visual_fingerprint_v1"`、`groups[].match_evidence.edges[]` 的固定字段和 `diagnostics.skipped_missing_or_unreadable_count`；页面表单为每个当前组渲染重复隐藏字段 `group_key=<group_key>`，且每张候选照片的保留控件使用 `keep_asset_id__<group_key>=<asset_id>`。
+- 必须可观察：首次访问不会阻塞等待视觉处理完成，而是返回/展示 `running` 状态和进度；后台完成后刷新 API/页面能从 DB 持久化结果读出相似组。API 和页面只展示形成相似组的 asset，不展示未成组普通候选；所有展示 asset 都属于该模板当前 preview 候选；已放弃 asset 不参与候选、不参与分组、不在页面展示；如果某个相似组因移除已放弃 asset 后小于成组阈值，该组不再展示；相似组按组内最小 `asset_id` 升序排列，组内照片按 `asset_id` 升序排列；GET API 响应包含并稳定返回 `template_id`、`run_id`、`status`、`progress`、`groups[]`、每组 form-safe `group_key`、每张照片的 `asset_id`、`file_name`、`bucket`、`month`、`context_url`、`original_url`、`is_live`、`groups[].match_evidence.algorithm="visual_fingerprint_v1"`、`groups[].match_evidence.edges[]` 的固定字段和 `diagnostics.skipped_missing_or_unreadable_count`；页面表单为每个当前组渲染单组隐藏字段 `group_key=<group_key>`，且每张候选照片的保留控件使用 `keep_asset_id__<group_key>=<asset_id>`。
 - 验证手段：服务级集成测试对 API 分组结果、schema 字段、`group_key` 字符集、`match_evidence.edges[]` 字段类型/排序/连通性和 preview 候选集合做交叉断言；Playwright DOM 断言页面分组、成员集合、顺序和实际表单字段名/值；DB 断言放弃标记存在。
 
 #### AC-4: 不使用文件名相邻或序号连续作为分组依据
@@ -109,19 +111,19 @@
 
 #### AC-5: 页面默认不保留且每组必须至少选择一张保留
 
-- 触发：进入 `/exports/{template_id}/burst-pick`，不选择任何保留照片直接提交。
-- 必须可观察：页面中每组所有照片默认都不是“保留”选中态；提交被拒绝，显示每个相似组至少保留 1 张的可读错误；DB 中全局放弃标记和 `export_plan` 均不变化。
+- 触发：进入 `/exports/{template_id}/burst-pick`，等待后台处理完成后，对某个相似组不选择任何保留照片直接提交。
+- 必须可观察：页面中每组所有照片默认都不是“保留”选中态；单组提交被拒绝，显示每个相似组至少保留 1 张的可读错误；DB 中全局放弃标记、该组 `submitted_at` 和 `export_plan` 均不变化。
 - 验证手段：Playwright 检查表单初始状态、提交结果和错误文案；DB 行数前后对比。
 
 #### AC-6: 提交保留选择后写入全局放弃标记且返回稳定 schema
 
-- 触发：使用两个彼此独立的 fresh workspace/state 子情形验证成功路径：(a) 在页面中每个相似组至少选择 1 张要保留的照片并提交页面级表单；(b) 在另一个 fresh state 中用同等语义的 JSON 请求提交 `POST /api/export-templates/{template_id}/burst-pick`。
-- 必须可观察：每个组中未被选中保留的 asset 都写入全局放弃导出标记；选中保留的 asset 不写入；页面返回成功反馈或跳回连拍挑选页且已放弃 asset 不再作为可选项出现；API 成功响应稳定包含 `abandoned_asset_ids`、`kept_asset_ids`、`created_count` 和 `already_abandoned_count`，其中 `created_count` 与本次新写入的 DB 唯一标记数量一致，fresh state 成功提交时 `already_abandoned_count` 为 0。
+- 触发：使用两个彼此独立的 fresh workspace/state 子情形验证成功路径：(a) 在页面中对某个相似组至少选择 1 张要保留的照片并提交该组表单；(b) 在另一个 fresh state 中用同等语义的 JSON 请求提交 `POST /api/export-templates/{template_id}/burst-pick`。
+- 必须可观察：本次提交的单个组中未被选中保留的 asset 写入全局放弃导出标记；选中保留的 asset 不写入；该组写入 `submitted_at` 后不再展示，其他未提交组仍可继续独立选择和提交；页面返回成功反馈或跳回连拍挑选页且已放弃 asset 不再作为可选项出现；API 成功响应稳定包含 `abandoned_asset_ids`、`kept_asset_ids`、`created_count` 和 `already_abandoned_count`，其中 `created_count` 与本次新写入的 DB 唯一标记数量一致，fresh state 成功提交时 `already_abandoned_count` 为 0。
 - 验证手段：Playwright 通过真实页面表单提交并断言 DB 全局放弃表的 asset 集合、唯一性和追溯字段；服务级集成测试在独立 fresh state 中通过真实 API endpoint 提交同等 JSON，并断言响应 schema、计数和 DB 状态；旧页面表单或旧 API payload 的重放不属于成功路径，按 AC-7 的 stale/过期提交验收。
 
 #### AC-7: API 和 Web 表单提交契约校验 stale 和非法选择
 
-- 触发：分别对 `POST /api/export-templates/{template_id}/burst-pick` 和 `POST /exports/{template_id}/burst-pick` 发起三类请求：(a) 缺少某个当前相似组；(b) 某组 `keep_asset_ids` 或 `keep_asset_id__<group_key>` 为空；(c) 某组包含不属于该组、属于另一组、已经不在当前候选中或使用过期 `group_key` 的 asset。
+- 触发：分别对 `POST /api/export-templates/{template_id}/burst-pick` 和 `POST /exports/{template_id}/burst-pick` 发起四类请求：(a) 一次提交多个相似组或提交格式不是单组；(b) 当前组 `keep_asset_ids` 或 `keep_asset_id__<group_key>` 为空；(c) 当前组包含不属于该组、属于另一组、已经不在当前候选中或使用过期 `group_key` 的 asset；(d) 后台处理尚未完成时提交。
 - 必须可观察：API 每类请求都返回 `400` 和可读错误；Web 表单每类 forged/stale 提交都返回可读错误页面或带错误的原页面，且不会写入成功反馈；全局放弃导出标记、`export_plan` 和源图库均不变化。
 - 验证手段：服务级集成测试走真实 API endpoint，Playwright 或测试客户端走真实 Web POST endpoint 构造 forged/stale 表单；提交前后做 DB 行数和关键字段断言。
 

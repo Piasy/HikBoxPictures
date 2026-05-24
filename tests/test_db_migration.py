@@ -10,7 +10,7 @@ import sys
 
 from tests.helpers import REPO_ROOT, run_hikbox
 
-LATEST_LIBRARY_VERSION = 3
+LATEST_LIBRARY_VERSION = 5
 LATEST_EMBEDDING_VERSION = 1  # No embedding_v2.sql yet; embedding stays at v1
 
 
@@ -189,6 +189,11 @@ def test_init_creates_workspace_with_latest_schema_version(tmp_path: Path) -> No
     assert _table_exists(library_db, "schema_meta")
     assert _table_exists(library_db, "library_sources")
     assert _table_exists(library_db, "assets")
+    assert _table_exists(library_db, "export_burst_pick_run")
+    assert _table_exists(library_db, "export_burst_pick_group")
+    assert _table_exists(library_db, "export_burst_pick_group_asset")
+    assert _table_exists(library_db, "export_burst_pick_group_edge")
+    assert "algorithm_version" in _read_table_columns(library_db, "export_burst_pick_run")
     assert _index_exists(library_db, "idx_assets_source_id")
     assert "file_fingerprint" not in _read_table_columns(library_db, "assets")
     assert _table_exists(embedding_db, "schema_meta")
@@ -603,7 +608,7 @@ def test_migrate_to_latest_skips_when_already_at_latest(tmp_path: Path) -> None:
         conn.executescript(
             """
             CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO schema_meta (key, value) VALUES ('schema_version', '3');
+            INSERT INTO schema_meta (key, value) VALUES ('schema_version', '5');
             """
         )
     finally:
@@ -611,7 +616,7 @@ def test_migrate_to_latest_skips_when_already_at_latest(tmp_path: Path) -> None:
 
     # Should not raise, should be a no-op
     migrate_to_latest(db_path=db_path, db_name="library")
-    assert _read_schema_version(db_path) == "3"
+    assert _read_schema_version(db_path) == "5"
 
 
 def test_migrate_to_latest_raises_on_missing_schema_meta(tmp_path: Path) -> None:
@@ -662,6 +667,8 @@ def test_migration_sql_files_match_current_versions() -> None:
     assert (sql_dir / "library_v1.sql").is_file()
     assert (sql_dir / "library_v2.sql").is_file()
     assert (sql_dir / "library_v3.sql").is_file()
+    assert (sql_dir / "library_v4.sql").is_file()
+    assert (sql_dir / "library_v5.sql").is_file()
     assert (sql_dir / "embedding_v1.sql").is_file()
-    assert not (sql_dir / "library_v4.sql").exists()
+    assert not (sql_dir / "library_v6.sql").exists()
     assert not (sql_dir / "embedding_v2.sql").exists()

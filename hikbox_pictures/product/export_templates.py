@@ -11,6 +11,7 @@ import shutil
 import sqlite3
 import subprocess
 import threading
+import time
 import uuid
 
 from PIL import ExifTags
@@ -26,6 +27,9 @@ except Exception:
 
 from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
+
+
+BURST_PICK_ALGORITHM_VERSION = "visual_fingerprint_v1_burst_bridge_v3"
 
 
 class ExportTemplateError(RuntimeError):
@@ -146,6 +150,7 @@ class BurstPickAsset:
     bucket: str
     month: str
     context_url: str
+    original_url: str
     is_live: bool
 
 
@@ -171,8 +176,13 @@ class BurstPickGroup:
 @dataclass(frozen=True)
 class BurstPickResult:
     template_id: str
+    status: str
+    run_id: int | None
     groups: list[BurstPickGroup]
     skipped_missing_or_unreadable_count: int
+    total_candidate_count: int
+    processed_candidate_count: int
+    error_message: str | None
 
 
 @dataclass(frozen=True)
@@ -1005,16 +1015,136 @@ def load_export_template_burst_pick(
     *,
     template_id: str,
 ) -> BurstPickResult:
+    run_id = _ensure_burst_pick_run(workspace_context, template_id=template_id)
+    return _load_burst_pick_run_result(
+        workspace_context,
+        template_id=template_id,
+        run_id=run_id,
+    )
+
+
+def _ensure_burst_pick_run(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+) -> int:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        _validate_burst_pick_template(connection, template_id=template_id)
+        existing_row = _latest_burst_pick_run_row(connection, template_id=template_id)
+        if existing_row is not None:
+            return int(existing_row["id"])
+    except ExportTemplateValidationError:
+        raise
+    except sqlite3.Error as exc:
+        raise ExportTemplateError("连拍挑选状态读取失败。") from exc
+    finally:
+        connection.close()
+
     candidates = _load_burst_pick_candidates(workspace_context, template_id=template_id)
+    now = utc_now_text()
+
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("BEGIN IMMEDIATE")
+        existing_row = _latest_burst_pick_run_row(connection, template_id=template_id)
+        if existing_row is not None:
+            connection.commit()
+            return int(existing_row["id"])
+        cursor = connection.execute(
+            """
+            INSERT INTO export_burst_pick_run (
+              template_id,
+              algorithm_version,
+              status,
+              started_at,
+              total_candidate_count,
+              processed_candidate_count,
+              skipped_missing_or_unreadable_count
+            )
+            VALUES (?, ?, 'running', ?, ?, 0, 0)
+            """,
+            (template_id, BURST_PICK_ALGORITHM_VERSION, now, len(candidates)),
+        )
+        run_id = int(cursor.lastrowid)
+        connection.commit()
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise ExportTemplateError("连拍挑选任务启动失败。") from exc
+    finally:
+        connection.close()
+
+    thread = threading.Thread(
+        target=_run_burst_pick_task,
+        kwargs={
+            "workspace_context": workspace_context,
+            "template_id": template_id,
+            "run_id": run_id,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return run_id
+
+
+def _run_burst_pick_task(
+    *,
+    workspace_context: WorkspaceContext,
+    template_id: str,
+    run_id: int,
+) -> None:
+    try:
+        candidates = _load_burst_pick_candidates(workspace_context, template_id=template_id)
+        _update_burst_pick_run_totals(
+            workspace_context,
+            run_id=run_id,
+            total_candidate_count=len(candidates),
+            processed_candidate_count=0,
+        )
+        groups, skipped_count = _compute_burst_pick_groups(
+            candidates,
+            progress_callback=lambda processed: _update_burst_pick_run_totals(
+                workspace_context,
+                run_id=run_id,
+                total_candidate_count=len(candidates),
+                processed_candidate_count=processed,
+            ),
+        )
+        _persist_burst_pick_run_success(
+            workspace_context,
+            run_id=run_id,
+            groups=groups,
+            skipped_count=skipped_count,
+            total_candidate_count=len(candidates),
+        )
+    except Exception as exc:
+        _persist_burst_pick_run_failure(
+            workspace_context,
+            run_id=run_id,
+            error_message=str(exc),
+        )
+        _export_log.exception("连拍挑选后台处理失败: template_id=%s run_id=%s", template_id, run_id)
+
+
+def _compute_burst_pick_groups(
+    candidates: list[_BurstCandidateAsset],
+    *,
+    progress_callback: callable | None = None,
+) -> tuple[list[BurstPickGroup], int]:
     fingerprints: dict[int, _VisualFingerprint] = {}
     display_assets: dict[int, BurstPickAsset] = {}
     skipped_count = 0
 
-    for candidate in candidates:
+    for processed_count, candidate in enumerate(candidates, start=1):
         try:
             fingerprint = _compute_visual_fingerprint(Path(candidate.absolute_path))
         except (OSError, ValueError):
             skipped_count += 1
+            if progress_callback is not None:
+                progress_callback(processed_count)
             continue
         fingerprints[candidate.asset_id] = fingerprint
         display_assets[candidate.asset_id] = BurstPickAsset(
@@ -1023,8 +1153,11 @@ def load_export_template_burst_pick(
             bucket=candidate.bucket,
             month=candidate.month,
             context_url=candidate.context_url,
+            original_url=_asset_original_url(candidate.asset_id),
             is_live=candidate.is_live,
         )
+        if progress_callback is not None:
+            progress_callback(processed_count)
 
     edges: list[BurstPickEdge] = []
     asset_ids = sorted(fingerprints)
@@ -1043,10 +1176,374 @@ def load_export_template_burst_pick(
         display_assets=display_assets,
         edges=edges,
     )
+    return groups, skipped_count
+
+
+def _asset_original_url(asset_id: int) -> str:
+    return f"/images/assets/{asset_id}/original"
+
+
+def load_asset_original_path(
+    workspace_context: WorkspaceContext,
+    *,
+    asset_id: int,
+) -> Path | None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        row = connection.execute(
+            "SELECT absolute_path FROM assets WHERE id = ?",
+            (asset_id,),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise ExportTemplateError("原图路径读取失败。") from exc
+    finally:
+        connection.close()
+    if row is None:
+        return None
+    return Path(str(row[0]))
+
+
+def _latest_burst_pick_run_row(
+    connection: sqlite3.Connection,
+    *,
+    template_id: str,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT
+          id,
+          template_id,
+          status,
+          started_at,
+          finished_at,
+          error_message,
+          total_candidate_count,
+          processed_candidate_count,
+          skipped_missing_or_unreadable_count
+        FROM export_burst_pick_run
+        WHERE template_id = ?
+          AND algorithm_version = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (template_id, BURST_PICK_ALGORITHM_VERSION),
+    ).fetchone()
+
+
+def _validate_burst_pick_template(
+    connection: sqlite3.Connection,
+    *,
+    template_id: str,
+) -> None:
+    template_row = connection.execute(
+        """
+        SELECT template_id, status
+        FROM export_template
+        WHERE template_id = ?
+        """,
+        (template_id,),
+    ).fetchone()
+    if template_row is None:
+        raise ExportTemplateValidationError("模板不存在。", code="template_not_found")
+    if str(template_row["status"]) != "active":
+        raise ExportTemplateValidationError("模板已失效，无法连拍挑选。", code="template_invalid")
+
+    person_row = connection.execute(
+        "SELECT COUNT(*) FROM export_template_person WHERE template_id = ?",
+        (template_id,),
+    ).fetchone()
+    if int(person_row[0]) == 0:
+        raise ExportTemplateValidationError("模板未关联任何人物。", code="template_empty")
+
+
+def _update_burst_pick_run_totals(
+    workspace_context: WorkspaceContext,
+    *,
+    run_id: int,
+    total_candidate_count: int,
+    processed_candidate_count: int,
+) -> None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        connection.execute("PRAGMA busy_timeout = 5000")
+        with connection:
+            connection.execute(
+                """
+                UPDATE export_burst_pick_run
+                SET total_candidate_count = ?,
+                    processed_candidate_count = ?
+                WHERE id = ?
+                  AND status = 'running'
+                """,
+                (total_candidate_count, processed_candidate_count, run_id),
+            )
+    finally:
+        connection.close()
+
+
+def _persist_burst_pick_run_success(
+    workspace_context: WorkspaceContext,
+    *,
+    run_id: int,
+    groups: list[BurstPickGroup],
+    skipped_count: int,
+    total_candidate_count: int,
+) -> None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute("BEGIN IMMEDIATE")
+        for ordinal, group in enumerate(groups):
+            group_cursor = connection.execute(
+                """
+                INSERT INTO export_burst_pick_group (run_id, group_key, ordinal)
+                VALUES (?, ?, ?)
+                """,
+                (run_id, group.group_key, ordinal),
+            )
+            group_id = int(group_cursor.lastrowid)
+            for position, asset in enumerate(group.assets):
+                connection.execute(
+                    """
+                    INSERT INTO export_burst_pick_group_asset (
+                      group_id,
+                      asset_id,
+                      position,
+                      file_name,
+                      bucket,
+                      month,
+                      context_url,
+                      is_live
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        group_id,
+                        asset.asset_id,
+                        position,
+                        asset.file_name,
+                        asset.bucket,
+                        asset.month,
+                        asset.context_url,
+                        int(asset.is_live),
+                    ),
+                )
+            for edge in group.edges:
+                connection.execute(
+                    """
+                    INSERT INTO export_burst_pick_group_edge (
+                      group_id,
+                      asset_id_first,
+                      asset_id_second,
+                      threshold,
+                      metadata_assisted,
+                      dhash_hamming,
+                      luminance_cosine,
+                      color_histogram_intersection,
+                      capture_time_delta_seconds,
+                      normalized_device_match
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        group_id,
+                        edge.asset_ids[0],
+                        edge.asset_ids[1],
+                        edge.threshold,
+                        int(edge.metadata_assisted),
+                        edge.dhash_hamming,
+                        edge.luminance_cosine,
+                        edge.color_histogram_intersection,
+                        edge.capture_time_delta_seconds,
+                        None
+                        if edge.normalized_device_match is None
+                        else int(edge.normalized_device_match),
+                    ),
+                )
+        connection.execute(
+            """
+            UPDATE export_burst_pick_run
+            SET status = 'completed',
+                finished_at = ?,
+                error_message = NULL,
+                total_candidate_count = ?,
+                processed_candidate_count = ?,
+                skipped_missing_or_unreadable_count = ?
+            WHERE id = ?
+            """,
+            (utc_now_text(), total_candidate_count, total_candidate_count, skipped_count, run_id),
+        )
+        connection.commit()
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise ExportTemplateError("连拍挑选结果保存失败。") from exc
+    finally:
+        connection.close()
+
+
+def _persist_burst_pick_run_failure(
+    workspace_context: WorkspaceContext,
+    *,
+    run_id: int,
+    error_message: str,
+) -> None:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    try:
+        connection.execute("PRAGMA busy_timeout = 5000")
+        with connection:
+            connection.execute(
+                """
+                UPDATE export_burst_pick_run
+                SET status = 'failed',
+                    finished_at = ?,
+                    error_message = ?
+                WHERE id = ?
+                """,
+                (utc_now_text(), error_message, run_id),
+            )
+    finally:
+        connection.close()
+
+
+def _load_burst_pick_run_result(
+    workspace_context: WorkspaceContext,
+    *,
+    template_id: str,
+    run_id: int,
+) -> BurstPickResult:
+    connection = sqlite3.connect(workspace_context.library_db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        run_row = connection.execute(
+            """
+            SELECT
+              id,
+              status,
+              error_message,
+              total_candidate_count,
+              processed_candidate_count,
+              skipped_missing_or_unreadable_count
+            FROM export_burst_pick_run
+            WHERE id = ?
+              AND template_id = ?
+            """,
+            (run_id, template_id),
+        ).fetchone()
+        if run_row is None:
+            raise ExportTemplateError("连拍挑选任务不存在。")
+
+        groups: list[BurstPickGroup] = []
+        if str(run_row["status"]) == "completed":
+            group_rows = connection.execute(
+                """
+                SELECT g.id, g.group_key
+                FROM export_burst_pick_group g
+                WHERE g.run_id = ?
+                  AND g.submitted_at IS NULL
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM export_burst_pick_group_asset ga
+                    INNER JOIN export_abandoned_asset eaa ON eaa.asset_id = ga.asset_id
+                    WHERE ga.group_id = g.id
+                  )
+                ORDER BY g.ordinal ASC
+                """,
+                (run_id,),
+            ).fetchall()
+            for group_row in group_rows:
+                group_id = int(group_row["id"])
+                asset_rows = connection.execute(
+                    """
+                    SELECT
+                      asset_id,
+                      file_name,
+                      bucket,
+                      month,
+                      context_url,
+                      is_live
+                    FROM export_burst_pick_group_asset
+                    WHERE group_id = ?
+                    ORDER BY position ASC
+                    """,
+                    (group_id,),
+                ).fetchall()
+                edge_rows = connection.execute(
+                    """
+                    SELECT
+                      asset_id_first,
+                      asset_id_second,
+                      threshold,
+                      metadata_assisted,
+                      dhash_hamming,
+                      luminance_cosine,
+                      color_histogram_intersection,
+                      capture_time_delta_seconds,
+                      normalized_device_match
+                    FROM export_burst_pick_group_edge
+                    WHERE group_id = ?
+                    ORDER BY asset_id_first ASC, asset_id_second ASC
+                    """,
+                    (group_id,),
+                ).fetchall()
+                groups.append(
+                    BurstPickGroup(
+                        group_key=str(group_row["group_key"]),
+                        assets=[
+                            BurstPickAsset(
+                                asset_id=int(asset_row["asset_id"]),
+                                file_name=str(asset_row["file_name"]),
+                                bucket=str(asset_row["bucket"]),
+                                month=str(asset_row["month"]),
+                                context_url=str(asset_row["context_url"]),
+                                original_url=_asset_original_url(int(asset_row["asset_id"])),
+                                is_live=bool(asset_row["is_live"]),
+                            )
+                            for asset_row in asset_rows
+                        ],
+                        edges=[
+                            BurstPickEdge(
+                                asset_ids=(
+                                    int(edge_row["asset_id_first"]),
+                                    int(edge_row["asset_id_second"]),
+                                ),
+                                threshold=str(edge_row["threshold"]),
+                                metadata_assisted=bool(edge_row["metadata_assisted"]),
+                                dhash_hamming=int(edge_row["dhash_hamming"]),
+                                luminance_cosine=float(edge_row["luminance_cosine"]),
+                                color_histogram_intersection=float(
+                                    edge_row["color_histogram_intersection"]
+                                ),
+                                capture_time_delta_seconds=(
+                                    None
+                                    if edge_row["capture_time_delta_seconds"] is None
+                                    else float(edge_row["capture_time_delta_seconds"])
+                                ),
+                                normalized_device_match=(
+                                    None
+                                    if edge_row["normalized_device_match"] is None
+                                    else bool(edge_row["normalized_device_match"])
+                                ),
+                            )
+                            for edge_row in edge_rows
+                        ],
+                    )
+                )
+    except sqlite3.Error as exc:
+        raise ExportTemplateError("连拍挑选结果读取失败。") from exc
+    finally:
+        connection.close()
+
     return BurstPickResult(
         template_id=template_id,
+        status=str(run_row["status"]),
+        run_id=int(run_row["id"]),
         groups=groups,
-        skipped_missing_or_unreadable_count=skipped_count,
+        skipped_missing_or_unreadable_count=int(run_row["skipped_missing_or_unreadable_count"]),
+        total_candidate_count=int(run_row["total_candidate_count"]),
+        processed_candidate_count=int(run_row["processed_candidate_count"]),
+        error_message=(
+            None if run_row["error_message"] is None else str(run_row["error_message"])
+        ),
     )
 
 
@@ -1056,50 +1553,74 @@ def submit_export_template_burst_pick(
     template_id: str,
     submitted_groups: list[dict[str, object]],
 ) -> BurstPickSubmitResult:
-    current = load_export_template_burst_pick(workspace_context, template_id=template_id)
-    current_by_key = {group.group_key: group for group in current.groups}
-    submitted_by_key: dict[str, set[int]] = {}
-
-    for submitted_group in submitted_groups:
-        if not isinstance(submitted_group, dict):
-            raise ExportTemplateValidationError("连拍组提交格式无效。", code="burst_group_invalid")
-        group_key = str(submitted_group.get("group_key", ""))
-        if not group_key:
-            raise ExportTemplateValidationError("提交包含空的连拍组标识。", code="burst_group_key_blank")
-        if group_key in submitted_by_key:
-            raise ExportTemplateValidationError("提交包含重复的连拍组。", code="burst_group_duplicate")
-        raw_keep_ids = submitted_group.get("keep_asset_ids", [])
-        if not isinstance(raw_keep_ids, list):
-            raise ExportTemplateValidationError("保留照片格式无效。", code="burst_keep_invalid")
-        try:
-            keep_ids = {int(asset_id) for asset_id in raw_keep_ids}
-        except (TypeError, ValueError) as exc:
-            raise ExportTemplateValidationError("保留照片包含无效 asset。", code="burst_keep_invalid") from exc
-        submitted_by_key[group_key] = keep_ids
-
-    if set(submitted_by_key) != set(current_by_key):
-        raise ExportTemplateValidationError("连拍组已变化，请刷新后重试。", code="burst_groups_stale")
-
-    kept_asset_ids: set[int] = set()
-    abandoned_by_asset: dict[int, str] = {}
-    for group_key, group in current_by_key.items():
-        keep_ids = submitted_by_key[group_key]
-        group_asset_ids = {asset.asset_id for asset in group.assets}
-        if not keep_ids:
-            raise ExportTemplateValidationError(
-                "每个相似组至少保留 1 张照片。", code="burst_keep_empty"
-            )
-        if not keep_ids.issubset(group_asset_ids):
-            raise ExportTemplateValidationError("保留照片不属于当前连拍组。", code="burst_keep_outside_group")
-        kept_asset_ids.update(keep_ids)
-        for asset_id in sorted(group_asset_ids - keep_ids):
-            abandoned_by_asset[asset_id] = group_key
+    if len(submitted_groups) != 1:
+        raise ExportTemplateValidationError("每次只能提交一个相似组。", code="burst_single_group_required")
+    submitted_group = submitted_groups[0]
+    if not isinstance(submitted_group, dict):
+        raise ExportTemplateValidationError("连拍组提交格式无效。", code="burst_group_invalid")
+    group_key = str(submitted_group.get("group_key", ""))
+    if not group_key:
+        raise ExportTemplateValidationError("提交包含空的连拍组标识。", code="burst_group_key_blank")
+    raw_keep_ids = submitted_group.get("keep_asset_ids", [])
+    if not isinstance(raw_keep_ids, list):
+        raise ExportTemplateValidationError("保留照片格式无效。", code="burst_keep_invalid")
+    try:
+        keep_ids = {int(asset_id) for asset_id in raw_keep_ids}
+    except (TypeError, ValueError) as exc:
+        raise ExportTemplateValidationError("保留照片包含无效 asset。", code="burst_keep_invalid") from exc
+    if not keep_ids:
+        raise ExportTemplateValidationError(
+            "每个相似组至少保留 1 张照片。", code="burst_keep_empty"
+        )
 
     connection = sqlite3.connect(workspace_context.library_db_path)
     connection.row_factory = sqlite3.Row
     try:
+        connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("BEGIN IMMEDIATE")
+        _validate_burst_pick_template(connection, template_id=template_id)
         assert_no_running_export(workspace_context, connection=connection)
+        run_row = _latest_burst_pick_run_row(connection, template_id=template_id)
+        if run_row is None or str(run_row["status"]) != "completed":
+            raise ExportTemplateValidationError("连拍挑选仍在处理，请刷新后重试。", code="burst_not_ready")
+
+        group_row = connection.execute(
+            """
+            SELECT id
+            FROM export_burst_pick_group
+            WHERE run_id = ?
+              AND group_key = ?
+              AND submitted_at IS NULL
+            """,
+            (int(run_row["id"]), group_key),
+        ).fetchone()
+        if group_row is None:
+            raise ExportTemplateValidationError("连拍组已变化，请刷新后重试。", code="burst_groups_stale")
+
+        asset_rows = connection.execute(
+            """
+            SELECT ga.asset_id, eaa.asset_id AS abandoned_asset_id
+            FROM export_burst_pick_group_asset ga
+            LEFT JOIN export_abandoned_asset eaa ON eaa.asset_id = ga.asset_id
+            WHERE ga.group_id = ?
+            ORDER BY ga.position ASC
+            """,
+            (int(group_row["id"]),),
+        ).fetchall()
+        if not asset_rows:
+            raise ExportTemplateValidationError("连拍组已变化，请刷新后重试。", code="burst_groups_stale")
+        if any(row["abandoned_asset_id"] is not None for row in asset_rows):
+            raise ExportTemplateValidationError("连拍组已变化，请刷新后重试。", code="burst_groups_stale")
+
+        group_asset_ids = {int(row["asset_id"]) for row in asset_rows}
+        if not keep_ids.issubset(group_asset_ids):
+            raise ExportTemplateValidationError("保留照片不属于当前连拍组。", code="burst_keep_outside_group")
+
+        kept_asset_ids = set(keep_ids)
+        abandoned_by_asset = {
+            asset_id: group_key
+            for asset_id in sorted(group_asset_ids - keep_ids)
+        }
         abandoned_asset_ids = sorted(abandoned_by_asset)
         already_abandoned_count = 0
         if abandoned_asset_ids:
@@ -1131,6 +1652,14 @@ def submit_export_template_burst_pick(
                 tuple(abandoned_asset_ids),
             )
 
+        connection.execute(
+            """
+            UPDATE export_burst_pick_group
+            SET submitted_at = ?
+            WHERE id = ?
+            """,
+            (utc_now_text(), int(group_row["id"])),
+        )
         connection.commit()
     except ExportTemplateValidationError:
         connection.rollback()
@@ -1287,6 +1816,9 @@ def _load_burst_pick_candidates(
 def _compute_visual_fingerprint(path: Path) -> _VisualFingerprint:
     if os.environ.get("HIKBOX_TEST_BURST_PICK_FAIL_FEATURES") == "1":
         raise ExportTemplateError("视觉特征准备失败。")
+    delay_text = os.environ.get("HIKBOX_TEST_BURST_PICK_FINGERPRINT_DELAY_SECONDS")
+    if delay_text:
+        time.sleep(float(delay_text))
     if not path.is_file():
         raise FileNotFoundError(str(path))
 
@@ -1397,6 +1929,26 @@ def _build_visual_edge(
         and dhash_hamming <= 24
         and luminance_cosine >= 0.94
         and color_intersection >= 0.72
+    ):
+        threshold_name = "metadata_assisted"
+        metadata_assisted = True
+    elif (
+        normalized_device_match is True
+        and capture_delta is not None
+        and capture_delta <= 2
+        and dhash_hamming <= 18
+        and luminance_cosine >= 0.88
+        and color_intersection >= 0.90
+    ):
+        threshold_name = "metadata_assisted"
+        metadata_assisted = True
+    elif (
+        normalized_device_match is True
+        and capture_delta is not None
+        and capture_delta <= 1
+        and dhash_hamming <= 20
+        and luminance_cosine >= 0.92
+        and color_intersection >= 0.94
     ):
         threshold_name = "metadata_assisted"
         metadata_assisted = True

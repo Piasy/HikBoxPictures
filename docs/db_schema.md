@@ -40,6 +40,10 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
   移除 `assets.file_fingerprint` 列，保留既有 asset 数据与索引。
 - `library_v3.sql`
   新增 `export_abandoned_asset` 表，记录工作区级全局放弃导出标记；每个 asset 至多一条标记，并记录触发模板、连拍组标识和创建时间。
+- `library_v4.sql`
+  新增 `export_burst_pick_run`、`export_burst_pick_group`、`export_burst_pick_group_asset`、`export_burst_pick_group_edge` 表，持久化连拍挑选后台任务状态、进度、相似组成员和视觉匹配边。
+- `library_v5.sql`
+  为 `export_burst_pick_run` 增加 `algorithm_version` 列和查询索引，使连拍分组算法调整后不会继续复用旧版本持久化结果。
 
 #### `embedding.db`
 
@@ -62,7 +66,7 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 
 | 数据库 | 文件 | 当前版本 |
 |--------|------|----------|
-| `library.db` | `library_v3.sql` | 3 |
+| `library.db` | `library_v5.sql` | 5 |
 | `embedding.db` | `embedding_v1.sql` | 1 |
 
 ### 0.6 新增 Migration 约定
@@ -801,10 +805,131 @@ CREATE INDEX idx_export_abandoned_asset_template
 运行时语义：
 
 - 标记只影响导出候选、预览、`export_plan` 和实际执行导出；不会删除源文件、`assets`、人脸样本或历史 `export_delivery`。
-- 连拍挑选成功提交后，仅把未保留 asset 写入该表；重复 asset 使用唯一约束保持幂等。
+- 连拍挑选单组成功提交后，仅把该组未保留 asset 写入该表；重复 asset 使用唯一约束保持幂等。
 - 所有模板的后续 preview 和 execute 都必须跳过该表中的 asset。
 
-### 2.20 `export_delivery`
+### 2.20 `export_burst_pick_run`
+
+```sql
+CREATE TABLE export_burst_pick_run (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  template_id TEXT NOT NULL REFERENCES export_template(template_id),
+  algorithm_version TEXT NOT NULL DEFAULT 'visual_fingerprint_v1',
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  error_message TEXT,
+  total_candidate_count INTEGER NOT NULL DEFAULT 0,
+  processed_candidate_count INTEGER NOT NULL DEFAULT 0,
+  skipped_missing_or_unreadable_count INTEGER NOT NULL DEFAULT 0
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_burst_pick_run_template_started
+  ON export_burst_pick_run(template_id, started_at);
+CREATE INDEX idx_export_burst_pick_run_template_algorithm_started
+  ON export_burst_pick_run(template_id, algorithm_version, started_at);
+```
+
+运行时语义：
+
+- 用户访问连拍挑选入口时，如果当前模板还没有任务记录，Web/API 只创建 `running` 任务并立即返回，不在请求线程内做视觉特征计算。
+- 后台任务完成后把状态改为 `completed`，并把相似组、组内 asset 和匹配边写入下列表。
+- 后台任务失败时把状态改为 `failed` 并写入 `error_message`；不会写入放弃标记或导出计划。
+- 页面和 API 通过 `total_candidate_count`、`processed_candidate_count`、`status` 刷新展示处理进展。
+- 读取任务时只复用当前 `algorithm_version` 的结果；算法阈值调整后会创建新任务并重新计算。
+
+### 2.21 `export_burst_pick_group`
+
+```sql
+CREATE TABLE export_burst_pick_group (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL REFERENCES export_burst_pick_run(id),
+  group_key TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  submitted_at TEXT,
+  UNIQUE(run_id, group_key)
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_burst_pick_group_run
+  ON export_burst_pick_group(run_id, ordinal);
+```
+
+运行时语义：
+
+- 每行表示一次连拍挑选任务算出的一个相似组。
+- `group_key` 是表单和 API 提交使用的稳定组标识。
+- 用户按单个相似组提交保留选择；提交成功后写入 `submitted_at`，后续页面/API 不再展示该组。
+
+### 2.22 `export_burst_pick_group_asset`
+
+```sql
+CREATE TABLE export_burst_pick_group_asset (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES export_burst_pick_group(id),
+  asset_id INTEGER NOT NULL REFERENCES assets(id),
+  position INTEGER NOT NULL,
+  file_name TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  month TEXT NOT NULL,
+  context_url TEXT NOT NULL,
+  is_live INTEGER NOT NULL CHECK (is_live IN (0, 1)),
+  UNIQUE(group_id, asset_id)
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_burst_pick_group_asset_group
+  ON export_burst_pick_group_asset(group_id, position);
+CREATE INDEX idx_export_burst_pick_group_asset_asset
+  ON export_burst_pick_group_asset(asset_id);
+```
+
+运行时语义：
+
+- 保存每个相似组的成员快照、展示顺序、导出桶/月和 Live Photo 标记。
+- Web 展示使用 `/images/assets/{asset_id}/original` 原图路由；`context_url` 仅作为兼容性字段保留在 API 响应中。
+
+### 2.23 `export_burst_pick_group_edge`
+
+```sql
+CREATE TABLE export_burst_pick_group_edge (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id INTEGER NOT NULL REFERENCES export_burst_pick_group(id),
+  asset_id_first INTEGER NOT NULL REFERENCES assets(id),
+  asset_id_second INTEGER NOT NULL REFERENCES assets(id),
+  threshold TEXT NOT NULL,
+  metadata_assisted INTEGER NOT NULL CHECK (metadata_assisted IN (0, 1)),
+  dhash_hamming INTEGER NOT NULL,
+  luminance_cosine REAL NOT NULL,
+  color_histogram_intersection REAL NOT NULL,
+  capture_time_delta_seconds REAL,
+  normalized_device_match INTEGER CHECK (normalized_device_match IN (0, 1))
+);
+```
+
+索引：
+
+```sql
+CREATE INDEX idx_export_burst_pick_group_edge_group
+  ON export_burst_pick_group_edge(group_id, asset_id_first, asset_id_second);
+```
+
+运行时语义：
+
+- 保存 `visual_fingerprint_v1` 计算出的组内相似边，用于 API 稳定返回 `match_evidence.edges[]`。
+- `asset_id_first` 和 `asset_id_second` 按升序存储，页面刷新不会重新计算视觉指标。
+
+### 2.24 `export_delivery`
 
 ```sql
 CREATE TABLE export_delivery (

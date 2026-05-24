@@ -36,51 +36,231 @@
       </p>
     {% endif %}
 
-    {% if not burst_pick.groups %}
+    {% if burst_pick.status == "running" %}
+      <section class="panel detail-shell" data-burst-pick-status="{{ burst_pick.status }}">
+        <p class="empty-state" role="status">
+          连拍挑选处理中：{{ burst_pick.processed_candidate_count }} / {{ burst_pick.total_candidate_count }}
+        </p>
+        <div class="form-actions">
+          <a class="back-link" href="/exports/{{ template.template_id }}/burst-pick">刷新</a>
+        </div>
+      </section>
+    {% elif burst_pick.status == "failed" %}
+      <section class="panel detail-shell" data-burst-pick-status="{{ burst_pick.status }}">
+        <p class="feedback-banner is-error" role="alert">
+          连拍挑选处理失败：{{ burst_pick.error_message }}
+        </p>
+      </section>
+    {% elif not burst_pick.groups %}
       <section class="panel detail-shell">
         <p class="empty-state">当前模板没有可挑选的相似连拍组。</p>
       </section>
     {% else %}
-      <form method="post" action="/exports/{{ template.template_id }}/burst-pick" data-burst-pick-form>
+      <div data-burst-pick-groups>
         {% for group in burst_pick.groups %}
-          <section class="panel section-block" data-burst-group-key="{{ group.group_key }}">
+          <section class="panel section-block burst-group" data-burst-group-key="{{ group.group_key }}">
             <div class="section-head">
               <h2>相似组 {{ loop.index }}</h2>
+              <p>{{ group.assets|length }} 张</p>
             </div>
-            <input type="hidden" name="group_key" value="{{ group.group_key }}">
-            <div class="sample-grid" data-burst-group-assets>
+            <form method="post" action="/exports/{{ template.template_id }}/burst-pick" data-burst-pick-form>
+              <input type="hidden" name="group_key" value="{{ group.group_key }}">
+              <div class="burst-viewer" data-burst-viewer tabindex="0">
+                {% if group.assets|length > 1 %}
+                  <button class="burst-nav burst-nav-prev" type="button" data-burst-prev aria-label="上一张">&lsaquo;</button>
+                  <button class="burst-nav burst-nav-next" type="button" data-burst-next aria-label="下一张">&rsaquo;</button>
+                {% endif %}
+                <div class="burst-counter" data-burst-counter>1 / {{ group.assets|length }}</div>
               {% for asset in group.assets %}
-                <article class="sample-card" data-asset-id="{{ asset.asset_id }}">
-                  {% if asset.context_url %}
-                    <img src="{{ asset.context_url }}" alt="{{ asset.file_name }}" loading="lazy">
-                  {% endif %}
-                  <div class="sample-card-body">
-                    <label>
+                  <figure
+                    class="burst-slide"
+                    data-burst-slide
+                    data-asset-id="{{ asset.asset_id }}"
+                    {% if not loop.first %}hidden{% endif %}
+                  >
+                    <img
+                      src="{{ asset.original_url }}"
+                      alt="{{ asset.file_name }}"
+                      {% if loop.first %}loading="eager"{% else %}loading="lazy"{% endif %}
+                      data-burst-slide-image
+                    >
+                    <figcaption class="burst-caption">
+                      <label class="burst-keep-toggle">
                       <input
                         type="checkbox"
                         name="keep_asset_id__{{ group.group_key }}"
                         value="{{ asset.asset_id }}"
                       >
                       保留
-                    </label>
-                    <div class="sample-card-meta">
+                      </label>
                       <span data-asset-file-name>{{ asset.file_name }}</span>
                       <span>{{ asset.bucket }} / {{ asset.month }}</span>
                       {% if asset.is_live %}
                         <span class="live-badge" data-live-badge>Live</span>
                       {% endif %}
-                    </div>
-                  </div>
-                </article>
+                    </figcaption>
+                  </figure>
               {% endfor %}
-            </div>
+              </div>
+              <div class="form-actions">
+                <button type="submit">保存本组</button>
+              </div>
+            </form>
           </section>
         {% endfor %}
-
-        <div class="form-actions">
-          <button type="submit">保存连拍挑选</button>
-        </div>
-      </form>
+      </div>
     {% endif %}
   {% endif %}
+
+  <style>
+    .burst-group {
+      padding: 18px;
+    }
+
+    .burst-viewer {
+      position: relative;
+      min-height: min(760px, calc(100vh - 190px));
+      background: #111;
+      overflow: hidden;
+      border-radius: 8px;
+    }
+
+    .burst-slide {
+      position: absolute;
+      inset: 0;
+      margin: 0;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr) auto;
+    }
+
+    .burst-slide[hidden] {
+      display: none;
+    }
+
+    .burst-slide img {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      object-fit: contain;
+      background: #111;
+    }
+
+    .burst-caption {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-height: 54px;
+      padding: 12px 16px;
+      background: rgba(17, 17, 17, 0.88);
+      color: #fff;
+      font-size: 14px;
+    }
+
+    .burst-caption span[data-asset-file-name] {
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+
+    .burst-keep-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      flex: 0 0 auto;
+      font-weight: 700;
+    }
+
+    .burst-keep-toggle input {
+      width: 20px;
+      height: 20px;
+      accent-color: var(--accent);
+    }
+
+    .burst-nav {
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 48px;
+      height: 64px;
+      border: 0;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.82);
+      color: #111;
+      font-size: 42px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .burst-nav-prev {
+      left: 12px;
+    }
+
+    .burst-nav-next {
+      right: 12px;
+    }
+
+    .burst-counter {
+      position: absolute;
+      z-index: 2;
+      top: 12px;
+      right: 12px;
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.86);
+      color: #111;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    @media (max-width: 840px) {
+      .burst-viewer {
+        min-height: min(680px, calc(100vh - 170px));
+      }
+
+      .burst-caption {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+    }
+  </style>
+
+  <script>
+    for (const viewer of document.querySelectorAll("[data-burst-viewer]")) {
+      const slides = Array.from(viewer.querySelectorAll("[data-burst-slide]"));
+      const counter = viewer.querySelector("[data-burst-counter]");
+      let currentIndex = 0;
+
+      function showSlide(nextIndex) {
+        if (slides.length === 0) {
+          return;
+        }
+        currentIndex = (nextIndex + slides.length) % slides.length;
+        slides.forEach((slide, index) => {
+          slide.hidden = index !== currentIndex;
+        });
+        if (counter) {
+          counter.textContent = `${currentIndex + 1} / ${slides.length}`;
+        }
+      }
+
+      const previousButton = viewer.querySelector("[data-burst-prev]");
+      const nextButton = viewer.querySelector("[data-burst-next]");
+      if (previousButton) {
+        previousButton.addEventListener("click", () => showSlide(currentIndex - 1));
+      }
+      if (nextButton) {
+        nextButton.addEventListener("click", () => showSlide(currentIndex + 1));
+      }
+      viewer.addEventListener("keydown", (event) => {
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          showSlide(currentIndex - 1);
+        }
+        if (event.key === "ArrowRight") {
+          event.preventDefault();
+          showSlide(currentIndex + 1);
+        }
+      });
+    }
+  </script>
 {% endblock %}

@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+import time
 from pathlib import Path
 
 import httpx
@@ -224,9 +225,26 @@ def _assert_edge_matches_reference(
         assert expected["luminance_cosine"] >= 0.96
         assert expected["color_histogram_intersection"] >= 0.80
     elif threshold == "metadata_assisted":
-        assert expected["dhash_hamming"] <= 24
-        assert expected["luminance_cosine"] >= 0.94
-        assert expected["color_histogram_intersection"] >= 0.72
+        legacy_metadata_match = (
+            expected["dhash_hamming"] <= 24
+            and expected["luminance_cosine"] >= 0.94
+            and expected["color_histogram_intersection"] >= 0.72
+        )
+        short_interval_burst_match = (
+            expected["dhash_hamming"] <= 18
+            and expected["luminance_cosine"] >= 0.88
+            and expected["color_histogram_intersection"] >= 0.90
+            and edge["capture_time_delta_seconds"] is not None
+            and float(edge["capture_time_delta_seconds"]) <= 2
+        )
+        same_second_burst_match = (
+            expected["dhash_hamming"] <= 20
+            and expected["luminance_cosine"] >= 0.92
+            and expected["color_histogram_intersection"] >= 0.94
+            and edge["capture_time_delta_seconds"] is not None
+            and float(edge["capture_time_delta_seconds"]) <= 1
+        )
+        assert legacy_metadata_match or short_interval_burst_match or same_second_burst_match
         assert edge["metadata_assisted"] is True
     else:
         raise AssertionError(f"未知 threshold: {threshold}")
@@ -300,28 +318,37 @@ def _post_keep_first_asset_per_group(
     template_id: str,
     groups: list[dict[str, object]],
 ) -> tuple[dict[str, object], set[int], set[int]]:
-    payload_groups = []
     kept_asset_ids: set[int] = set()
     abandoned_asset_ids: set[int] = set()
+    aggregate = {
+        "abandoned_asset_ids": [],
+        "kept_asset_ids": [],
+        "created_count": 0,
+        "already_abandoned_count": 0,
+    }
     for group in groups:
         member_ids = [int(asset["asset_id"]) for asset in group["assets"]]
         keep_asset_id = member_ids[0]
         kept_asset_ids.add(keep_asset_id)
         abandoned_asset_ids.update(member_ids[1:])
-        payload_groups.append(
-            {
+        response = httpx.post(
+            f"{base_url}/api/export-templates/{template_id}/burst-pick",
+            json={
                 "group_key": group["group_key"],
                 "keep_asset_ids": [keep_asset_id],
-            }
+            },
+            timeout=30.0,
         )
+        assert response.status_code == 200, response.text
+        result = response.json()
+        aggregate["abandoned_asset_ids"].extend(result["abandoned_asset_ids"])
+        aggregate["kept_asset_ids"].extend(result["kept_asset_ids"])
+        aggregate["created_count"] += int(result["created_count"])
+        aggregate["already_abandoned_count"] += int(result["already_abandoned_count"])
 
-    response = httpx.post(
-        f"{base_url}/api/export-templates/{template_id}/burst-pick",
-        json={"groups": payload_groups},
-        timeout=30.0,
-    )
-    assert response.status_code == 200, response.text
-    return response.json(), kept_asset_ids, abandoned_asset_ids
+    aggregate["abandoned_asset_ids"] = sorted(aggregate["abandoned_asset_ids"])
+    aggregate["kept_asset_ids"] = sorted(aggregate["kept_asset_ids"])
+    return aggregate, kept_asset_ids, abandoned_asset_ids
 
 
 def _planned_target_paths(
@@ -351,7 +378,128 @@ def _planned_target_paths(
     }
 
 
+def _await_burst_pick_completed(
+    base_url: str,
+    template_id: str,
+    *,
+    timeout_seconds: float = 30.0,
+) -> dict[str, object]:
+    deadline = time.time() + timeout_seconds
+    last_data: dict[str, object] | None = None
+    while time.time() < deadline:
+        response = httpx.get(
+            f"{base_url}/api/export-templates/{template_id}/burst-pick",
+            timeout=5.0,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        last_data = data
+        if data["status"] == "completed":
+            return data
+        if data["status"] == "failed":
+            raise AssertionError(data.get("error_message") or data)
+        time.sleep(0.1)
+    raise AssertionError(f"等待连拍挑选后台处理完成超时: {last_data}")
+
+
+def _await_burst_pick_failed(
+    base_url: str,
+    template_id: str,
+    *,
+    timeout_seconds: float = 10.0,
+) -> dict[str, object]:
+    deadline = time.time() + timeout_seconds
+    last_data: dict[str, object] | None = None
+    while time.time() < deadline:
+        response = httpx.get(
+            f"{base_url}/api/export-templates/{template_id}/burst-pick",
+            timeout=5.0,
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        last_data = data
+        if data["status"] == "failed":
+            return data
+        time.sleep(0.1)
+    raise AssertionError(f"等待连拍挑选后台处理失败状态超时: {last_data}")
+
+
 class TestExportTemplateBurstPickApi:
+    def test_get_starts_async_run_and_persists_completed_groups(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        port = find_free_port()
+        process = spawn_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            str(port),
+            env_updates={"HIKBOX_TEST_BURST_PICK_FINGERPRINT_DELAY_SECONDS": "0.05"},
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+
+            response = httpx.get(
+                f"{base_url}/api/export-templates/{template_id}/burst-pick",
+                timeout=5.0,
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "running"
+            assert data["groups"] == []
+            assert data["progress"]["total_candidate_count"] > 0
+            assert data["progress"]["processed_candidate_count"] < data["progress"]["total_candidate_count"]
+
+            run_rows = fetch_all(
+                library_db,
+                """
+                SELECT id, status, total_candidate_count, processed_candidate_count
+                FROM export_burst_pick_run
+                WHERE template_id = ?
+                ORDER BY id DESC
+                """,
+                (template_id,),
+            )
+            assert len(run_rows) == 1
+            run_id = int(run_rows[0][0])
+            assert str(run_rows[0][1]) == "running"
+
+            completed = _await_burst_pick_completed(base_url, template_id, timeout_seconds=30.0)
+            assert completed["status"] == "completed"
+            assert completed["run_id"] == run_id
+            assert completed["groups"]
+            assert completed["diagnostics"]["skipped_missing_or_unreadable_count"] == 0
+
+            persisted_counts = fetch_all(
+                library_db,
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM export_burst_pick_group WHERE run_id = ?),
+                  (SELECT COUNT(*) FROM export_burst_pick_group_asset WHERE group_id IN (
+                    SELECT id FROM export_burst_pick_group WHERE run_id = ?
+                  )),
+                  (SELECT COUNT(*) FROM export_burst_pick_group_edge WHERE group_id IN (
+                    SELECT id FROM export_burst_pick_group WHERE run_id = ?
+                  ))
+                """,
+                (run_id, run_id, run_id),
+            )[0]
+            assert int(persisted_counts[0]) == len(completed["groups"])
+            assert int(persisted_counts[1]) == sum(len(group["assets"]) for group in completed["groups"])
+            assert int(persisted_counts[2]) == sum(
+                len(group["match_evidence"]["edges"]) for group in completed["groups"]
+            )
+        finally:
+            terminate_process(process)
+
     def test_incremental_reencoded_images_without_reliable_metadata_group_by_content(
         self,
         scanned_workspace,
@@ -390,12 +538,7 @@ class TestExportTemplateBurstPickApi:
                 _preview_asset_ids(preview)
             )
 
-            response = httpx.get(
-                f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
-            )
-            assert response.status_code == 200
-            groups = response.json()["groups"]
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
             group = _find_group_containing(
                 groups,
                 {original_asset_id, no_exif_asset_id, fake_metadata_asset_id},
@@ -459,12 +602,7 @@ class TestExportTemplateBurstPickApi:
                 positive_second_id,
             }.issubset(_preview_asset_ids(preview))
 
-            response = httpx.get(
-                f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
-            )
-            assert response.status_code == 200
-            groups = response.json()["groups"]
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
 
             assert not any(
                 {adjacent_first_id, adjacent_second_id}.issubset(
@@ -502,13 +640,7 @@ class TestExportTemplateBurstPickApi:
                 f"{base_url}/api/export-templates/{template_id}/preview",
                 timeout=30.0,
             ).json()
-            response = httpx.get(
-                f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
-            )
-
-            assert response.status_code == 200
-            data = response.json()
+            data = _await_burst_pick_completed(base_url, template_id)
             assert data["template_id"] == template_id
             assert data["diagnostics"]["skipped_missing_or_unreadable_count"] == 0
             groups = data["groups"]
@@ -551,8 +683,10 @@ class TestExportTemplateBurstPickApi:
                         "bucket",
                         "month",
                         "context_url",
+                        "original_url",
                         "is_live",
                     }
+                    assert str(asset["original_url"]) == f"/images/assets/{asset['asset_id']}/original"
                 edge_pairs = [tuple(edge["asset_ids"]) for edge in group["match_evidence"]["edges"]]
                 assert edge_pairs == sorted(edge_pairs)
         finally:
@@ -580,10 +714,7 @@ class TestExportTemplateBurstPickApi:
             ).json()
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_plan WHERE template_id = ?", (template_id,))[0][0] > 0
 
-            groups = httpx.get(
-                f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
-            ).json()["groups"]
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
             abandoned_before_submit: set[int] = set()
             for group in groups:
                 member_ids = [int(asset["asset_id"]) for asset in group["assets"]]
@@ -665,6 +796,52 @@ class TestExportTemplateBurstPickApi:
         finally:
             terminate_process(process)
 
+    def test_post_resolves_only_one_group_and_keeps_other_groups_pending(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+            assert len(groups) >= 2
+            first_group = groups[0]
+            second_group = groups[1]
+            first_member_ids = [int(asset["asset_id"]) for asset in first_group["assets"]]
+
+            response = httpx.post(
+                f"{base_url}/api/export-templates/{template_id}/burst-pick",
+                json={
+                    "group_key": first_group["group_key"],
+                    "keep_asset_ids": [first_member_ids[0]],
+                },
+                timeout=30.0,
+            )
+
+            assert response.status_code == 200, response.text
+            assert set(response.json()["abandoned_asset_ids"]) == set(first_member_ids[1:])
+            marker_rows = fetch_all(
+                library_db,
+                "SELECT asset_id FROM export_abandoned_asset ORDER BY asset_id",
+            )
+            assert {int(row[0]) for row in marker_rows} == set(first_member_ids[1:])
+
+            remaining = httpx.get(
+                f"{base_url}/api/export-templates/{template_id}/burst-pick",
+                timeout=30.0,
+            ).json()
+            remaining_keys = {str(group["group_key"]) for group in remaining["groups"]}
+            assert str(first_group["group_key"]) not in remaining_keys
+            assert str(second_group["group_key"]) in remaining_keys
+        finally:
+            terminate_process(process)
+
     def test_post_rejects_missing_empty_and_stale_groups_without_db_changes(
         self,
         scanned_workspace,
@@ -678,35 +855,35 @@ class TestExportTemplateBurstPickApi:
             wait_for_http_ready(f"{base_url}/")
             _name_required_people(base_url, target_person_ids)
             template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
-            groups = httpx.get(
-                f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
-            ).json()["groups"]
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
             assert len(groups) >= 2
 
             invalid_payloads = [
                 {"groups": [123]},
-                {"groups": [{"group_key": groups[0]["group_key"], "keep_asset_ids": [groups[0]["assets"][0]["asset_id"]]}]},
-                {"groups": [{"group_key": group["group_key"], "keep_asset_ids": []} for group in groups]},
+                {"groups": []},
                 {
                     "groups": [
                         {
-                            "group_key": group["group_key"],
-                            "keep_asset_ids": [
-                                groups[(index + 1) % len(groups)]["assets"][0]["asset_id"]
-                            ],
-                        }
-                        for index, group in enumerate(groups)
+                            "group_key": groups[0]["group_key"],
+                            "keep_asset_ids": [groups[0]["assets"][0]["asset_id"]],
+                        },
+                        {
+                            "group_key": groups[1]["group_key"],
+                            "keep_asset_ids": [groups[1]["assets"][0]["asset_id"]],
+                        },
                     ]
                 },
                 {
-                    "groups": [
-                        {
-                            "group_key": f"{group['group_key']}_stale",
-                            "keep_asset_ids": [group["assets"][0]["asset_id"]],
-                        }
-                        for group in groups
-                    ]
+                    "group_key": groups[0]["group_key"],
+                    "keep_asset_ids": [],
+                },
+                {
+                    "group_key": groups[0]["group_key"],
+                    "keep_asset_ids": [groups[1]["assets"][0]["asset_id"]],
+                },
+                {
+                    "group_key": f"{groups[0]['group_key']}_stale",
+                    "keep_asset_ids": [groups[0]["assets"][0]["asset_id"]],
                 },
             ]
 
@@ -744,18 +921,11 @@ class TestExportTemplateBurstPickApi:
             )
             assert preview_response.status_code == 200
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_plan WHERE template_id = ?", (template_id,))[0][0] > 0
-            groups = httpx.get(
-                f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
-            ).json()["groups"]
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+            assert groups
             payload = {
-                "groups": [
-                    {
-                        "group_key": group["group_key"],
-                        "keep_asset_ids": [group["assets"][0]["asset_id"]],
-                    }
-                    for group in groups
-                ]
+                "group_key": groups[0]["group_key"],
+                "keep_asset_ids": [groups[0]["assets"][0]["asset_id"]],
             }
 
             connection = sqlite3.connect(library_db)
@@ -854,20 +1024,14 @@ class TestExportTemplateBurstPickApi:
             original_asset_id = _asset_id_by_file(library_db, "pg_031_group_alex_blair_01.jpg")
             missing_asset_id = _asset_id_by_file(library_db, missing_candidate_path.name)
             remaining_asset_id = _asset_id_by_file(library_db, remaining_candidate_path.name)
-            first = httpx.get(
-                f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
-            )
-            assert first.status_code == 200
-            assert first.json()["diagnostics"]["skipped_missing_or_unreadable_count"] == 0
-            _find_group_containing(
-                first.json()["groups"],
-                {original_asset_id, missing_asset_id, remaining_asset_id},
-            )
+            missing_candidate_path.unlink()
+
+            first = _await_burst_pick_completed(base_url, template_id)
+            assert first["diagnostics"]["skipped_missing_or_unreadable_count"] == 1
+            assert missing_asset_id not in _burst_asset_ids(first["groups"])
+            _find_group_containing(first["groups"], {original_asset_id, remaining_asset_id})
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_abandoned_asset")[0][0] == 0
             plan_count = fetch_all(library_db, "SELECT COUNT(*) FROM export_plan")[0][0]
-
-            missing_candidate_path.unlink()
 
             second = httpx.get(
                 f"{base_url}/api/export-templates/{template_id}/burst-pick",
@@ -881,9 +1045,7 @@ class TestExportTemplateBurstPickApi:
             assert second.status_code == 200
             assert third.status_code == 200
             assert second.json() == third.json()
-            assert second.json()["diagnostics"]["skipped_missing_or_unreadable_count"] == 1
-            assert missing_asset_id not in _burst_asset_ids(second.json()["groups"])
-            _find_group_containing(second.json()["groups"], {original_asset_id, remaining_asset_id})
+            assert second.json() == first
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_abandoned_asset")[0][0] == 0
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_plan")[0][0] == plan_count
         finally:
@@ -912,13 +1074,30 @@ class TestExportTemplateBurstPickApi:
             marker_count_before = fetch_all(library_db, "SELECT COUNT(*) FROM export_abandoned_asset")[0][0]
             plan_count_before = fetch_all(library_db, "SELECT COUNT(*) FROM export_plan")[0][0]
 
-            response = httpx.get(
+            first_response = httpx.get(
                 f"{base_url}/api/export-templates/{template_id}/burst-pick",
-                timeout=30.0,
+                timeout=5.0,
             )
 
-            assert response.status_code == 500
-            assert "视觉特征" in response.json()["detail"]
+            assert first_response.status_code == 200
+            failed = _await_burst_pick_failed(base_url, template_id)
+            assert failed["status"] == "failed"
+            assert "视觉特征" in str(failed["error_message"])
+            run_id = int(failed["run_id"])
+            assert fetch_all(
+                library_db,
+                "SELECT status FROM export_burst_pick_run WHERE id = ?",
+                (run_id,),
+            ) == [("failed",)]
+            assert fetch_all(
+                library_db,
+                """
+                SELECT COUNT(*)
+                FROM export_burst_pick_group
+                WHERE run_id = ?
+                """,
+                (run_id,),
+            )[0][0] == 0
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_abandoned_asset")[0][0] == marker_count_before
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_plan")[0][0] == plan_count_before
         finally:
