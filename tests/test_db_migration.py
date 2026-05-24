@@ -366,7 +366,7 @@ def test_library_v6_migration_adds_multifeature_burst_pick_edge_columns_and_pres
                 INSERT INTO export_burst_pick_run (
                   template_id, algorithm_version, status, started_at, finished_at
                 )
-                VALUES ('template-old', 'visual_fingerprint_v2_multifeature_recall', 'completed', '2026-05-05T00:01:00Z', '2026-05-05T00:01:01Z')
+                VALUES ('template-old', 'visual_fingerprint_v2_multifeature_recall_merge_v3', 'completed', '2026-05-05T00:01:00Z', '2026-05-05T00:01:01Z')
                 """
             ).lastrowid)
             second_v2_run_id = int(connection.execute(
@@ -374,7 +374,7 @@ def test_library_v6_migration_adds_multifeature_burst_pick_edge_columns_and_pres
                 INSERT INTO export_burst_pick_run (
                   template_id, algorithm_version, status, started_at, finished_at
                 )
-                VALUES ('template-old', 'visual_fingerprint_v2_multifeature_recall', 'completed', '2026-05-05T00:02:00Z', '2026-05-05T00:02:01Z')
+                VALUES ('template-old', 'visual_fingerprint_v2_multifeature_recall_merge_v3', 'completed', '2026-05-05T00:02:00Z', '2026-05-05T00:02:01Z')
                 """
             ).lastrowid)
     finally:
@@ -422,7 +422,7 @@ def test_library_v6_migration_adds_multifeature_burst_pick_edge_columns_and_pres
             SELECT id
             FROM export_burst_pick_run
             WHERE template_id = 'template-old'
-              AND algorithm_version = 'visual_fingerprint_v2_multifeature_recall'
+              AND algorithm_version = 'visual_fingerprint_v2_multifeature_recall_merge_v3'
             ORDER BY id DESC
             LIMIT 1
             """
@@ -432,7 +432,7 @@ def test_library_v6_migration_adds_multifeature_burst_pick_edge_columns_and_pres
     assert old_edge == ("strict", 0, 4, 0.99, 0.95, None, None, None, None, None)
     assert run_versions == [
         ("visual_fingerprint_v1_burst_bridge_v3", 1),
-        ("visual_fingerprint_v2_multifeature_recall", 2),
+        ("visual_fingerprint_v2_multifeature_recall_merge_v3", 2),
     ]
     assert latest_v2_run == (second_v2_run_id,)
     assert first_v2_run_id != second_v2_run_id

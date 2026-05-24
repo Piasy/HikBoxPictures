@@ -12,7 +12,7 @@
 - 本 child spec 只交付多特征规则增强；不得引入 Vision FeaturePrint、Core ML、DINO、CLIP、ONNX 图像 embedding、ANN 索引或需要下载的新图像模型。
 - 本 child spec 必须扩展 DB 持久化结构来保存新 edge evidence schema；可以选择新增 edge 表、扩展现有 edge 表，或新增视觉特征缓存表。任何 DB schema 修改都必须新增 migration 并同步更新 `docs/db_schema.md`。
 - 本 child spec 允许直接升级 `GET /api/export-templates/{template_id}/burst-pick` 的 `match_evidence` schema；已有测试应改为断言新 schema，不要求保留 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 的旧 edge 字段或兼容映射。
-- 本 child spec 与 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 的关系是 evidence 合同替换，不是双 schema 兼容；Child C 交付后的最终 API evidence 以 `visual_fingerprint_v2_multifeature_recall`、`strong_edges[]` 和可选 `weak_edges[]` 为准。
+- 本 child spec 与 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 的关系是 evidence 合同替换，不是双 schema 兼容；Child C 交付后的最终 API evidence 以 `visual_fingerprint_v2_multifeature_recall_merge_v3`、`strong_edges[]` 和可选 `weak_edges[]` 为准。
 
 ## Feature Slice 1: 多特征规则分组提高召回
 
@@ -20,7 +20,7 @@
 
 ### Behavior
 
-- 连拍挑选后台任务使用新的算法版本，例如 `visual_fingerprint_v2_multifeature_recall`；算法版本必须不同于 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 已实现版本，避免复用旧 run 的低召回分组结果。
+- 连拍挑选后台任务使用新的算法版本，例如 `visual_fingerprint_v2_multifeature_recall_merge_v3`；算法版本必须不同于 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 已实现版本，避免复用旧 run 的低召回分组结果。
 - 识别范围仍是单个导出模板当前可导出候选集：已全局放弃的 asset 不参与候选、不参与特征计算、不参与分组；候选 only/group、人物命中和月份语义继承 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md)。
 - 单图视觉特征升级为多特征组合，图像预处理固定继承 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md)：用 Pillow/pillow-heif 解码源图片，先应用 `ImageOps.exif_transpose`，再 `convert("RGB")`，所有哈希输入均从该 RGB 图派生；需要亮度图时固定使用 `convert("L")`。具体特征固定使用以下确定性算法：
   - `global_dhash`：继承当前 128-bit dHash，用于近重复和连续拍摄的全局结构变化判断。
@@ -49,17 +49,17 @@
   - `same_scene_similar` 弱边：可用时间差 `<= 300` 秒，且满足 `phash_hamming <= 32`、`center_phash_hamming <= 30`、`block_match_ratio >= 0.25` 中至少一个条件，但不满足任何强边规则。`confidence` 必须 `< 0.78`，不得参与强边聚类。
   - `different`：不满足以上规则，或虽然时间/设备接近但视觉条件不足。
 - 分类优先级固定为 `exact_duplicate` > `edited_duplicate` > `burst_duplicate` > `same_scene_similar` > `different`。如果一个 pair 同时满足多个规则，必须选择优先级最高的类型；测试中用于验证 `edited_duplicate` 或 `burst_duplicate` 的样本必须构造成不满足更高优先级规则。
-- 默认策略偏召回：对明显相似、轻裁剪、局部变化和短时间连续拍摄的照片，应优先展示给用户挑选；误报由用户在每组内选择全部保留或不提交该组处理。
+- 默认策略强烈偏召回：对明显相似、轻裁剪、局部变化和短时间连续拍摄的照片，应优先展示给用户挑选；只要组件内存在强边路径，就允许通过相似子组之间的桥接边合并成更大的相似组。误报由用户在每组内选择全部保留或不提交该组处理。
 - 只有 `exact_duplicate`、`edited_duplicate` 和 `burst_duplicate` 作为强边进入相似组聚类；`same_scene_similar` 只能作为诊断或弱相似提示，不得单独形成可提交的放弃组。
 - `burst_duplicate` 的时间窗口固定为：
   - 强连拍窗口：拍摄时间差或可用替代时间差 `<= 10` 秒。此窗口内，视觉多特征达到连拍门槛即可形成 `burst_duplicate` 强边；设备一致是增强置信度的正向证据，但设备缺失不能单独阻止视觉证据足够强的 pair 入组。
   - 连续场景窗口：时间差 `> 10` 秒且 `<= 60` 秒。此窗口内必须满足比强连拍窗口更强的视觉门槛，才能形成 `burst_duplicate` 强边；否则最多分类为 `same_scene_similar`。
   - 超出连续窗口：时间差 `> 60` 秒时，不得只凭连续拍摄语义形成 `burst_duplicate`；只有满足 `exact_duplicate` 或 `edited_duplicate` 这类与时间无关的强重复规则时，才能形成强边。
-- 聚类使用强边连通分量，并在输出前做后验校验，防止链式误聚：
+- 聚类使用强边连通分量，并在输出前做偏召回后验校验，目标是尽量合并已经由强边路径连接的相似子组，而不是把大组件切成许多小组：
   - 组类型：按组内强边数量最多的 `edge_type` 作为主类型；数量相同时按 `exact_duplicate`、`edited_duplicate`、`burst_duplicate` 的顺序取更严格类型。
-  - 中心图校验：medoid 固定为组内“直接强边数量最多”的 asset；数量相同时取强边 `confidence` 总和最高者，再相同取最小 `asset_id`。主类型为 `exact_duplicate` 或 `edited_duplicate` 时，每个非 medoid 成员必须与 medoid 满足 `phash_hamming <= 18` 或 `center_phash_hamming <= 18` 或 `block_match_ratio >= 0.50`。主类型为 `burst_duplicate` 时，每个非 medoid 成员必须与 medoid 满足 `phash_hamming <= 32` 或 `center_phash_hamming <= 30` 或 `block_match_ratio >= 0.25`，且如果双方都有可用时间，二者时间差必须 `<= 300` 秒。
+  - 中心图校验：medoid 固定为组内“直接强边数量最多”的 asset；数量相同时取强边 `confidence` 总和最高者，再相同取最小 `asset_id`。主类型为 `exact_duplicate` 或 `edited_duplicate` 时，每个非 medoid 成员必须与 medoid 满足 `phash_hamming <= 18` 或 `center_phash_hamming <= 18` 或 `block_match_ratio >= 0.50`；不要求每个成员都与 medoid 存在直接强边。主类型为 `burst_duplicate` 时，每个非 medoid 成员必须与 medoid 满足 `phash_hamming <= 32` 或 `center_phash_hamming <= 30` 或 `block_match_ratio >= 0.25`，且如果双方都有可用时间，二者时间差必须 `<= 300` 秒。
   - 时间跨度校验：主要由 `burst_duplicate` 边组成的组，整体时间跨度默认不得超过 5 分钟；超过时必须存在覆盖所有超跨度成员的 `exact_duplicate` 或 `edited_duplicate` 强边证据，否则拆组。
-  - 边密度校验：`strong_edge_density = strong_edges / (n * (n - 1) / 2)`；`n <= 5` 时必须 `>= 0.40`，`n > 5` 时必须 `>= 0.25`。不满足时删除最低 `confidence` 强边后重新取连通分量并重新校验；若仍不满足，丢弃不满足校验的组件。
+  - 边密度校验：`strong_edge_density = strong_edges / (n * (n - 1) / 2)`；`n <= 5` 时必须 `>= 0.40`，`n > 5` 时必须 `>= 0.05`。不满足时删除最低 `confidence` 强边后重新取连通分量并重新校验；若仍不满足，丢弃不满足校验的组件。该阈值用于避免把几乎全模板级的极低密度组件直接合成一个组，同时允许强边链路足够多的大相似组件合并。
 - 分组结果仍稳定排序：组按组内最小 `asset_id` 升序展示，组内照片按 `asset_id` 升序展示，除非后续 spec 明确改为按拍摄时间或 medoid 排序。
 
 ### Public Interface
@@ -69,7 +69,7 @@
 - API `groups[].match_evidence` 使用新 schema；不要求保留 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 旧 edge 字段。新 schema 至少包含：
   ```json
   {
-    "algorithm": "visual_fingerprint_v2_multifeature_recall",
+    "algorithm": "visual_fingerprint_v2_multifeature_recall_merge_v3",
     "strong_edges": [
       {
         "asset_ids": [123, 456],
@@ -132,7 +132,7 @@
 #### AC-1: 新算法版本启动新 run 并持久化新 evidence schema
 
 - 触发：在 fresh `copy_scanned_workspace(tmp_path)` 中创建 active 导出模板，首次访问 `GET /api/export-templates/{template_id}/burst-pick`，等待后台任务完成；随后再次访问同一 API。
-- 必须可观察：首次访问立即返回或展示 `running` 状态并启动新 run；完成后 DB 中 `export_burst_pick_run.algorithm_version` 为新算法版本，且不等于旧版本；完成后的 API 从 DB 返回 `status="completed"`、`run_id` 和 `match_evidence.algorithm="visual_fingerprint_v2_multifeature_recall"`（如果当前 fixture 恰好有相似组）；第二次访问复用同版本 completed run，不重新创建相同版本的新 run。非空 `groups[]`、新 `strong_edges[]` schema 和 edge 持久化由 AC-2、AC-3、AC-4、AC-8 的稳定自定义变体样本验收。
+- 必须可观察：首次访问立即返回或展示 `running` 状态并启动新 run；完成后 DB 中 `export_burst_pick_run.algorithm_version` 为新算法版本，且不等于旧版本；完成后的 API 从 DB 返回 `status="completed"`、`run_id` 和 `match_evidence.algorithm="visual_fingerprint_v2_multifeature_recall_merge_v3"`（如果当前 fixture 恰好有相似组）；第二次访问复用同版本 completed run，不重新创建相同版本的新 run。非空 `groups[]`、新 `strong_edges[]` schema 和 edge 持久化由 AC-2、AC-3、AC-4、AC-8 的稳定自定义变体样本验收。
 - 验证手段：服务级集成测试走真实 HTTP API，轮询完成；SQLite 断言 run 版本、run 数量和复用语义；不依赖主基线 fixture 偶然产生相似组。
 
 #### AC-2: 直接副本和视觉基本不变的重编码通过 `exact_duplicate` 入组
@@ -159,17 +159,17 @@
 - 必须可观察：(a) `capture_time_delta_seconds` 来自 `DateTimeOriginal`，不是其他 EXIF 字段或 mtime；(b) `capture_time_delta_seconds` 来自 `DateTimeDigitized`；(c) `capture_time_delta_seconds` 来自 `DateTime`；(d) `capture_time_delta_seconds` 来自文件 mtime fallback；(e) 源文件缺失的 asset 被跳过或其相关 edge 的 `capture_time_delta_seconds` 为 `null`；无论采用哪种实现方式，都不得因为缺失源文件返回 500 或写入部分分组。
 - 验证手段：服务级集成测试通过真实 `source add -> scan start -> GET API` 入口覆盖 (a)、(b)、(c)、(d)、(e)；测试侧读取派生文件 EXIF 和 mtime 作为前置断言，再断言 API edge 的 `capture_time_delta_seconds` 或诊断跳过数量。
 
-#### AC-5: 文件名相邻、时间接近或设备一致但内容不同不得入组
+#### AC-5: 文件名相邻、时间接近或设备一致但内容不同不得直接产生强边
 
 - 触发：用临时 source 构造两张文件名序号相邻、同目录相邻、时间差 `<= 10` 秒且设备信息相同或缺失的图片，但图像内容明显不同；真实扫描后访问连拍挑选 API。
-- 必须可观察：这两张图片不得出现在同一个相似组；API `strong_edges[]` 不包含这对 asset；如果实现返回弱相似或 rejected 诊断，该 pair 必须被分类为 `different` 或不满足强边门槛。
+- 必须可观察：API `strong_edges[]` 不包含这对 asset；如果实现返回弱相似或 rejected 诊断，该 pair 必须被分类为 `different` 或不满足强边门槛。若二者因为各自与其他照片存在强边路径而被合并进同一个更大的相似组，也必须没有这对 asset 的直接强边 evidence。
 - 验证手段：服务级集成测试走真实 API；测试侧独立 helper 重算视觉特征，断言 pair 不满足 exact、edited 或 burst 强边规则；DB edge 表不包含该 pair 的强边。
 
-#### AC-6: 链式弱相似不能把低密度长跨度样本误聚成大组
+#### AC-6: 强边大组件尽量合并，弱边或极低密度长跨度样本仍不直接合成大组
 
-- 触发：构造 A/B/C 或 A/B/C/D 临时样本，使相邻 pair 具有弱相似或低置信连续场景证据，但首尾 pair 不满足中心图校验、时间跨度超过 burst 组限制或强边密度低于要求；真实扫描后访问连拍挑选 API。
-- 必须可观察：系统不会输出包含整条链的一个大可提交组；结果要么拆成更小的强相似子组，要么只在诊断中记录弱相似，不让弱相似端点进入可提交组；任何输出组都满足中心图、时间跨度和边密度后验校验。
-- 验证手段：算法级聚类单元测试覆盖弱链拆分和边密度；服务级集成测试覆盖至少一个真实图片派生链式负例，并用 API 组成员集合和 `strong_edges[]` 断言没有大组误聚。
+- 触发：构造两类样本：(a) 大量照片通过 `exact_duplicate`、`edited_duplicate` 或 `burst_duplicate` 强边形成稀疏但密度 `>= 0.05` 的大连通分量，且每个成员满足中心图校验；(b) A/B/C 或 A/B/C/D 临时样本，使相邻 pair 只有弱相似或低置信连续场景证据，或强边密度 `< 0.05`，或时间跨度超过 burst 组限制；真实扫描后访问连拍挑选 API。
+- 必须可观察：(a) 系统尽量保留为一个可提交大相似组，不因为成员缺少 medoid 直接边或大组件密度低于旧阈值而拆成许多小组；(b) 系统不会仅凭弱边或低于密度/时间后验要求的链路输出包含整条链的大可提交组；任何输出组都满足中心图、时间跨度和边密度后验校验。
+- 验证手段：算法级聚类单元测试覆盖稀疏强边大组件合并、弱链拆分和边密度；服务级集成测试覆盖至少一个真实图片派生链式边界样本，并用 API 组成员集合和 `strong_edges[]` 断言直接 evidence 与输出组一致。
 
 #### AC-7: 特征缓存版本、源文件变化和坏缓存不会污染结果
 

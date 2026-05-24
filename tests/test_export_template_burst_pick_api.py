@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -35,7 +36,7 @@ from tests.helpers import (
 
 
 _EXIF_ID_BY_NAME = {name: tag_id for tag_id, name in ExifTags.TAGS.items()}
-EXPECTED_BURST_PICK_ALGORITHM = "visual_fingerprint_v2_multifeature_recall"
+EXPECTED_BURST_PICK_ALGORITHM = "visual_fingerprint_v2_multifeature_recall_merge_v3"
 
 
 def _name_required_people(base_url: str, target_person_ids: dict[str, str]) -> None:
@@ -349,10 +350,16 @@ def _matches_burst_duplicate_rule(metrics: dict[str, float | int], capture_delta
     return False
 
 
-def _assert_not_same_visual_burst(path_a: Path, path_b: Path) -> None:
+def _assert_not_same_visual_burst(
+    path_a: Path,
+    path_b: Path,
+    *,
+    capture_delta_seconds: float,
+) -> None:
     metrics = _reference_metrics(path_a, path_b)
     assert not _matches_exact_duplicate_rule(metrics)
     assert not _matches_edited_duplicate_rule(metrics)
+    assert not _matches_burst_duplicate_rule(metrics, capture_delta_seconds)
 
 
 def _save_reencoded_variant(
@@ -535,6 +542,17 @@ def _assert_pair_not_in_any_group(
     )
 
 
+def _assert_pair_has_no_direct_edge(
+    groups: list[dict[str, object]],
+    first_asset_id: int,
+    second_asset_id: int,
+) -> None:
+    assert not any(
+        _direct_edge_or_none(group, first_asset_id, second_asset_id) is not None
+        for group in groups
+    )
+
+
 def _force_file_mtime_pair(first_path: Path, second_path: Path, *, delta_seconds: int) -> None:
     base_mtime = 1_800_010_000.0
     os.utime(first_path, (base_mtime, base_mtime))
@@ -577,6 +595,121 @@ def _post_keep_first_asset_per_group(
     aggregate["abandoned_asset_ids"] = sorted(aggregate["abandoned_asset_ids"])
     aggregate["kept_asset_ids"] = sorted(aggregate["kept_asset_ids"])
     return aggregate, kept_asset_ids, abandoned_asset_ids
+
+
+def _create_controlled_two_group_template(
+    base_url: str,
+    library_db: Path,
+    tmp_path: Path,
+    *,
+    label: str,
+) -> str:
+    source_dir = tmp_path / f"{label}-controlled-source"
+    first_fixture = FIXTURE_DIR / "pg_031_group_alex_blair_01.jpg"
+    second_fixture = FIXTURE_DIR / "pg_037_group_all_targets_07.jpg"
+    paths = [
+        source_dir / f"{label}_a_1.jpg",
+        source_dir / f"{label}_a_2.jpg",
+        source_dir / f"{label}_b_1.jpg",
+        source_dir / f"{label}_b_2.jpg",
+    ]
+    _save_direct_copy(first_fixture, paths[0])
+    _save_reencoded_variant(first_fixture, paths[1], brightness=1.01)
+    _save_direct_copy(second_fixture, paths[2])
+    _save_reencoded_variant(second_fixture, paths[3], brightness=0.99)
+    for index, path in enumerate(paths):
+        mtime = 1_800_100_000.0 if index < 2 else 1_800_101_000.0
+        os.utime(path, (mtime, mtime))
+
+    first_person_id = f"test-{uuid.uuid4()}"
+    second_person_id = f"test-{uuid.uuid4()}"
+    now = "2026-05-24T00:00:00Z"
+    connection = sqlite3.connect(library_db)
+    try:
+        with connection:
+            source_id = int(connection.execute(
+                """
+                INSERT INTO library_sources (path, label, active, scan_state, created_at)
+                VALUES (?, ?, 1, 'completed', ?)
+                """,
+                (str(source_dir), label, now),
+            ).lastrowid)
+            assignment_run_id = connection.execute(
+                "SELECT id FROM assignment_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+            for person_id, display_name in (
+                (first_person_id, f"{label} Alpha"),
+                (second_person_id, f"{label} Beta"),
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO person (
+                      id, display_name, is_named, status, write_revision, created_at, updated_at
+                    )
+                    VALUES (?, ?, 1, 'active', 0, ?, ?)
+                    """,
+                    (person_id, display_name, now, now),
+                )
+
+            for path in paths:
+                image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
+                width, height = image.size
+                asset_id = int(connection.execute(
+                    """
+                    INSERT INTO assets (
+                      source_id, absolute_path, file_name, file_extension, capture_month,
+                      live_photo_mov_path, processing_status, failure_reason,
+                      scan_retry_count, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, '.jpg', '2026-05', NULL, 'succeeded', NULL, 0, ?, ?)
+                    """,
+                    (source_id, str(path), path.name, now, now),
+                ).lastrowid)
+                for face_index, person_id in enumerate((first_person_id, second_person_id)):
+                    left = width * (0.10 if face_index == 0 else 0.55)
+                    right = width * (0.45 if face_index == 0 else 0.90)
+                    face_id = int(connection.execute(
+                        """
+                        INSERT INTO face_observations (
+                          asset_id, face_index, bbox_x1, bbox_y1, bbox_x2, bbox_y2,
+                          image_width, image_height, score, crop_path, context_path, created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.99, ?, ?, ?)
+                        """,
+                        (
+                            asset_id,
+                            face_index,
+                            left,
+                            height * 0.20,
+                            right,
+                            height * 0.80,
+                            width,
+                            height,
+                            str(path),
+                            str(path),
+                            now,
+                        ),
+                    ).lastrowid)
+                    connection.execute(
+                        """
+                        INSERT INTO person_face_assignments (
+                          person_id, face_observation_id, assignment_run_id,
+                          assignment_source, active, evidence_json, created_at, updated_at
+                        )
+                        VALUES (?, ?, ?, 'online_v6', 1, '{}', ?, ?)
+                        """,
+                        (person_id, face_id, assignment_run_id, now, now),
+                    )
+    finally:
+        connection.close()
+
+    result = create_template_via_api(
+        base_url,
+        name=f"{label} controlled",
+        person_ids=[first_person_id, second_person_id],
+        output_root=str(tmp_path / f"{label}-output"),
+    )
+    return str(result["template_id"])
 
 
 def _planned_target_paths(
@@ -1198,15 +1331,11 @@ class TestExportTemplateBurstPickApi:
 
             groups = _await_burst_pick_completed(base_url, template_id)["groups"]
 
-            assert not any(
-                {adjacent_first_id, adjacent_second_id}.issubset(
-                    {int(asset["asset_id"]) for asset in group["assets"]}
-                )
-                for group in groups
-            )
+            _assert_pair_has_no_direct_edge(groups, adjacent_first_id, adjacent_second_id)
             _assert_not_same_visual_burst(
                 _asset_path(library_db, adjacent_first_id),
                 _asset_path(library_db, adjacent_second_id),
+                capture_delta_seconds=8.0,
             )
 
             positive_group = _find_group_containing(groups, {positive_first_id, positive_second_id})
@@ -1402,10 +1531,14 @@ class TestExportTemplateBurstPickApi:
         base_url = f"http://127.0.0.1:{port}"
         try:
             wait_for_http_ready(f"{base_url}/")
-            _name_required_people(base_url, target_person_ids)
-            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            template_id = _create_controlled_two_group_template(
+                base_url,
+                library_db,
+                tmp_path,
+                label="post-pending",
+            )
             groups = _await_burst_pick_completed(base_url, template_id)["groups"]
-            assert len(groups) >= 2
+            assert len(groups) == 2
             first_group = groups[0]
             second_group = groups[1]
             first_member_ids = [int(asset["asset_id"]) for asset in first_group["assets"]]
@@ -1448,10 +1581,17 @@ class TestExportTemplateBurstPickApi:
         base_url = f"http://127.0.0.1:{port}"
         try:
             wait_for_http_ready(f"{base_url}/")
-            _name_required_people(base_url, target_person_ids)
-            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            template_id = _create_controlled_two_group_template(
+                base_url,
+                library_db,
+                tmp_path,
+                label="post-invalid",
+            )
             groups = _await_burst_pick_completed(base_url, template_id)["groups"]
-            assert len(groups) >= 2
+            assert len(groups) == 2
+            group_key = str(groups[0]["group_key"])
+            keep_asset_id = int(groups[0]["assets"][0]["asset_id"])
+            other_group_keep_asset_id = int(groups[1]["assets"][0]["asset_id"])
 
             invalid_payloads = [
                 {"groups": [123]},
@@ -1459,26 +1599,26 @@ class TestExportTemplateBurstPickApi:
                 {
                     "groups": [
                         {
-                            "group_key": groups[0]["group_key"],
-                            "keep_asset_ids": [groups[0]["assets"][0]["asset_id"]],
+                            "group_key": group_key,
+                            "keep_asset_ids": [keep_asset_id],
                         },
                         {
                             "group_key": groups[1]["group_key"],
-                            "keep_asset_ids": [groups[1]["assets"][0]["asset_id"]],
+                            "keep_asset_ids": [other_group_keep_asset_id],
                         },
                     ]
                 },
                 {
-                    "group_key": groups[0]["group_key"],
+                    "group_key": group_key,
                     "keep_asset_ids": [],
                 },
                 {
-                    "group_key": groups[0]["group_key"],
-                    "keep_asset_ids": [groups[1]["assets"][0]["asset_id"]],
+                    "group_key": group_key,
+                    "keep_asset_ids": [other_group_keep_asset_id],
                 },
                 {
-                    "group_key": f"{groups[0]['group_key']}_stale",
-                    "keep_asset_ids": [groups[0]["assets"][0]["asset_id"]],
+                    "group_key": f"{group_key}_stale",
+                    "keep_asset_ids": [keep_asset_id],
                 },
             ]
 

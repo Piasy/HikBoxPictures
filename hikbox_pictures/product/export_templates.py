@@ -31,7 +31,7 @@ from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
 
 
-BURST_PICK_ALGORITHM_VERSION = "visual_fingerprint_v2_multifeature_recall"
+BURST_PICK_ALGORITHM_VERSION = "visual_fingerprint_v2_multifeature_recall_merge_v3"
 
 
 class ExportTemplateError(RuntimeError):
@@ -2279,19 +2279,16 @@ def _component_is_valid(
         return False
     possible_edges = len(asset_ids) * (len(asset_ids) - 1) / 2
     density = len(edges) / possible_edges
-    if density < (0.40 if len(asset_ids) <= 5 else 0.25):
+    if density < _component_min_strong_edge_density(len(asset_ids)):
         return False
 
     main_type = _component_main_edge_type(edges)
     medoid = _component_medoid(asset_ids, edges)
-    direct_edge_pairs = {edge.asset_ids for edge in edges}
     for asset_id in asset_ids:
         if asset_id == medoid:
             continue
         metrics = _pair_metrics(fingerprints[medoid], fingerprints[asset_id])
         if main_type in {"exact_duplicate", "edited_duplicate"}:
-            if tuple(sorted((medoid, asset_id))) not in direct_edge_pairs:
-                return False
             if not (
                 metrics.phash_hamming <= 18
                 or metrics.center_phash_hamming <= 18
@@ -2324,6 +2321,12 @@ def _component_is_valid(
         if event_times and (max(event_times) - min(event_times)).total_seconds() > 300:
             return False
     return True
+
+
+def _component_min_strong_edge_density(asset_count: int) -> float:
+    if asset_count <= 5:
+        return 0.40
+    return 0.05
 
 
 def _component_main_edge_type(edges: list[BurstPickEdge]) -> str:

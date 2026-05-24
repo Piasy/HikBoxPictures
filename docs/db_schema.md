@@ -45,7 +45,7 @@ Migration SQL 文件存放于 `hikbox_pictures/product/db/sql/`，命名规则�
 - `library_v5.sql`
   为 `export_burst_pick_run` 增加 `algorithm_version` 列和查询索引，使连拍分组算法调整后不会继续复用旧版本持久化结果。
 - `library_v6.sql`
-  为 `export_burst_pick_group_edge` 增加多特征强边字段：`edge_type`、`confidence`、`phash_hamming`、`center_phash_hamming` 和 `block_match_ratio`，用于还原 `visual_fingerprint_v2_multifeature_recall` 的 `match_evidence.strong_edges[]`。
+  为 `export_burst_pick_group_edge` 增加多特征强边字段：`edge_type`、`confidence`、`phash_hamming`、`center_phash_hamming` 和 `block_match_ratio`，用于还原 `visual_fingerprint_v2_multifeature_recall_merge_v3` 的 `match_evidence.strong_edges[]`。
 
 #### `embedding.db`
 
@@ -843,7 +843,7 @@ CREATE INDEX idx_export_burst_pick_run_template_algorithm_started
 - 后台任务失败时把状态改为 `failed` 并写入 `error_message`；不会写入放弃标记或导出计划。
 - 页面和 API 通过 `total_candidate_count`、`processed_candidate_count`、`status` 刷新展示处理进展。
 - 读取任务时只复用当前 `algorithm_version` 的结果；算法阈值调整后会创建新任务并重新计算。
-- 当前连拍挑选算法版本为 `visual_fingerprint_v2_multifeature_recall`；旧 `visual_fingerprint_v1*` run 可与新 run 共存，但不会被新算法入口复用。
+- 当前连拍挑选算法版本为 `visual_fingerprint_v2_multifeature_recall_merge_v3`；旧 `visual_fingerprint_v1*`、`visual_fingerprint_v2_multifeature_recall` 和 `visual_fingerprint_v2_multifeature_recall_merge_v2` run 可与新 run 共存，但不会被新算法入口复用。
 - 若当前版本最新 run 进入 `failed`，故障解除后的下一次公共入口访问会创建新的同版本 run；故障仍由测试注入保持时，API/Web 可继续观察 failed 状态。
 
 ### 2.21 `export_burst_pick_group`
@@ -937,7 +937,7 @@ CREATE INDEX idx_export_burst_pick_group_edge_group
 
 - 保存连拍挑选组内强边 evidence，用于 API 稳定返回 `match_evidence.strong_edges[]`；页面刷新不会重新计算视觉指标。
 - `asset_id_first` 和 `asset_id_second` 按升序存储。
-- `threshold`、`metadata_assisted`、`luminance_cosine`、`color_histogram_intersection` 是 Child A `visual_fingerprint_v1` 的旧 evidence 字段，v6 后保留用于兼容旧行；新 `visual_fingerprint_v2_multifeature_recall` 写入时不再通过 API 暴露这些字段。
+- `threshold`、`metadata_assisted`、`luminance_cosine`、`color_histogram_intersection` 是 Child A `visual_fingerprint_v1` 的旧 evidence 字段，v6 后保留用于兼容旧行；新 `visual_fingerprint_v2_multifeature_recall_merge_v3` 写入时不再通过 API 暴露这些字段。
 - `edge_type` 为新强边类型，只能取 `exact_duplicate`、`edited_duplicate`、`burst_duplicate`；`confidence` 为 `0.0..1.0` 的规则置信度。
 - `phash_hamming`、`dhash_hamming`、`center_phash_hamming`、`block_match_ratio`、`capture_time_delta_seconds` 和 `normalized_device_match` 可完整还原新 API `strong_edges[]` 的必填指标字段。
 
