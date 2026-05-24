@@ -36,10 +36,11 @@
 
 ### Child Spec C: 模板连拍多特征召回增强
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 - Spec: [2026-05-23-burst-pick-export-dedupe-child-c-multifeature-recall-spec.md](./2026-05-23-burst-pick-export-dedupe-child-c-multifeature-recall-spec.md)
 - Scope: 在 [Child A](./2026-05-23-burst-pick-export-dedupe-child-a-template-burst-pick-spec.md) 已交付的模板连拍挑选基础上，把相似分组算法升级为多特征规则召回，覆盖重存、轻编辑、轻裁剪、局部变化和短时间连续拍摄，同时用强边聚类与后验校验控制链式误聚。Child C 交付后，仅替换 Child A 中 `visual_fingerprint_v1` 和 `groups[].match_evidence.edges[]` 相关 API evidence 合同；异步任务、DB 持久化 run/group、原图幻灯片、每组独立提交、全局放弃导出标记、后续 preview/export 跳过等交互和数据生命周期语义继续继承 Child A。
 - Acceptance summary: 用户刷新连拍挑选页后，新算法后台 run 能持久化包含 `global pHash`、`center pHash`、`block pHash` 等证据的 `strong_edges[]` 相似组；明显相似照片更容易被召回，文件名相邻或时间接近但内容不同的照片不会入组，页面仍可按单组提交保留选择。最终 `GET /api/export-templates/{template_id}/burst-pick` evidence schema 以 Child C 为准，不再要求同时满足 Child A 的 v1 `edges[]` schema。
+- Non-blocking concerns: code-quality review 指出多特征视觉计算、pair 分类、聚类校验和 DB 持久化继续集中在 `export_templates.py`，且候选 pair 仍是全量 `O(n^2)`、pHash DCT 为纯 Python 循环。当前实现有独立 helper 分层、逐文件自动化覆盖和现有 fixture 规模验证，本轮接受该维护性与性能扩展风险；后续如果继续扩展连拍算法、引入 embedding/ANN、或需要支持大模板候选集，应优先拆出 burst-pick 专用模块，并补性能阈值、blocking 或基准测试。
 
 ## Candidate Future Split Specs
 

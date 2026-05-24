@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import re
 import sqlite3
 import time
@@ -34,6 +35,7 @@ from tests.helpers import (
 
 
 _EXIF_ID_BY_NAME = {name: tag_id for tag_id, name in ExifTags.TAGS.items()}
+EXPECTED_BURST_PICK_ALGORITHM = "visual_fingerprint_v2_multifeature_recall"
 
 
 def _name_required_people(base_url: str, target_person_ids: dict[str, str]) -> None:
@@ -120,7 +122,7 @@ def _find_edge(
     asset_b: int,
 ) -> dict[str, object]:
     expected = sorted([asset_a, asset_b])
-    for edge in group["match_evidence"]["edges"]:
+    for edge in group["match_evidence"]["strong_edges"]:
         if edge["asset_ids"] == expected:
             return edge
     raise AssertionError(f"未找到 edge: {expected}")
@@ -132,7 +134,7 @@ def _direct_edge_or_none(
     asset_b: int,
 ) -> dict[str, object] | None:
     expected = sorted([asset_a, asset_b])
-    for edge in group["match_evidence"]["edges"]:
+    for edge in group["match_evidence"]["strong_edges"]:
         if edge["asset_ids"] == expected:
             return edge
     return None
@@ -156,22 +158,11 @@ def _reference_fingerprint(path: Path) -> dict[str, object]:
         for x in range(8):
             dhash_bits.append(1 if vertical_pixels[y * 8 + x] > vertical_pixels[(y + 1) * 8 + x] else 0)
 
-    thumbnail_pixels = _image_pixels(luminance.resize((16, 16), Image.Resampling.BILINEAR))
-    mean_value = sum(thumbnail_pixels) / len(thumbnail_pixels)
-    centered = [float(value) - mean_value for value in thumbnail_pixels]
-    norm = math.sqrt(sum(value * value for value in centered))
-    luminance_vector = [0.0 for _ in centered] if norm == 0 else [value / norm for value in centered]
-
-    histogram = [0 for _ in range(64)]
-    for red, green, blue in _image_pixels(image):
-        histogram[(red // 64) * 16 + (green // 64) * 4 + (blue // 64)] += 1
-    total_pixels = sum(histogram)
-    color_histogram = [value / total_pixels for value in histogram]
-
     return {
         "dhash_bits": dhash_bits,
-        "luminance_vector": luminance_vector,
-        "color_histogram": color_histogram,
+        "global_phash_bits": _reference_phash_bits(luminance, image_size=32, coefficient_size=8),
+        "center_phash_bits": _reference_phash_bits(_center_luminance(image), image_size=32, coefficient_size=8),
+        "block_phash_bits": _reference_block_phash_bits(image),
     }
 
 
@@ -181,26 +172,96 @@ def _image_pixels(image: Image.Image) -> list[object]:
     return list(image.getdata())
 
 
+def _center_luminance(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    crop_width = max(1, round(width * 0.75))
+    crop_height = max(1, round(height * 0.75))
+    left = (width - crop_width) // 2
+    top = (height - crop_height) // 2
+    return image.crop((left, top, left + crop_width, top + crop_height)).convert("L")
+
+
+def _reference_phash_bits(
+    luminance: Image.Image,
+    *,
+    image_size: int,
+    coefficient_size: int,
+) -> list[int]:
+    resized = luminance.resize((image_size, image_size), Image.Resampling.BILINEAR)
+    pixels = [float(value) for value in _image_pixels(resized)]
+    coefficients: list[float] = []
+    for v in range(coefficient_size):
+        for u in range(coefficient_size):
+            if u == 0 and v == 0:
+                continue
+            coefficients.append(_reference_dct_coefficient(pixels, image_size, u, v))
+    median = sorted(coefficients)[len(coefficients) // 2]
+    return [1 if value > median else 0 for value in coefficients]
+
+
+def _reference_dct_coefficient(
+    pixels: list[float],
+    size: int,
+    u: int,
+    v: int,
+) -> float:
+    alpha_u = math.sqrt(1.0 / size) if u == 0 else math.sqrt(2.0 / size)
+    alpha_v = math.sqrt(1.0 / size) if v == 0 else math.sqrt(2.0 / size)
+    total = 0.0
+    for y in range(size):
+        for x in range(size):
+            total += (
+                pixels[y * size + x]
+                * math.cos(math.pi * (2 * x + 1) * u / (2 * size))
+                * math.cos(math.pi * (2 * y + 1) * v / (2 * size))
+            )
+    return alpha_u * alpha_v * total
+
+
+def _reference_block_phash_bits(image: Image.Image) -> list[list[int]]:
+    width, height = image.size
+    blocks: list[list[int]] = []
+    for row in range(4):
+        for col in range(4):
+            left = math.floor(col * width / 4)
+            right = max(left + 1, math.floor((col + 1) * width / 4))
+            top = math.floor(row * height / 4)
+            bottom = max(top + 1, math.floor((row + 1) * height / 4))
+            block = image.crop((left, top, min(right, width), min(bottom, height))).convert("L")
+            blocks.append(_reference_phash_bits(block, image_size=16, coefficient_size=4))
+    return blocks
+
+
+def _hamming(first: list[int], second: list[int]) -> int:
+    return sum(a != b for a, b in zip(first, second))
+
+
+def _reference_block_match_ratio(first_blocks: list[list[int]], second_blocks: list[list[int]]) -> float:
+    def directional_ratio(source: list[list[int]], target: list[list[int]]) -> float:
+        matched = 0
+        for block in source:
+            if min(_hamming(block, other) for other in target) <= 4:
+                matched += 1
+        return matched / 16.0
+
+    return min(directional_ratio(first_blocks, second_blocks), directional_ratio(second_blocks, first_blocks))
+
+
 def _reference_metrics(path_a: Path, path_b: Path) -> dict[str, float | int]:
     first = _reference_fingerprint(path_a)
     second = _reference_fingerprint(path_b)
-    first_vec = first["luminance_vector"]
-    second_vec = second["luminance_vector"]
-    first_zero = all(value == 0 for value in first_vec)
-    second_zero = all(value == 0 for value in second_vec)
-    if first_zero and second_zero:
-        cosine = 1.0
-    elif first_zero or second_zero:
-        cosine = 0.0
-    else:
-        cosine = sum(a * b for a, b in zip(first_vec, second_vec))
     return {
         "dhash_hamming": sum(
             a != b for a, b in zip(first["dhash_bits"], second["dhash_bits"])
         ),
-        "luminance_cosine": cosine,
-        "color_histogram_intersection": sum(
-            min(a, b) for a, b in zip(first["color_histogram"], second["color_histogram"])
+        "phash_hamming": _hamming(
+            first["global_phash_bits"], second["global_phash_bits"]
+        ),
+        "center_phash_hamming": _hamming(
+            first["center_phash_bits"], second["center_phash_bits"]
+        ),
+        "block_match_ratio": _reference_block_match_ratio(
+            first["block_phash_bits"], second["block_phash_bits"]
         ),
     }
 
@@ -213,59 +274,85 @@ def _assert_edge_matches_reference(
     expected = _reference_metrics(_asset_path(library_db, asset_a), _asset_path(library_db, asset_b))
 
     assert int(edge["dhash_hamming"]) == expected["dhash_hamming"]
-    assert float(edge["luminance_cosine"]) == expected["luminance_cosine"]
-    assert abs(float(edge["color_histogram_intersection"]) - float(expected["color_histogram_intersection"])) <= 1e-6
+    assert int(edge["phash_hamming"]) == expected["phash_hamming"]
+    assert int(edge["center_phash_hamming"]) == expected["center_phash_hamming"]
+    assert abs(float(edge["block_match_ratio"]) - float(expected["block_match_ratio"])) <= 1e-6
 
-    threshold = str(edge["threshold"])
-    if threshold == "strict":
-        assert expected["dhash_hamming"] <= 10
-        assert expected["color_histogram_intersection"] >= 0.88
-    elif threshold == "resave_or_light_edit":
-        assert expected["dhash_hamming"] <= 18
-        assert expected["luminance_cosine"] >= 0.96
-        assert expected["color_histogram_intersection"] >= 0.80
-    elif threshold == "metadata_assisted":
-        legacy_metadata_match = (
-            expected["dhash_hamming"] <= 24
-            and expected["luminance_cosine"] >= 0.94
-            and expected["color_histogram_intersection"] >= 0.72
-        )
-        short_interval_burst_match = (
-            expected["dhash_hamming"] <= 18
-            and expected["luminance_cosine"] >= 0.88
-            and expected["color_histogram_intersection"] >= 0.90
-            and edge["capture_time_delta_seconds"] is not None
-            and float(edge["capture_time_delta_seconds"]) <= 2
-        )
-        same_second_burst_match = (
-            expected["dhash_hamming"] <= 20
-            and expected["luminance_cosine"] >= 0.92
-            and expected["color_histogram_intersection"] >= 0.94
-            and edge["capture_time_delta_seconds"] is not None
-            and float(edge["capture_time_delta_seconds"]) <= 1
-        )
-        assert legacy_metadata_match or short_interval_burst_match or same_second_burst_match
-        assert edge["metadata_assisted"] is True
+    edge_type = str(edge["edge_type"])
+    if edge_type == "exact_duplicate":
+        assert _matches_exact_duplicate_rule(expected)
+        assert float(edge["confidence"]) >= 0.95
+    elif edge_type == "edited_duplicate":
+        assert _matches_edited_duplicate_rule(expected)
+        assert not _matches_exact_duplicate_rule(expected)
+        assert float(edge["confidence"]) >= 0.85
+    elif edge_type == "burst_duplicate":
+        assert edge["capture_time_delta_seconds"] is not None
+        assert _matches_burst_duplicate_rule(expected, float(edge["capture_time_delta_seconds"]))
+        assert float(edge["confidence"]) >= 0.78
     else:
-        raise AssertionError(f"未知 threshold: {threshold}")
+        raise AssertionError(f"未知 edge_type: {edge_type}")
+
+
+def _matches_exact_duplicate_rule(metrics: dict[str, float | int]) -> bool:
+    return (
+        metrics["phash_hamming"] <= 4
+        and metrics["dhash_hamming"] <= 8
+        and metrics["center_phash_hamming"] <= 6
+    ) or (
+        metrics["phash_hamming"] <= 3
+        and metrics["block_match_ratio"] >= 0.875
+    )
+
+
+def _matches_edited_duplicate_rule(metrics: dict[str, float | int]) -> bool:
+    return (
+        metrics["phash_hamming"] <= 12
+        and metrics["center_phash_hamming"] <= 14
+        and metrics["block_match_ratio"] >= 0.50
+    ) or (
+        metrics["center_phash_hamming"] <= 10
+        and metrics["block_match_ratio"] >= 0.50
+        and metrics["dhash_hamming"] <= 32
+    ) or (
+        metrics["block_match_ratio"] >= 0.625
+        and (
+            metrics["phash_hamming"] <= 18
+            or metrics["center_phash_hamming"] <= 18
+        )
+    )
+
+
+def _matches_burst_duplicate_rule(metrics: dict[str, float | int], capture_delta: float) -> bool:
+    if capture_delta <= 10:
+        visual_matches = sum(
+            (
+                metrics["dhash_hamming"] <= 30,
+                metrics["phash_hamming"] <= 28,
+                metrics["center_phash_hamming"] <= 26,
+                metrics["block_match_ratio"] >= 0.3125,
+            )
+        )
+        return visual_matches >= 2
+    if capture_delta <= 60:
+        return (
+            (
+                metrics["phash_hamming"] <= 16
+                or metrics["center_phash_hamming"] <= 14
+                or metrics["block_match_ratio"] >= 0.50
+            )
+            and (
+                metrics["dhash_hamming"] <= 30
+                or metrics["block_match_ratio"] >= 0.50
+            )
+        )
+    return False
 
 
 def _assert_not_same_visual_burst(path_a: Path, path_b: Path) -> None:
     metrics = _reference_metrics(path_a, path_b)
-    assert not (
-        metrics["dhash_hamming"] <= 10
-        and metrics["color_histogram_intersection"] >= 0.88
-    )
-    assert not (
-        metrics["dhash_hamming"] <= 18
-        and metrics["luminance_cosine"] >= 0.96
-        and metrics["color_histogram_intersection"] >= 0.80
-    )
-    assert not (
-        metrics["dhash_hamming"] <= 24
-        and metrics["luminance_cosine"] >= 0.94
-        and metrics["color_histogram_intersection"] >= 0.72
-    )
+    assert not _matches_exact_duplicate_rule(metrics)
+    assert not _matches_edited_duplicate_rule(metrics)
 
 
 def _save_reencoded_variant(
@@ -287,6 +374,128 @@ def _save_reencoded_variant(
         exif[_EXIF_ID_BY_NAME["DateTimeOriginal"]] = "1999:01:02 03:04:05"
         save_kwargs["exif"] = exif
     image.save(target_path, "JPEG", **save_kwargs)
+
+
+def _save_direct_copy(source_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_bytes(source_path.read_bytes())
+
+
+def _save_translated_variant(
+    source_path: Path,
+    target_path: Path,
+    *,
+    dx: int = 0,
+    dy: int = 0,
+) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    image = ImageOps.exif_transpose(Image.open(source_path)).convert("RGB")
+    translated = Image.new("RGB", image.size, (0, 0, 0))
+    translated.paste(image, (dx, dy))
+    translated.save(target_path, "JPEG", quality=92)
+
+
+def _save_center_zoom_variant(
+    source_path: Path,
+    target_path: Path,
+    *,
+    retained_ratio: float,
+) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    image = ImageOps.exif_transpose(Image.open(source_path)).convert("RGB")
+    width, height = image.size
+    left = int(width * (1.0 - retained_ratio) / 2)
+    top = int(height * (1.0 - retained_ratio) / 2)
+    right = int(width * (1.0 + retained_ratio) / 2)
+    bottom = int(height * (1.0 + retained_ratio) / 2)
+    image.crop((left, top, right, bottom)).resize(
+        (width, height),
+        Image.Resampling.BILINEAR,
+    ).save(target_path, "JPEG", quality=92)
+
+
+def _save_cropped_variant(source_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    image = ImageOps.exif_transpose(Image.open(source_path)).convert("RGB")
+    width, height = image.size
+    image.crop((
+        int(width * 0.04),
+        int(height * 0.04),
+        int(width * 0.96),
+        int(height * 0.96),
+    )).resize((width, height), Image.Resampling.BILINEAR).save(target_path, "JPEG", quality=92)
+
+
+def _save_border_variant(source_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    image = ImageOps.exif_transpose(Image.open(source_path)).convert("RGB")
+    width, height = image.size
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    border_width = max(1, int(min(width, height) * 0.20))
+    draw.rectangle((0, 0, width - 1, height - 1), outline=(0, 0, 0), width=border_width)
+    image.save(target_path, "JPEG", quality=92)
+
+
+def _save_obstructed_variant(source_path: Path, target_path: Path) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    image = ImageOps.exif_transpose(Image.open(source_path)).convert("RGB")
+    width, height = image.size
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(
+        (int(width * 0.62), int(height * 0.08), int(width * 0.92), int(height * 0.38)),
+        fill=(20, 20, 20),
+    )
+    image.save(target_path, "JPEG", quality=92)
+
+
+def _save_black_frame_variant(
+    source_path: Path,
+    target_path: Path,
+    *,
+    frame_fraction: float = 0.35,
+) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    image = ImageOps.exif_transpose(Image.open(source_path)).convert("RGB")
+    width, height = image.size
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    border_width = max(1, int(min(width, height) * frame_fraction))
+    draw.rectangle((0, 0, width, border_width), fill=(0, 0, 0))
+    draw.rectangle((0, height - border_width, width, height), fill=(0, 0, 0))
+    draw.rectangle((0, 0, border_width, height), fill=(0, 0, 0))
+    draw.rectangle((width - border_width, 0, width, height), fill=(0, 0, 0))
+    image.save(target_path, "JPEG", quality=92)
+
+
+def _save_exif_time_variant(
+    source_path: Path,
+    target_path: Path,
+    *,
+    date_time_original: str | None = None,
+    date_time_digitized: str | None = None,
+    date_time: str | None = None,
+    mtime: float | None = None,
+) -> None:
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    image = ImageOps.exif_transpose(Image.open(source_path)).convert("RGB")
+    exif = Image.Exif()
+    if date_time_original is not None:
+        exif[_EXIF_ID_BY_NAME["DateTimeOriginal"]] = date_time_original
+    if date_time_digitized is not None:
+        exif[_EXIF_ID_BY_NAME["DateTimeDigitized"]] = date_time_digitized
+    if date_time is not None:
+        exif[_EXIF_ID_BY_NAME["DateTime"]] = date_time
+    save_kwargs: dict[str, object] = {"quality": 92}
+    if len(exif):
+        save_kwargs["exif"] = exif
+    image.save(target_path, "JPEG", **save_kwargs)
+    if mtime is not None:
+        os.utime(target_path, (mtime, mtime))
 
 
 def _assert_no_capture_or_device_exif(path: Path) -> None:
@@ -311,6 +520,25 @@ def _scan_incremental_sources(workspace: Path, source_dirs: list[Path]) -> None:
         timeout=180,
     )
     assert scan_result.returncode == 0, scan_result.stderr
+
+
+def _assert_pair_not_in_any_group(
+    groups: list[dict[str, object]],
+    first_asset_id: int,
+    second_asset_id: int,
+) -> None:
+    assert not any(
+        {first_asset_id, second_asset_id}.issubset(
+            {int(asset["asset_id"]) for asset in group["assets"]}
+        )
+        for group in groups
+    )
+
+
+def _force_file_mtime_pair(first_path: Path, second_path: Path, *, delta_seconds: int) -> None:
+    base_mtime = 1_800_010_000.0
+    os.utime(first_path, (base_mtime, base_mtime))
+    os.utime(second_path, (base_mtime + delta_seconds, base_mtime + delta_seconds))
 
 
 def _post_keep_first_asset_per_group(
@@ -495,8 +723,30 @@ class TestExportTemplateBurstPickApi:
             assert int(persisted_counts[0]) == len(completed["groups"])
             assert int(persisted_counts[1]) == sum(len(group["assets"]) for group in completed["groups"])
             assert int(persisted_counts[2]) == sum(
-                len(group["match_evidence"]["edges"]) for group in completed["groups"]
+                len(group["match_evidence"]["strong_edges"]) for group in completed["groups"]
             )
+            run_version = fetch_all(
+                library_db,
+                "SELECT algorithm_version FROM export_burst_pick_run WHERE id = ?",
+                (run_id,),
+            )[0][0]
+            assert run_version == EXPECTED_BURST_PICK_ALGORITHM
+            second_response = httpx.get(
+                f"{base_url}/api/export-templates/{template_id}/burst-pick",
+                timeout=30.0,
+            )
+            assert second_response.status_code == 200
+            assert second_response.json()["run_id"] == run_id
+            assert fetch_all(
+                library_db,
+                """
+                SELECT COUNT(*)
+                FROM export_burst_pick_run
+                WHERE template_id = ?
+                  AND algorithm_version = ?
+                """,
+                (template_id, EXPECTED_BURST_PICK_ALGORITHM),
+            )[0][0] == 1
         finally:
             terminate_process(process)
 
@@ -543,13 +793,357 @@ class TestExportTemplateBurstPickApi:
                 groups,
                 {original_asset_id, no_exif_asset_id, fake_metadata_asset_id},
             )
-            assert group["match_evidence"]["algorithm"] == "visual_fingerprint_v1"
+            assert group["match_evidence"]["algorithm"] == EXPECTED_BURST_PICK_ALGORITHM
 
             for new_asset_id in (no_exif_asset_id, fake_metadata_asset_id):
                 edge = _find_edge(group, original_asset_id, new_asset_id)
-                assert edge["metadata_assisted"] is False
-                assert edge["threshold"] in {"strict", "resave_or_light_edit"}
+                assert edge["edge_type"] in {"exact_duplicate", "edited_duplicate"}
                 _assert_edge_matches_reference(library_db, edge)
+        finally:
+            terminate_process(process)
+
+    def test_direct_copy_and_reencoded_versions_are_exact_duplicates(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        source_dir = tmp_path / "ac2-exact-source"
+        original_fixture = FIXTURE_DIR / "pg_031_group_alex_blair_01.jpg"
+        direct_copy_path = source_dir / "ac2_direct_copy_9101.jpg"
+        reencoded_path = source_dir / "ac2_reencoded_9102.jpg"
+        _save_direct_copy(original_fixture, direct_copy_path)
+        _save_reencoded_variant(original_fixture, reencoded_path)
+
+        _scan_incremental_sources(workspace, [source_dir])
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+
+            original_asset_id = _asset_id_by_file(library_db, original_fixture.name)
+            direct_copy_asset_id = _asset_id_by_file(library_db, direct_copy_path.name)
+            reencoded_asset_id = _asset_id_by_file(library_db, reencoded_path.name)
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+            group = _find_group_containing(
+                groups,
+                {original_asset_id, direct_copy_asset_id, reencoded_asset_id},
+            )
+
+            for duplicate_asset_id in (direct_copy_asset_id, reencoded_asset_id):
+                edge = _find_edge(group, original_asset_id, duplicate_asset_id)
+                assert edge["edge_type"] == "exact_duplicate"
+                assert float(edge["confidence"]) >= 0.95
+                _assert_edge_matches_reference(library_db, edge)
+        finally:
+            terminate_process(process)
+
+    def test_edited_variants_group_as_edited_duplicates_without_exact_match(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        source_dir = tmp_path / "ac3-edited-source"
+        original_fixture = FIXTURE_DIR / "pg_031_group_alex_blair_01.jpg"
+        brightness_path = source_dir / "ac3_brightness_9201.jpg"
+        crop_path = source_dir / "ac3_crop_9202.jpg"
+        border_path = source_dir / "ac3_border_9203.jpg"
+        obstruction_path = source_dir / "ac3_obstruction_9204.jpg"
+        _save_reencoded_variant(original_fixture, brightness_path, brightness=1.2)
+        _save_cropped_variant(original_fixture, crop_path)
+        _save_border_variant(original_fixture, border_path)
+        _save_obstructed_variant(original_fixture, obstruction_path)
+
+        _scan_incremental_sources(workspace, [source_dir])
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+
+            original_asset_id = _asset_id_by_file(library_db, original_fixture.name)
+            edited_asset_ids = [
+                _asset_id_by_file(library_db, path.name)
+                for path in (brightness_path, crop_path, border_path, obstruction_path)
+            ]
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+            group = _find_group_containing(groups, {original_asset_id, *edited_asset_ids})
+
+            for edited_asset_id in edited_asset_ids:
+                edge = _find_edge(group, original_asset_id, edited_asset_id)
+                metrics = _reference_metrics(
+                    _asset_path(library_db, original_asset_id),
+                    _asset_path(library_db, edited_asset_id),
+                )
+                assert edge["edge_type"] == "edited_duplicate"
+                assert float(edge["confidence"]) >= 0.85
+                assert not _matches_exact_duplicate_rule(metrics)
+                assert _matches_edited_duplicate_rule(metrics)
+                _assert_edge_matches_reference(library_db, edge)
+        finally:
+            terminate_process(process)
+
+    def test_burst_windows_are_split_between_10_and_60_seconds(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        original_fixture = FIXTURE_DIR / "pg_031_group_alex_blair_01.jpg"
+        alternate_fixture = FIXTURE_DIR / "pg_037_group_all_targets_07.jpg"
+        strong_source_dir = tmp_path / "ac4-burst-strong-source"
+        continuous_source_dir = tmp_path / "ac4-burst-continuous-source"
+        strong_base_path = strong_source_dir / "ac4_strong_base_9301.jpg"
+        strong_path = strong_source_dir / "ac4_strong_window_9302.jpg"
+        continuous_base_path = continuous_source_dir / "ac4_continuous_base_9303.jpg"
+        continuous_path = continuous_source_dir / "ac4_continuous_window_9304.jpg"
+        _save_reencoded_variant(alternate_fixture, strong_base_path)
+        _save_black_frame_variant(alternate_fixture, strong_path, frame_fraction=0.30)
+        _save_reencoded_variant(original_fixture, continuous_base_path)
+        _save_center_zoom_variant(original_fixture, continuous_path, retained_ratio=0.75)
+
+        _scan_incremental_sources(
+            workspace,
+            [strong_source_dir, continuous_source_dir],
+        )
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+
+            strong_base_asset_id = _asset_id_by_file(library_db, strong_base_path.name)
+            strong_asset_id = _asset_id_by_file(library_db, strong_path.name)
+            continuous_base_asset_id = _asset_id_by_file(library_db, continuous_base_path.name)
+            continuous_asset_id = _asset_id_by_file(library_db, continuous_path.name)
+            _force_file_mtime_pair(strong_base_path, strong_path, delta_seconds=8)
+            _force_file_mtime_pair(continuous_base_path, continuous_path, delta_seconds=30)
+
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+            strong_group = _find_group_containing(groups, {strong_base_asset_id, strong_asset_id})
+            strong_edge = _find_edge(strong_group, strong_base_asset_id, strong_asset_id)
+            assert strong_edge["edge_type"] == "burst_duplicate"
+            assert float(strong_edge["capture_time_delta_seconds"]) == 8.0
+            _assert_edge_matches_reference(library_db, strong_edge)
+
+            continuous_group = _find_group_containing(groups, {continuous_base_asset_id, continuous_asset_id})
+            continuous_edge = _find_edge(continuous_group, continuous_base_asset_id, continuous_asset_id)
+            assert continuous_edge["edge_type"] == "burst_duplicate"
+            assert float(continuous_edge["capture_time_delta_seconds"]) == 30.0
+            _assert_edge_matches_reference(library_db, continuous_edge)
+        finally:
+            terminate_process(process)
+
+    def test_burst_window_rejects_weak_continuous_and_beyond_window_pairs(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        original_fixture = FIXTURE_DIR / "pg_031_group_alex_blair_01.jpg"
+        alternate_fixture = FIXTURE_DIR / "pg_037_group_all_targets_07.jpg"
+        weak_continuous_source_dir = tmp_path / "ac4-burst-weak-continuous-source"
+        beyond_source_dir = tmp_path / "ac4-burst-beyond-source"
+        weak_continuous_base_path = weak_continuous_source_dir / "ac4_weak_base_9305.jpg"
+        weak_continuous_path = weak_continuous_source_dir / "ac4_weak_continuous_9306.jpg"
+        beyond_base_path = beyond_source_dir / "ac4_beyond_base_9307.jpg"
+        beyond_path = beyond_source_dir / "ac4_beyond_window_9308.jpg"
+        _save_reencoded_variant(original_fixture, weak_continuous_base_path)
+        _save_black_frame_variant(original_fixture, weak_continuous_path, frame_fraction=0.30)
+        _save_reencoded_variant(alternate_fixture, beyond_base_path)
+        _save_black_frame_variant(alternate_fixture, beyond_path, frame_fraction=0.30)
+
+        _scan_incremental_sources(workspace, [weak_continuous_source_dir, beyond_source_dir])
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            weak_continuous_base_asset_id = _asset_id_by_file(library_db, weak_continuous_base_path.name)
+            weak_continuous_asset_id = _asset_id_by_file(library_db, weak_continuous_path.name)
+            beyond_base_asset_id = _asset_id_by_file(library_db, beyond_base_path.name)
+            beyond_asset_id = _asset_id_by_file(library_db, beyond_path.name)
+            _force_file_mtime_pair(weak_continuous_base_path, weak_continuous_path, delta_seconds=30)
+            _force_file_mtime_pair(beyond_base_path, beyond_path, delta_seconds=61)
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+            _assert_pair_not_in_any_group(groups, weak_continuous_base_asset_id, weak_continuous_asset_id)
+            _assert_pair_not_in_any_group(groups, beyond_base_asset_id, beyond_asset_id)
+        finally:
+            terminate_process(process)
+
+    def test_event_time_priority_uses_exif_then_mtime_fallback(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        source_dir = tmp_path / "ac4-event-time-source"
+        original_fixture = FIXTURE_DIR / "pg_031_group_alex_blair_01.jpg"
+        cases = [
+            (
+                "original_priority",
+                {
+                    "date_time_original": "2026:05:24 10:00:00",
+                    "date_time_digitized": "2026:05:24 10:20:00",
+                    "date_time": "2026:05:24 10:30:00",
+                    "mtime": 1_800_000_000.0,
+                },
+                {
+                    "date_time_original": "2026:05:24 10:00:07",
+                    "date_time_digitized": "2026:05:24 10:25:00",
+                    "date_time": "2026:05:24 10:35:00",
+                    "mtime": 1_800_000_300.0,
+                },
+                7.0,
+            ),
+            (
+                "digitized_priority",
+                {"date_time_digitized": "2026:05:24 11:00:00"},
+                {"date_time_digitized": "2026:05:24 11:00:11"},
+                11.0,
+            ),
+            (
+                "datetime_priority",
+                {"date_time": "2026:05:24 12:00:00"},
+                {"date_time": "2026:05:24 12:00:13"},
+                13.0,
+            ),
+            (
+                "mtime_fallback",
+                {"mtime": 1_800_001_000.0},
+                {"mtime": 1_800_001_017.0},
+                17.0,
+            ),
+        ]
+        expected_pairs: list[tuple[Path, Path, float]] = []
+        for index, (case_name, first_kwargs, second_kwargs, expected_delta) in enumerate(cases, start=1):
+            first_path = source_dir / f"ac4_{case_name}_a_{index}.jpg"
+            second_path = source_dir / f"ac4_{case_name}_b_{index}.jpg"
+            _save_exif_time_variant(original_fixture, first_path, **first_kwargs)
+            _save_exif_time_variant(original_fixture, second_path, **second_kwargs)
+            expected_pairs.append((first_path, second_path, expected_delta))
+
+        _scan_incremental_sources(workspace, [source_dir])
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+
+            for first_path, second_path, expected_delta in expected_pairs:
+                first_asset_id = _asset_id_by_file(library_db, first_path.name)
+                second_asset_id = _asset_id_by_file(library_db, second_path.name)
+                group = _find_group_containing(groups, {first_asset_id, second_asset_id})
+                edge = _find_edge(group, first_asset_id, second_asset_id)
+                assert edge["edge_type"] == "exact_duplicate"
+                assert edge["capture_time_delta_seconds"] == expected_delta
+        finally:
+            terminate_process(process)
+
+    def test_weak_chain_variants_do_not_form_large_submit_group(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        source_dir = tmp_path / "ac6-weak-chain-source"
+        original_fixture = FIXTURE_DIR / "pg_031_group_alex_blair_01.jpg"
+        base_path = source_dir / "ac6_chain_base_9401.jpg"
+        weak_a_path = source_dir / "ac6_chain_weak_a_9402.jpg"
+        weak_b_path = source_dir / "ac6_chain_weak_b_9403.jpg"
+        _save_reencoded_variant(original_fixture, base_path)
+        _save_black_frame_variant(original_fixture, weak_a_path, frame_fraction=0.30)
+        _save_translated_variant(original_fixture, weak_b_path, dx=150)
+        chain_start = 1_800_020_000.0
+        os.utime(base_path, (chain_start, chain_start))
+        os.utime(weak_a_path, (chain_start + 30, chain_start + 30))
+        os.utime(weak_b_path, (chain_start + 60, chain_start + 60))
+
+        _scan_incremental_sources(workspace, [source_dir])
+
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            base_asset_id = _asset_id_by_file(library_db, base_path.name)
+            weak_a_asset_id = _asset_id_by_file(library_db, weak_a_path.name)
+            weak_b_asset_id = _asset_id_by_file(library_db, weak_b_path.name)
+
+            groups = _await_burst_pick_completed(base_url, template_id)["groups"]
+
+            assert not any(
+                {base_asset_id, weak_a_asset_id, weak_b_asset_id}.issubset(
+                    {int(asset["asset_id"]) for asset in group["assets"]}
+                )
+                for group in groups
+            )
+            _assert_pair_not_in_any_group(groups, base_asset_id, weak_a_asset_id)
+        finally:
+            terminate_process(process)
+
+    def test_no_cache_new_template_get_triggers_independent_v2_run(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        port = find_free_port()
+        process = spawn_hikbox("serve", "--workspace", str(workspace), "--port", str(port))
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            first_template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            second_template_id = _create_alex_blair_template(base_url, tmp_path / "template-b", target_person_ids)
+
+            first = _await_burst_pick_completed(base_url, first_template_id)
+            second = _await_burst_pick_completed(base_url, second_template_id)
+
+            assert first["status"] == "completed"
+            assert second["status"] == "completed"
+            assert first["run_id"] != second["run_id"]
+            run_rows = fetch_all(
+                library_db,
+                """
+                SELECT template_id, algorithm_version, status
+                FROM export_burst_pick_run
+                WHERE template_id IN (?, ?)
+                ORDER BY template_id
+                """,
+                (first_template_id, second_template_id),
+            )
+            assert {
+                (str(template_id), str(algorithm_version), str(status))
+                for template_id, algorithm_version, status in run_rows
+            } == {
+                (first_template_id, EXPECTED_BURST_PICK_ALGORITHM, "completed"),
+                (second_template_id, EXPECTED_BURST_PICK_ALGORITHM, "completed"),
+            }
+            for group in second["groups"]:
+                assert group["match_evidence"]["algorithm"] == EXPECTED_BURST_PICK_ALGORITHM
+                for edge in group["match_evidence"]["strong_edges"]:
+                    _assert_edge_matches_reference(library_db, edge)
         finally:
             terminate_process(process)
 
@@ -617,7 +1211,7 @@ class TestExportTemplateBurstPickApi:
 
             positive_group = _find_group_containing(groups, {positive_first_id, positive_second_id})
             edge = _find_edge(positive_group, positive_first_id, positive_second_id)
-            assert edge["threshold"] in {"strict", "resave_or_light_edit", "metadata_assisted"}
+            assert edge["edge_type"] in {"exact_duplicate", "edited_duplicate", "burst_duplicate"}
             _assert_edge_matches_reference(library_db, edge)
         finally:
             terminate_process(process)
@@ -659,16 +1253,17 @@ class TestExportTemplateBurstPickApi:
             assert [int(asset["asset_id"]) for asset in group["assets"]] == sorted(
                 int(asset["asset_id"]) for asset in group["assets"]
             )
-            assert group["match_evidence"]["algorithm"] == "visual_fingerprint_v1"
+            assert group["match_evidence"]["algorithm"] == EXPECTED_BURST_PICK_ALGORITHM
 
             edge = _find_edge(group, first_asset_id, second_asset_id)
             assert set(edge) == {
                 "asset_ids",
-                "threshold",
-                "metadata_assisted",
+                "edge_type",
+                "confidence",
+                "phash_hamming",
                 "dhash_hamming",
-                "luminance_cosine",
-                "color_histogram_intersection",
+                "center_phash_hamming",
+                "block_match_ratio",
                 "capture_time_delta_seconds",
                 "normalized_device_match",
             }
@@ -687,7 +1282,7 @@ class TestExportTemplateBurstPickApi:
                         "is_live",
                     }
                     assert str(asset["original_url"]) == f"/images/assets/{asset['asset_id']}/original"
-                edge_pairs = [tuple(edge["asset_ids"]) for edge in group["match_evidence"]["edges"]]
+                edge_pairs = [tuple(edge["asset_ids"]) for edge in group["match_evidence"]["strong_edges"]]
                 assert edge_pairs == sorted(edge_pairs)
         finally:
             terminate_process(process)
@@ -1102,3 +1697,99 @@ class TestExportTemplateBurstPickApi:
             assert fetch_all(library_db, "SELECT COUNT(*) FROM export_plan")[0][0] == plan_count_before
         finally:
             terminate_process(process)
+
+        retry_port = find_free_port()
+        retry_process = spawn_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            str(retry_port),
+        )
+        retry_base_url = f"http://127.0.0.1:{retry_port}"
+        try:
+            wait_for_http_ready(f"{retry_base_url}/")
+            completed = _await_burst_pick_completed(retry_base_url, template_id)
+            assert completed["status"] == "completed"
+            assert int(completed["run_id"]) != run_id
+            assert completed["groups"]
+        finally:
+            terminate_process(retry_process)
+
+    def test_strong_edge_persistence_failure_is_atomic_and_retriable(
+        self,
+        scanned_workspace,
+        tmp_path: Path,
+    ) -> None:
+        workspace, external_root, library_db, manifest, target_person_ids = scanned_workspace
+        port = find_free_port()
+        process = spawn_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            str(port),
+            env_updates={"HIKBOX_TEST_BURST_PICK_FAIL_PERSISTENCE": "1"},
+        )
+        base_url = f"http://127.0.0.1:{port}"
+        template_id: str | None = None
+        try:
+            wait_for_http_ready(f"{base_url}/")
+            _name_required_people(base_url, target_person_ids)
+            template_id = _create_alex_blair_template(base_url, tmp_path, target_person_ids)
+            marker_count_before = fetch_all(library_db, "SELECT COUNT(*) FROM export_abandoned_asset")[0][0]
+            plan_count_before = fetch_all(library_db, "SELECT COUNT(*) FROM export_plan")[0][0]
+
+            first_response = httpx.get(
+                f"{base_url}/api/export-templates/{template_id}/burst-pick",
+                timeout=5.0,
+            )
+
+            assert first_response.status_code == 200
+            failed = _await_burst_pick_failed(base_url, template_id)
+            assert failed["status"] == "failed"
+            assert "evidence" in str(failed["error_message"]) or "保存" in str(failed["error_message"])
+            failed_run_id = int(failed["run_id"])
+            assert fetch_all(
+                library_db,
+                """
+                SELECT COUNT(*)
+                FROM export_burst_pick_group
+                WHERE run_id = ?
+                """,
+                (failed_run_id,),
+            )[0][0] == 0
+            assert fetch_all(
+                library_db,
+                """
+                SELECT COUNT(*)
+                FROM export_burst_pick_group_edge
+                WHERE group_id IN (
+                  SELECT id FROM export_burst_pick_group WHERE run_id = ?
+                )
+                """,
+                (failed_run_id,),
+            )[0][0] == 0
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_abandoned_asset")[0][0] == marker_count_before
+            assert fetch_all(library_db, "SELECT COUNT(*) FROM export_plan")[0][0] == plan_count_before
+        finally:
+            terminate_process(process)
+
+        assert template_id is not None
+        retry_port = find_free_port()
+        retry_process = spawn_hikbox(
+            "serve",
+            "--workspace",
+            str(workspace),
+            "--port",
+            str(retry_port),
+        )
+        retry_base_url = f"http://127.0.0.1:{retry_port}"
+        try:
+            wait_for_http_ready(f"{retry_base_url}/")
+            completed = _await_burst_pick_completed(retry_base_url, template_id)
+            assert completed["status"] == "completed"
+            assert int(completed["run_id"]) != failed_run_id
+            assert completed["groups"]
+        finally:
+            terminate_process(retry_process)

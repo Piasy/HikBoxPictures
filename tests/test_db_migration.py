@@ -10,7 +10,7 @@ import sys
 
 from tests.helpers import REPO_ROOT, run_hikbox
 
-LATEST_LIBRARY_VERSION = 5
+LATEST_LIBRARY_VERSION = 6
 LATEST_EMBEDDING_VERSION = 1  # No embedding_v2.sql yet; embedding stays at v1
 
 
@@ -166,6 +166,28 @@ def _create_v1_workspace(workspace: Path, external_root: Path, source_dir: Path 
         embedding_conn.close()
 
 
+def _apply_library_migrations_through(library_db: Path, target_version: int) -> None:
+    conn = sqlite3.connect(library_db)
+    try:
+        for version in range(2, target_version + 1):
+            sql = (
+                REPO_ROOT
+                / "hikbox_pictures"
+                / "product"
+                / "db"
+                / "sql"
+                / f"library_v{version}.sql"
+            ).read_text(encoding="utf-8")
+            with conn:
+                conn.executescript(sql)
+                conn.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                    (str(version),),
+                )
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # AC-1: New workspace gets latest schema
 # ---------------------------------------------------------------------------
@@ -194,6 +216,15 @@ def test_init_creates_workspace_with_latest_schema_version(tmp_path: Path) -> No
     assert _table_exists(library_db, "export_burst_pick_group_asset")
     assert _table_exists(library_db, "export_burst_pick_group_edge")
     assert "algorithm_version" in _read_table_columns(library_db, "export_burst_pick_run")
+    edge_columns = _read_table_columns(library_db, "export_burst_pick_group_edge")
+    for column_name in (
+        "edge_type",
+        "confidence",
+        "phash_hamming",
+        "center_phash_hamming",
+        "block_match_ratio",
+    ):
+        assert column_name in edge_columns
     assert _index_exists(library_db, "idx_assets_source_id")
     assert "file_fingerprint" not in _read_table_columns(library_db, "assets")
     assert _table_exists(embedding_db, "schema_meta")
@@ -212,6 +243,199 @@ def test_init_schema_version_matches_latest(tmp_path: Path) -> None:
     assert _read_schema_version(library_db) == str(LATEST_LIBRARY_VERSION)
     assert _read_table_sql(library_db, "library_sources") != ""
     assert "file_fingerprint" not in _read_table_columns(library_db, "assets")
+
+
+def test_library_v6_migration_adds_multifeature_burst_pick_edge_columns_and_preserves_old_rows(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    external_root = tmp_path / "external-root"
+    source_dir = tmp_path / "photos"
+    image_path = source_dir / "image.jpg"
+    source_dir.mkdir()
+    image_path.write_bytes(b"fake image bytes")
+
+    second_image_path = source_dir / "image-2.jpg"
+    second_image_path.write_bytes(b"fake image bytes 2")
+
+    _create_v1_workspace(workspace, external_root, source_dir=source_dir)
+    library_db = workspace / ".hikbox" / "library.db"
+    _apply_library_migrations_through(library_db, 5)
+    connection = sqlite3.connect(library_db)
+    try:
+        with connection:
+            source_id = int(connection.execute("SELECT id FROM library_sources").fetchone()[0])
+            first_asset_id = int(connection.execute(
+                """
+                INSERT INTO assets (
+                  source_id,
+                  absolute_path,
+                  file_name,
+                  file_extension,
+                  capture_month,
+                  live_photo_mov_path,
+                  processing_status,
+                  failure_reason,
+                  scan_retry_count,
+                  created_at,
+                  updated_at
+                )
+                VALUES (?, ?, 'image.jpg', 'jpg', '2026-05', NULL, 'succeeded', NULL, 0, '2026-05-05T00:00:00Z', '2026-05-05T00:00:00Z')
+                """,
+                (source_id, str(image_path.resolve())),
+            ).lastrowid)
+            second_asset_id = int(connection.execute(
+                """
+                INSERT INTO assets (
+                  source_id,
+                  absolute_path,
+                  file_name,
+                  file_extension,
+                  capture_month,
+                  live_photo_mov_path,
+                  processing_status,
+                  failure_reason,
+                  scan_retry_count,
+                  created_at,
+                  updated_at
+                )
+                VALUES (?, ?, 'image-2.jpg', 'jpg', '2026-05', NULL, 'succeeded', NULL, 0, '2026-05-05T00:00:00Z', '2026-05-05T00:00:00Z')
+                """,
+                (source_id, str(second_image_path.resolve())),
+            ).lastrowid)
+            connection.execute(
+                """
+                INSERT INTO export_template (template_id, name, output_root, status, created_at, dedup_key)
+                VALUES ('template-old', 'Old Template', ?, 'active', '2026-05-05T00:00:00Z', 'old-key')
+                """,
+                (str((tmp_path / "output").resolve()),),
+            )
+            old_run_id = int(connection.execute(
+                """
+                INSERT INTO export_burst_pick_run (
+                  template_id,
+                  algorithm_version,
+                  status,
+                  started_at,
+                  finished_at,
+                  total_candidate_count,
+                  processed_candidate_count
+                )
+                VALUES ('template-old', 'visual_fingerprint_v1_burst_bridge_v3', 'completed', '2026-05-05T00:00:00Z', '2026-05-05T00:00:01Z', 2, 2)
+                """
+            ).lastrowid)
+            old_group_id = int(connection.execute(
+                """
+                INSERT INTO export_burst_pick_group (run_id, group_key, ordinal)
+                VALUES (?, 'g_1_2', 0)
+                """,
+                (old_run_id,),
+            ).lastrowid)
+            connection.executemany(
+                """
+                INSERT INTO export_burst_pick_group_asset (
+                  group_id, asset_id, position, file_name, bucket, month, context_url, is_live
+                )
+                VALUES (?, ?, ?, ?, 'only', '2026-05', '/ctx', 0)
+                """,
+                [
+                    (old_group_id, first_asset_id, 0, "image.jpg"),
+                    (old_group_id, second_asset_id, 1, "image-2.jpg"),
+                ],
+            )
+            connection.execute(
+                """
+                INSERT INTO export_burst_pick_group_edge (
+                  group_id,
+                  asset_id_first,
+                  asset_id_second,
+                  threshold,
+                  metadata_assisted,
+                  dhash_hamming,
+                  luminance_cosine,
+                  color_histogram_intersection,
+                  capture_time_delta_seconds,
+                  normalized_device_match
+                )
+                VALUES (?, ?, ?, 'strict', 0, 4, 0.99, 0.95, 1.0, 1)
+                """,
+                (old_group_id, first_asset_id, second_asset_id),
+            )
+            first_v2_run_id = int(connection.execute(
+                """
+                INSERT INTO export_burst_pick_run (
+                  template_id, algorithm_version, status, started_at, finished_at
+                )
+                VALUES ('template-old', 'visual_fingerprint_v2_multifeature_recall', 'completed', '2026-05-05T00:01:00Z', '2026-05-05T00:01:01Z')
+                """
+            ).lastrowid)
+            second_v2_run_id = int(connection.execute(
+                """
+                INSERT INTO export_burst_pick_run (
+                  template_id, algorithm_version, status, started_at, finished_at
+                )
+                VALUES ('template-old', 'visual_fingerprint_v2_multifeature_recall', 'completed', '2026-05-05T00:02:00Z', '2026-05-05T00:02:01Z')
+                """
+            ).lastrowid)
+    finally:
+        connection.close()
+
+    result = run_hikbox("source", "list", "--workspace", str(workspace), timeout=60)
+
+    assert result.returncode == 0
+    assert _read_schema_version(library_db) == str(LATEST_LIBRARY_VERSION)
+    edge_columns = _read_table_columns(library_db, "export_burst_pick_group_edge")
+    for column_name in (
+        "threshold",
+        "metadata_assisted",
+        "edge_type",
+        "confidence",
+        "phash_hamming",
+        "center_phash_hamming",
+        "block_match_ratio",
+    ):
+        assert column_name in edge_columns
+    conn = sqlite3.connect(library_db)
+    try:
+        old_edge = conn.execute(
+            """
+            SELECT threshold, metadata_assisted, dhash_hamming,
+                   luminance_cosine, color_histogram_intersection,
+                   edge_type, confidence, phash_hamming,
+                   center_phash_hamming, block_match_ratio
+            FROM export_burst_pick_group_edge
+            WHERE group_id = ?
+            """,
+            (old_group_id,),
+        ).fetchone()
+        run_versions = conn.execute(
+            """
+            SELECT algorithm_version, COUNT(*)
+            FROM export_burst_pick_run
+            WHERE template_id = 'template-old'
+            GROUP BY algorithm_version
+            ORDER BY algorithm_version
+            """
+        ).fetchall()
+        latest_v2_run = conn.execute(
+            """
+            SELECT id
+            FROM export_burst_pick_run
+            WHERE template_id = 'template-old'
+              AND algorithm_version = 'visual_fingerprint_v2_multifeature_recall'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+    assert old_edge == ("strict", 0, 4, 0.99, 0.95, None, None, None, None, None)
+    assert run_versions == [
+        ("visual_fingerprint_v1_burst_bridge_v3", 1),
+        ("visual_fingerprint_v2_multifeature_recall", 2),
+    ]
+    assert latest_v2_run == (second_v2_run_id,)
+    assert first_v2_run_id != second_v2_run_id
 
 
 def test_library_v2_migration_drops_asset_file_fingerprint_and_preserves_rows(tmp_path: Path) -> None:
@@ -608,7 +832,7 @@ def test_migrate_to_latest_skips_when_already_at_latest(tmp_path: Path) -> None:
         conn.executescript(
             """
             CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-            INSERT INTO schema_meta (key, value) VALUES ('schema_version', '5');
+            INSERT INTO schema_meta (key, value) VALUES ('schema_version', '6');
             """
         )
     finally:
@@ -616,7 +840,7 @@ def test_migrate_to_latest_skips_when_already_at_latest(tmp_path: Path) -> None:
 
     # Should not raise, should be a no-op
     migrate_to_latest(db_path=db_path, db_name="library")
-    assert _read_schema_version(db_path) == "5"
+    assert _read_schema_version(db_path) == "6"
 
 
 def test_migrate_to_latest_raises_on_missing_schema_meta(tmp_path: Path) -> None:
@@ -669,6 +893,7 @@ def test_migration_sql_files_match_current_versions() -> None:
     assert (sql_dir / "library_v3.sql").is_file()
     assert (sql_dir / "library_v4.sql").is_file()
     assert (sql_dir / "library_v5.sql").is_file()
+    assert (sql_dir / "library_v6.sql").is_file()
     assert (sql_dir / "embedding_v1.sql").is_file()
-    assert not (sql_dir / "library_v6.sql").exists()
+    assert not (sql_dir / "library_v7.sql").exists()
     assert not (sql_dir / "embedding_v2.sql").exists()

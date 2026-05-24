@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 import math
 import os
@@ -29,7 +31,7 @@ from hikbox_pictures.product.scan_shared import utc_now_text
 from hikbox_pictures.product.sources import WorkspaceContext
 
 
-BURST_PICK_ALGORITHM_VERSION = "visual_fingerprint_v1_burst_bridge_v3"
+BURST_PICK_ALGORITHM_VERSION = "visual_fingerprint_v2_multifeature_recall"
 
 
 class ExportTemplateError(RuntimeError):
@@ -157,11 +159,12 @@ class BurstPickAsset:
 @dataclass(frozen=True)
 class BurstPickEdge:
     asset_ids: tuple[int, int]
-    threshold: str
-    metadata_assisted: bool
+    edge_type: str
+    confidence: float
+    phash_hamming: int
     dhash_hamming: int
-    luminance_cosine: float
-    color_histogram_intersection: float
+    center_phash_hamming: int
+    block_match_ratio: float
     capture_time_delta_seconds: float | None
     normalized_device_match: bool | None
 
@@ -207,10 +210,24 @@ class _BurstCandidateAsset:
 @dataclass(frozen=True)
 class _VisualFingerprint:
     dhash_bits: tuple[int, ...]
-    luminance_vector: tuple[float, ...]
-    color_histogram: tuple[float, ...]
-    capture_time: datetime | None
+    global_phash_bits: tuple[int, ...]
+    center_phash_bits: tuple[int, ...]
+    block_phash_bits: tuple[tuple[int, ...], ...]
+    event_time: datetime | None
     normalized_device: tuple[str, str] | None
+    width: int
+    height: int
+    file_size: int
+
+
+@dataclass(frozen=True)
+class _PairMetrics:
+    dhash_hamming: int
+    phash_hamming: int
+    center_phash_hamming: int
+    block_match_ratio: float
+    capture_time_delta_seconds: float | None
+    normalized_device_match: bool | None
 
 
 @dataclass(frozen=True)
@@ -1033,7 +1050,9 @@ def _ensure_burst_pick_run(
     try:
         _validate_burst_pick_template(connection, template_id=template_id)
         existing_row = _latest_burst_pick_run_row(connection, template_id=template_id)
-        if existing_row is not None:
+        if existing_row is not None and (
+            str(existing_row["status"]) != "failed" or _burst_pick_failure_injection_active()
+        ):
             return int(existing_row["id"])
     except ExportTemplateValidationError:
         raise
@@ -1051,7 +1070,9 @@ def _ensure_burst_pick_run(
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("BEGIN IMMEDIATE")
         existing_row = _latest_burst_pick_run_row(connection, template_id=template_id)
-        if existing_row is not None:
+        if existing_row is not None and (
+            str(existing_row["status"]) != "failed" or _burst_pick_failure_injection_active()
+        ):
             connection.commit()
             return int(existing_row["id"])
         cursor = connection.execute(
@@ -1088,6 +1109,13 @@ def _ensure_burst_pick_run(
     )
     thread.start()
     return run_id
+
+
+def _burst_pick_failure_injection_active() -> bool:
+    return (
+        os.environ.get("HIKBOX_TEST_BURST_PICK_FAIL_FEATURES") == "1"
+        or os.environ.get("HIKBOX_TEST_BURST_PICK_FAIL_PERSISTENCE") == "1"
+    )
 
 
 def _run_burst_pick_task(
@@ -1174,6 +1202,7 @@ def _compute_burst_pick_groups(
 
     groups = _connected_burst_groups(
         display_assets=display_assets,
+        fingerprints=fingerprints,
         edges=edges,
     )
     return groups, skipped_count
@@ -1329,6 +1358,8 @@ def _persist_burst_pick_run_success(
                     ),
                 )
             for edge in group.edges:
+                if os.environ.get("HIKBOX_TEST_BURST_PICK_FAIL_PERSISTENCE") == "1":
+                    raise sqlite3.OperationalError("受控连拍 evidence 写入失败")
                 connection.execute(
                     """
                     INSERT INTO export_burst_pick_group_edge (
@@ -1341,23 +1372,33 @@ def _persist_burst_pick_run_success(
                       luminance_cosine,
                       color_histogram_intersection,
                       capture_time_delta_seconds,
-                      normalized_device_match
+                      normalized_device_match,
+                      edge_type,
+                      confidence,
+                      phash_hamming,
+                      center_phash_hamming,
+                      block_match_ratio
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         group_id,
                         edge.asset_ids[0],
                         edge.asset_ids[1],
-                        edge.threshold,
-                        int(edge.metadata_assisted),
+                        edge.edge_type,
+                        0,
                         edge.dhash_hamming,
-                        edge.luminance_cosine,
-                        edge.color_histogram_intersection,
+                        0.0,
+                        0.0,
                         edge.capture_time_delta_seconds,
                         None
                         if edge.normalized_device_match is None
                         else int(edge.normalized_device_match),
+                        edge.edge_type,
+                        edge.confidence,
+                        edge.phash_hamming,
+                        edge.center_phash_hamming,
+                        edge.block_match_ratio,
                     ),
                 )
         connection.execute(
@@ -1478,10 +1519,15 @@ def _load_burst_pick_run_result(
                       luminance_cosine,
                       color_histogram_intersection,
                       capture_time_delta_seconds,
-                      normalized_device_match
+                      normalized_device_match,
+                      edge_type,
+                      confidence,
+                      phash_hamming,
+                      center_phash_hamming,
+                      block_match_ratio
                     FROM export_burst_pick_group_edge
                     WHERE group_id = ?
-                    ORDER BY asset_id_first ASC, asset_id_second ASC
+                    ORDER BY asset_id_first ASC, asset_id_second ASC, edge_type ASC
                     """,
                     (group_id,),
                 ).fetchall()
@@ -1506,13 +1552,12 @@ def _load_burst_pick_run_result(
                                     int(edge_row["asset_id_first"]),
                                     int(edge_row["asset_id_second"]),
                                 ),
-                                threshold=str(edge_row["threshold"]),
-                                metadata_assisted=bool(edge_row["metadata_assisted"]),
+                                edge_type=str(edge_row["edge_type"]),
+                                confidence=float(edge_row["confidence"]),
+                                phash_hamming=int(edge_row["phash_hamming"]),
                                 dhash_hamming=int(edge_row["dhash_hamming"]),
-                                luminance_cosine=float(edge_row["luminance_cosine"]),
-                                color_histogram_intersection=float(
-                                    edge_row["color_histogram_intersection"]
-                                ),
+                                center_phash_hamming=int(edge_row["center_phash_hamming"]),
+                                block_match_ratio=float(edge_row["block_match_ratio"]),
                                 capture_time_delta_seconds=(
                                     None
                                     if edge_row["capture_time_delta_seconds"] is None
@@ -1830,6 +1875,26 @@ def _compute_visual_fingerprint(path: Path) -> _VisualFingerprint:
         raise ValueError(f"图片无法解码：{path}") from exc
 
     luminance = image.convert("L")
+    width, height = image.size
+
+    return _VisualFingerprint(
+        dhash_bits=_compute_dhash_bits(luminance),
+        global_phash_bits=_compute_phash_bits(luminance, image_size=32, coefficient_size=8),
+        center_phash_bits=_compute_phash_bits(
+            _center_luminance(image),
+            image_size=32,
+            coefficient_size=8,
+        ),
+        block_phash_bits=_compute_block_phash_bits(image),
+        event_time=_extract_event_time(path, exif),
+        normalized_device=_extract_normalized_device(exif),
+        width=width,
+        height=height,
+        file_size=path.stat().st_size,
+    )
+
+
+def _compute_dhash_bits(luminance: Image.Image) -> tuple[int, ...]:
     horizontal = luminance.resize((9, 8), Image.Resampling.BILINEAR)
     horizontal_pixels = list(horizontal.getdata())
     dhash_bits: list[int] = []
@@ -1843,29 +1908,77 @@ def _compute_visual_fingerprint(path: Path) -> _VisualFingerprint:
     for y in range(8):
         for x in range(8):
             dhash_bits.append(1 if vertical_pixels[y * 8 + x] > vertical_pixels[(y + 1) * 8 + x] else 0)
+    return tuple(dhash_bits)
 
-    thumbnail_pixels = list(luminance.resize((16, 16), Image.Resampling.BILINEAR).getdata())
-    mean_value = sum(thumbnail_pixels) / len(thumbnail_pixels)
-    centered = [float(value) - mean_value for value in thumbnail_pixels]
-    norm = math.sqrt(sum(value * value for value in centered))
-    luminance_vector = tuple(0.0 for _ in centered) if norm == 0 else tuple(value / norm for value in centered)
 
-    histogram = [0 for _ in range(64)]
-    for red, green, blue in image.getdata():
-        histogram[(red // 64) * 16 + (green // 64) * 4 + (blue // 64)] += 1
-    total_pixels = sum(histogram)
-    color_histogram = tuple(value / total_pixels for value in histogram)
+def _center_luminance(image: Image.Image) -> Image.Image:
+    width, height = image.size
+    crop_width = max(1, round(width * 0.75))
+    crop_height = max(1, round(height * 0.75))
+    left = (width - crop_width) // 2
+    top = (height - crop_height) // 2
+    return image.crop((left, top, left + crop_width, top + crop_height)).convert("L")
 
-    return _VisualFingerprint(
-        dhash_bits=tuple(dhash_bits),
-        luminance_vector=luminance_vector,
-        color_histogram=color_histogram,
-        capture_time=_extract_capture_time(exif),
-        normalized_device=_extract_normalized_device(exif),
+
+def _compute_block_phash_bits(image: Image.Image) -> tuple[tuple[int, ...], ...]:
+    width, height = image.size
+    blocks: list[tuple[int, ...]] = []
+    for row in range(4):
+        for col in range(4):
+            left = math.floor(col * width / 4)
+            right = max(left + 1, math.floor((col + 1) * width / 4))
+            top = math.floor(row * height / 4)
+            bottom = max(top + 1, math.floor((row + 1) * height / 4))
+            block = image.crop((left, top, min(right, width), min(bottom, height))).convert("L")
+            blocks.append(_compute_phash_bits(block, image_size=16, coefficient_size=4))
+    return tuple(blocks)
+
+
+def _compute_phash_bits(
+    luminance: Image.Image,
+    *,
+    image_size: int,
+    coefficient_size: int,
+) -> tuple[int, ...]:
+    resized = luminance.resize((image_size, image_size), Image.Resampling.BILINEAR)
+    pixels = tuple(float(value) for value in resized.getdata())
+    coefficients: list[float] = []
+    for v in range(coefficient_size):
+        for u in range(coefficient_size):
+            if u == 0 and v == 0:
+                continue
+            coefficients.append(_dct_coefficient(pixels, image_size, u, v))
+    median = sorted(coefficients)[len(coefficients) // 2]
+    return tuple(1 if value > median else 0 for value in coefficients)
+
+
+@lru_cache(maxsize=None)
+def _dct_cosines(size: int) -> tuple[tuple[float, ...], ...]:
+    return tuple(
+        tuple(math.cos(math.pi * (2 * x + 1) * frequency / (2 * size)) for x in range(size))
+        for frequency in range(size)
     )
 
 
-def _extract_capture_time(exif: object) -> datetime | None:
+def _dct_coefficient(
+    pixels: tuple[float, ...],
+    size: int,
+    u: int,
+    v: int,
+) -> float:
+    alpha_u = math.sqrt(1.0 / size) if u == 0 else math.sqrt(2.0 / size)
+    alpha_v = math.sqrt(1.0 / size) if v == 0 else math.sqrt(2.0 / size)
+    cosines = _dct_cosines(size)
+    total = 0.0
+    for y in range(size):
+        row_offset = y * size
+        cos_y = cosines[v][y]
+        for x in range(size):
+            total += pixels[row_offset + x] * cosines[u][x] * cos_y
+    return alpha_u * alpha_v * total
+
+
+def _extract_event_time(path: Path, exif: object) -> datetime:
     for tag_name in ("DateTimeOriginal", "DateTimeDigitized", "DateTime"):
         tag_id = _EXIF_NAME_BY_ID.get(tag_name)
         if tag_id is None:
@@ -1879,7 +1992,7 @@ def _extract_capture_time(exif: object) -> datetime | None:
                 return datetime.strptime(text, fmt)
             except ValueError:
                 pass
-    return None
+    return datetime.utcfromtimestamp(path.stat().st_mtime)
 
 
 def _extract_normalized_device(exif: object) -> tuple[str, str] | None:
@@ -1904,86 +2017,228 @@ def _build_visual_edge(
     second_id: int,
     second: _VisualFingerprint,
 ) -> BurstPickEdge | None:
-    dhash_hamming = sum(a != b for a, b in zip(first.dhash_bits, second.dhash_bits))
-    luminance_cosine = _luminance_cosine(first.luminance_vector, second.luminance_vector)
-    color_intersection = sum(min(a, b) for a, b in zip(first.color_histogram, second.color_histogram))
+    metrics = _pair_metrics(first, second)
+    classification = _classify_pair(metrics)
+    if classification is None:
+        return None
+    asset_ids = tuple(sorted((first_id, second_id)))
+    return BurstPickEdge(
+        asset_ids=(int(asset_ids[0]), int(asset_ids[1])),
+        edge_type=classification[0],
+        confidence=classification[1],
+        phash_hamming=metrics.phash_hamming,
+        dhash_hamming=metrics.dhash_hamming,
+        center_phash_hamming=metrics.center_phash_hamming,
+        block_match_ratio=metrics.block_match_ratio,
+        capture_time_delta_seconds=metrics.capture_time_delta_seconds,
+        normalized_device_match=metrics.normalized_device_match,
+    )
 
+
+def _pair_metrics(first: _VisualFingerprint, second: _VisualFingerprint) -> _PairMetrics:
     capture_delta: float | None = None
-    if first.capture_time is not None and second.capture_time is not None:
-        capture_delta = abs((first.capture_time - second.capture_time).total_seconds())
+    if first.event_time is not None and second.event_time is not None:
+        capture_delta = abs((first.event_time - second.event_time).total_seconds())
 
     normalized_device_match: bool | None = None
     if first.normalized_device is not None and second.normalized_device is not None:
         normalized_device_match = first.normalized_device == second.normalized_device
 
-    threshold_name: str | None = None
-    metadata_assisted = False
-    if dhash_hamming <= 10 and color_intersection >= 0.88:
-        threshold_name = "strict"
-    elif dhash_hamming <= 18 and luminance_cosine >= 0.96 and color_intersection >= 0.80:
-        threshold_name = "resave_or_light_edit"
-    elif (
-        normalized_device_match is True
-        and capture_delta is not None
-        and capture_delta <= 10
-        and dhash_hamming <= 24
-        and luminance_cosine >= 0.94
-        and color_intersection >= 0.72
-    ):
-        threshold_name = "metadata_assisted"
-        metadata_assisted = True
-    elif (
-        normalized_device_match is True
-        and capture_delta is not None
-        and capture_delta <= 2
-        and dhash_hamming <= 18
-        and luminance_cosine >= 0.88
-        and color_intersection >= 0.90
-    ):
-        threshold_name = "metadata_assisted"
-        metadata_assisted = True
-    elif (
-        normalized_device_match is True
-        and capture_delta is not None
-        and capture_delta <= 1
-        and dhash_hamming <= 20
-        and luminance_cosine >= 0.92
-        and color_intersection >= 0.94
-    ):
-        threshold_name = "metadata_assisted"
-        metadata_assisted = True
-
-    if threshold_name is None:
-        return None
-    asset_ids = tuple(sorted((first_id, second_id)))
-    return BurstPickEdge(
-        asset_ids=(int(asset_ids[0]), int(asset_ids[1])),
-        threshold=threshold_name,
-        metadata_assisted=metadata_assisted,
-        dhash_hamming=int(dhash_hamming),
-        luminance_cosine=float(luminance_cosine),
-        color_histogram_intersection=float(color_intersection),
+    return _PairMetrics(
+        dhash_hamming=_hamming(first.dhash_bits, second.dhash_bits),
+        phash_hamming=_hamming(first.global_phash_bits, second.global_phash_bits),
+        center_phash_hamming=_hamming(first.center_phash_bits, second.center_phash_bits),
+        block_match_ratio=_block_match_ratio(first.block_phash_bits, second.block_phash_bits),
         capture_time_delta_seconds=capture_delta,
         normalized_device_match=normalized_device_match,
     )
 
 
-def _luminance_cosine(first: tuple[float, ...], second: tuple[float, ...]) -> float:
-    first_zero = all(value == 0 for value in first)
-    second_zero = all(value == 0 for value in second)
-    if first_zero and second_zero:
-        return 1.0
-    if first_zero or second_zero:
-        return 0.0
-    return sum(a * b for a, b in zip(first, second))
+def _hamming(first: tuple[int, ...], second: tuple[int, ...]) -> int:
+    return sum(a != b for a, b in zip(first, second))
+
+
+def _block_match_ratio(
+    first_blocks: tuple[tuple[int, ...], ...],
+    second_blocks: tuple[tuple[int, ...], ...],
+) -> float:
+    def directional_ratio(
+        source: tuple[tuple[int, ...], ...],
+        target: tuple[tuple[int, ...], ...],
+    ) -> float:
+        matched = 0
+        for block in source:
+            if min(_hamming(block, other) for other in target) <= 4:
+                matched += 1
+        return matched / 16.0
+
+    return min(directional_ratio(first_blocks, second_blocks), directional_ratio(second_blocks, first_blocks))
+
+
+def _classify_pair(metrics: _PairMetrics) -> tuple[str, float] | None:
+    if _matches_exact_duplicate(metrics):
+        return ("exact_duplicate", _confidence_exact(metrics))
+    if _matches_edited_duplicate(metrics):
+        return ("edited_duplicate", _confidence_edited(metrics))
+    if _matches_burst_duplicate(metrics):
+        return ("burst_duplicate", _confidence_burst(metrics))
+    return None
+
+
+def _matches_exact_duplicate(metrics: _PairMetrics) -> bool:
+    return (
+        metrics.phash_hamming <= 4
+        and metrics.dhash_hamming <= 8
+        and metrics.center_phash_hamming <= 6
+    ) or (
+        metrics.phash_hamming <= 3
+        and metrics.block_match_ratio >= 0.875
+    )
+
+
+def _matches_edited_duplicate(metrics: _PairMetrics) -> bool:
+    return (
+        metrics.phash_hamming <= 12
+        and metrics.center_phash_hamming <= 14
+        and metrics.block_match_ratio >= 0.50
+    ) or (
+        metrics.center_phash_hamming <= 10
+        and metrics.block_match_ratio >= 0.50
+        and metrics.dhash_hamming <= 32
+    ) or (
+        metrics.block_match_ratio >= 0.625
+        and (
+            metrics.phash_hamming <= 18
+            or metrics.center_phash_hamming <= 18
+        )
+    )
+
+
+def _matches_burst_duplicate(metrics: _PairMetrics) -> bool:
+    delta = metrics.capture_time_delta_seconds
+    if delta is None:
+        return False
+    if delta <= 10:
+        visual_matches = sum(
+            (
+                metrics.dhash_hamming <= 30,
+                metrics.phash_hamming <= 28,
+                metrics.center_phash_hamming <= 26,
+                metrics.block_match_ratio >= 0.3125,
+            )
+        )
+        return visual_matches >= 2
+    if delta <= 60:
+        strong_visual = (
+            metrics.phash_hamming <= 16
+            or metrics.center_phash_hamming <= 14
+            or metrics.block_match_ratio >= 0.50
+        )
+        auxiliary_visual = metrics.dhash_hamming <= 30 or metrics.block_match_ratio >= 0.50
+        return strong_visual and auxiliary_visual
+    return False
+
+
+def _confidence_exact(metrics: _PairMetrics) -> float:
+    penalty = (
+        metrics.phash_hamming / 63.0 * 0.02
+        + metrics.dhash_hamming / 128.0 * 0.02
+        + metrics.center_phash_hamming / 63.0 * 0.01
+    )
+    return max(0.95, min(1.0, 0.99 - penalty + metrics.block_match_ratio * 0.01))
+
+
+def _confidence_edited(metrics: _PairMetrics) -> float:
+    visual_bonus = min(0.08, metrics.block_match_ratio * 0.08)
+    hamming_penalty = min(0.04, (metrics.phash_hamming + metrics.center_phash_hamming) / 126.0 * 0.04)
+    return max(0.85, min(0.94, 0.86 + visual_bonus - hamming_penalty))
+
+
+def _confidence_burst(metrics: _PairMetrics) -> float:
+    delta = metrics.capture_time_delta_seconds
+    if delta is not None and delta > 10:
+        base = 0.82
+    else:
+        base = 0.78
+    visual_matches = sum(
+        (
+            metrics.dhash_hamming <= 30,
+            metrics.phash_hamming <= 28,
+            metrics.center_phash_hamming <= 26,
+            metrics.block_match_ratio >= 0.3125,
+        )
+    )
+    device_bonus = 0.03 if metrics.normalized_device_match is True else 0.0
+    return max(base, min(0.94, base + visual_matches * 0.025 + device_bonus))
 
 
 def _connected_burst_groups(
     *,
     display_assets: dict[int, BurstPickAsset],
+    fingerprints: dict[int, _VisualFingerprint],
     edges: list[BurstPickEdge],
 ) -> list[BurstPickGroup]:
-    parent = {asset_id: asset_id for asset_id in display_assets}
+    validated_components = _validated_strong_components(
+        asset_ids=sorted(display_assets),
+        edges=edges,
+        fingerprints=fingerprints,
+    )
+
+    groups: list[BurstPickGroup] = []
+    for asset_ids, component_edges in validated_components:
+        if len(asset_ids) < 2:
+            continue
+        sorted_asset_ids = sorted(asset_ids)
+        group_edges = sorted(
+            component_edges,
+            key=lambda edge: (edge.asset_ids[0], edge.asset_ids[1], edge.edge_type),
+        )
+        groups.append(
+            BurstPickGroup(
+                group_key="g_" + "_".join(str(asset_id) for asset_id in sorted_asset_ids),
+                assets=[display_assets[asset_id] for asset_id in sorted_asset_ids],
+                edges=group_edges,
+            )
+        )
+    return sorted(groups, key=lambda group: group.assets[0].asset_id)
+
+
+def _validated_strong_components(
+    *,
+    asset_ids: list[int],
+    edges: list[BurstPickEdge],
+    fingerprints: dict[int, _VisualFingerprint],
+) -> list[tuple[list[int], list[BurstPickEdge]]]:
+    components = _edge_components(asset_ids=asset_ids, edges=edges)
+    validated: list[tuple[list[int], list[BurstPickEdge]]] = []
+    for component_asset_ids, component_edges in components:
+        if len(component_asset_ids) < 2:
+            continue
+        if _component_is_valid(component_asset_ids, component_edges, fingerprints):
+            validated.append((component_asset_ids, component_edges))
+            continue
+        if len(component_edges) <= 1:
+            continue
+        pruned_edges = sorted(
+            component_edges,
+            key=lambda edge: (edge.confidence, edge.asset_ids[0], edge.asset_ids[1], edge.edge_type),
+        )[1:]
+        validated.extend(
+            _validated_strong_components(
+                asset_ids=component_asset_ids,
+                edges=pruned_edges,
+                fingerprints=fingerprints,
+            )
+        )
+    return validated
+
+
+def _edge_components(
+    *,
+    asset_ids: list[int],
+    edges: list[BurstPickEdge],
+) -> list[tuple[list[int], list[BurstPickEdge]]]:
+    parent = {asset_id: asset_id for asset_id in asset_ids}
 
     def find(asset_id: int) -> int:
         while parent[asset_id] != asset_id:
@@ -2001,30 +2256,104 @@ def _connected_burst_groups(
         union(edge.asset_ids[0], edge.asset_ids[1])
 
     component_assets: dict[int, list[int]] = defaultdict(list)
-    for asset_id in sorted(display_assets):
+    for asset_id in asset_ids:
         component_assets[find(asset_id)].append(asset_id)
 
     edges_by_component: dict[int, list[BurstPickEdge]] = defaultdict(list)
     for edge in edges:
         edges_by_component[find(edge.asset_ids[0])].append(edge)
 
-    groups: list[BurstPickGroup] = []
-    for asset_ids in component_assets.values():
-        if len(asset_ids) < 2:
+    return [
+        (sorted(component_ids), edges_by_component[root])
+        for root, component_ids in sorted(component_assets.items())
+        if len(component_ids) >= 2
+    ]
+
+
+def _component_is_valid(
+    asset_ids: list[int],
+    edges: list[BurstPickEdge],
+    fingerprints: dict[int, _VisualFingerprint],
+) -> bool:
+    if len(asset_ids) < 2 or not edges:
+        return False
+    possible_edges = len(asset_ids) * (len(asset_ids) - 1) / 2
+    density = len(edges) / possible_edges
+    if density < (0.40 if len(asset_ids) <= 5 else 0.25):
+        return False
+
+    main_type = _component_main_edge_type(edges)
+    medoid = _component_medoid(asset_ids, edges)
+    direct_edge_pairs = {edge.asset_ids for edge in edges}
+    for asset_id in asset_ids:
+        if asset_id == medoid:
             continue
-        sorted_asset_ids = sorted(asset_ids)
-        group_edges = sorted(
-            edges_by_component[find(sorted_asset_ids[0])],
-            key=lambda edge: (edge.asset_ids[0], edge.asset_ids[1]),
-        )
-        groups.append(
-            BurstPickGroup(
-                group_key="g_" + "_".join(str(asset_id) for asset_id in sorted_asset_ids),
-                assets=[display_assets[asset_id] for asset_id in sorted_asset_ids],
-                edges=group_edges,
-            )
-        )
-    return sorted(groups, key=lambda group: group.assets[0].asset_id)
+        metrics = _pair_metrics(fingerprints[medoid], fingerprints[asset_id])
+        if main_type in {"exact_duplicate", "edited_duplicate"}:
+            if tuple(sorted((medoid, asset_id))) not in direct_edge_pairs:
+                return False
+            if not (
+                metrics.phash_hamming <= 18
+                or metrics.center_phash_hamming <= 18
+                or metrics.block_match_ratio >= 0.50
+            ):
+                return False
+        else:
+            if not (
+                metrics.phash_hamming <= 32
+                or metrics.center_phash_hamming <= 30
+                or metrics.block_match_ratio >= 0.25
+            ):
+                return False
+            if (
+                metrics.capture_time_delta_seconds is not None
+                and metrics.capture_time_delta_seconds > 300
+            ):
+                return False
+
+    edge_type_counts = Counter(edge.edge_type for edge in edges)
+    if edge_type_counts["burst_duplicate"] >= max(
+        edge_type_counts["exact_duplicate"],
+        edge_type_counts["edited_duplicate"],
+    ):
+        event_times = [
+            fingerprints[asset_id].event_time
+            for asset_id in asset_ids
+            if fingerprints[asset_id].event_time is not None
+        ]
+        if event_times and (max(event_times) - min(event_times)).total_seconds() > 300:
+            return False
+    return True
+
+
+def _component_main_edge_type(edges: list[BurstPickEdge]) -> str:
+    counts = Counter(edge.edge_type for edge in edges)
+    return sorted(
+        counts,
+        key=lambda edge_type: (
+            -counts[edge_type],
+            {"exact_duplicate": 0, "edited_duplicate": 1, "burst_duplicate": 2}.get(edge_type, 99),
+        ),
+    )[0]
+
+
+def _component_medoid(asset_ids: list[int], edges: list[BurstPickEdge]) -> int:
+    direct_edge_count = Counter()
+    confidence_sum = defaultdict(float)
+    for edge in edges:
+        first_id, second_id = edge.asset_ids
+        direct_edge_count[first_id] += 1
+        direct_edge_count[second_id] += 1
+        confidence_sum[first_id] += edge.confidence
+        confidence_sum[second_id] += edge.confidence
+    return sorted(
+        asset_ids,
+        key=lambda asset_id: (
+            -direct_edge_count[asset_id],
+            -confidence_sum[asset_id],
+            asset_id,
+        ),
+    )[0]
 
 
 _export_log = logging.getLogger("hikbox_pictures.export")

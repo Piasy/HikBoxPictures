@@ -16,7 +16,7 @@
 
 ## Feature Slice 1: 多特征规则分组提高召回
 
-- [ ] Implementation status: Not done
+- [x] Implementation status: Done
 
 ### Behavior
 

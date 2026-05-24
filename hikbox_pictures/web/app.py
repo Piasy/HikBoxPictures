@@ -19,6 +19,7 @@ from hikbox_pictures.product.export_templates import create_export_template
 from hikbox_pictures.product.export_templates import delete_export_template
 from hikbox_pictures.product.export_templates import execute_export
 from hikbox_pictures.product.export_templates import execute_export_async
+from hikbox_pictures.product.export_templates import BURST_PICK_ALGORITHM_VERSION
 from hikbox_pictures.product.export_templates import ExportTemplateError
 from hikbox_pictures.product.export_templates import ExportTemplateValidationError
 from hikbox_pictures.product.export_templates import load_asset_original_path
@@ -1072,15 +1073,16 @@ def _serialize_burst_pick(template_id: str, burst_pick: object) -> dict[str, obj
                     for asset in group.assets
                 ],
                 "match_evidence": {
-                    "algorithm": "visual_fingerprint_v1",
-                    "edges": [
+                    "algorithm": BURST_PICK_ALGORITHM_VERSION,
+                    "strong_edges": [
                         {
                             "asset_ids": list(edge.asset_ids),
-                            "threshold": edge.threshold,
-                            "metadata_assisted": edge.metadata_assisted,
+                            "edge_type": edge.edge_type,
+                            "confidence": edge.confidence,
+                            "phash_hamming": edge.phash_hamming,
                             "dhash_hamming": edge.dhash_hamming,
-                            "luminance_cosine": edge.luminance_cosine,
-                            "color_histogram_intersection": edge.color_histogram_intersection,
+                            "center_phash_hamming": edge.center_phash_hamming,
+                            "block_match_ratio": edge.block_match_ratio,
                             "capture_time_delta_seconds": edge.capture_time_delta_seconds,
                             "normalized_device_match": edge.normalized_device_match,
                         }
